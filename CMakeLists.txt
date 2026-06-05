@@ -7,14 +7,17 @@ add_executable(NexoraDB main.cpp)
 
 find_package(fmt CONFIG REQUIRED)
 find_package(RocksDB CONFIG REQUIRED)
+find_package(Snappy CONFIG QUIET)
+find_package(zstd   CONFIG QUIET)
+
 
 add_subdirectory(core)
 add_subdirectory(query)
 add_subdirectory(utils)
 
+target_link_libraries(nexora_core PUBLIC nexora_query)
+
 target_link_libraries(NexoraDB PRIVATE
-        core_lib
-        query_lib
         utils_lib
         fmt::fmt
         RocksDB::rocksdb
