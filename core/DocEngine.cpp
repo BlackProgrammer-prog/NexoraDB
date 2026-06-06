@@ -291,7 +291,10 @@ namespace nexora {
 // ══════════════════════════════════════════════════════════════
 
         DocEngine::DocEngine(const std::string& db_path)
-                : db_path_(db_path) {
+                : db_path_(db_path),
+                  txn_db_(nullptr, [](rocksdb::TransactionDB* db) {
+                      if (db) { db->SyncWAL(); delete db; }
+                  }) {
 
             db_options_.create_if_missing              = true;
             db_options_.create_missing_column_families = true;
@@ -313,9 +316,7 @@ namespace nexora {
                                          db_path_ + "': " + s.ToString());
             }
 
-            txn_db_.reset(raw_db, [](rocksdb::TransactionDB* db) {
-                if (db) { db->SyncWAL(); delete db; }
-            });
+            txn_db_.reset(raw_db);
 
             NX_LOG("DocEngine opened at: " << db_path_);
         }

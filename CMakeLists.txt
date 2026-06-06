@@ -18,6 +18,7 @@ add_subdirectory(utils)
 target_link_libraries(nexora_core PUBLIC nexora_query)
 
 target_link_libraries(NexoraDB PRIVATE
+        nexora_core
         utils_lib
         fmt::fmt
         RocksDB::rocksdb
