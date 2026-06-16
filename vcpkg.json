@@ -1,8 +1,16 @@
 {
   "name": "nexoradb",
   "version": "1.0.0",
+  "description": "NexoraDB - Document + Graph Database Engine",
   "dependencies": [
-    "fmt",
-    "rocksdb"
-  ]
+    {
+      "name": "rocksdb",
+      "features": ["snappy", "zstd", "lz4"]
+    },
+    {
+      "name": "fmt"
+    }
+  ],
+  "builtin-baseline": "7476f0d4e77d3333fbb249657df8251c28c4faae",
+  "overrides": []
 }
