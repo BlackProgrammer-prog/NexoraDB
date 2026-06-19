@@ -1,3 +1,5 @@
 /cmake-build-debug
 /vcpkg
 /.idea
+frontend/frontend@0.0.0
+frontend/vite
