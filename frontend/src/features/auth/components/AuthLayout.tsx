@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import heroImage from '../../../assets/hero.png'
 
 interface AuthLayoutProps {
   children: ReactNode
@@ -15,7 +16,7 @@ export function AuthLayout({ children, eyebrow, subtitle, title }: AuthLayoutPro
           <img
             alt="Modern database workspace"
             className="absolute inset-0 h-full w-full object-cover opacity-70"
-            src="/src/assets/hero.png"
+            src={heroImage}
           />
           <div className="absolute inset-0 bg-[linear-gradient(120deg,rgba(2,6,23,0.92),rgba(15,23,42,0.5),rgba(22,101,52,0.52))]" />
           <div className="relative flex h-full flex-col justify-between p-12">

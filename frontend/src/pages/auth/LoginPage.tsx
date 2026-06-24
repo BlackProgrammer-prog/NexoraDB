@@ -1,10 +1,12 @@
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { AuthField } from '../../features/auth/components/AuthField'
 import { AuthLayout } from '../../features/auth/components/AuthLayout'
 import { AuthPanel } from '../../features/auth/components/AuthPanel'
 import { Button } from '../../shared/components/ui/Button'
 
 export function LoginPage() {
+  const navigate = useNavigate()
+
   return (
     <AuthLayout
       eyebrow="Welcome back"
@@ -12,7 +14,13 @@ export function LoginPage() {
       title="Sign in to your account"
     >
       <AuthPanel>
-        <form className="space-y-5">
+        <form
+          className="space-y-5"
+          onSubmit={(event) => {
+            event.preventDefault()
+            navigate('/dashboard')
+          }}
+        >
           <AuthField
             autoComplete="username"
             id="username"
