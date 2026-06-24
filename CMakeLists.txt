@@ -87,9 +87,13 @@ endif()
 # §7  Python binding module  (nexoradb.so)
 # ─────────────────────────────────────────────────────────────
 if(NEXORA_BUILD_PYTHON)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    # Use pybind11's new FindPython mode so Debug C++ builds still target the
+    # ABI of the selected Python interpreter, not a Python debug ABI.
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+    unset(PYTHON_IS_DEBUG CACHE)
     find_package(pybind11 CONFIG REQUIRED)
-    message(STATUS "Python3  : ${Python3_VERSION}")
+    message(STATUS "Python   : ${Python_VERSION}")
     message(STATUS "pybind11 : ${pybind11_VERSION}")
 
     pybind11_add_module(nexoradb_py
@@ -100,7 +104,19 @@ if(NEXORA_BUILD_PYTHON)
     set_target_properties(nexoradb_py PROPERTIES
             OUTPUT_NAME "nexoradb"
             PREFIX      ""
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
+
+    add_custom_command(TARGET nexoradb_py POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:nexoradb_py>
+                    "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:nexoradb_py>"
+            COMMENT "Copying nexoradb Python module next to build-tree tests"
+    )
+
+    if(NOT MSVC AND NOT PYTHON_IS_DEBUG)
+        target_compile_options(nexoradb_py PRIVATE -UPy_DEBUG)
+    endif()
 
     target_include_directories(nexoradb_py PRIVATE
             ${CMAKE_SOURCE_DIR}   # برای "core/DocEngine.h", "graph/GraphManager.h"
@@ -136,6 +152,10 @@ if(NEXORA_BUILD_GRAPH)
     target_compile_definitions(NexoraDB PRIVATE NEXORA_BUILD_GRAPH)
 else()
     target_link_libraries(NexoraDB PRIVATE nexora_core fmt::fmt)
+endif()
+
+if(NEXORA_BUILD_PYTHON)
+    add_dependencies(NexoraDB nexoradb_py)
 endif()
 
 # ─────────────────────────────────────────────────────────────
