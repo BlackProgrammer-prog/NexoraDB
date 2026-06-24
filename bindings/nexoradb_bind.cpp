@@ -32,6 +32,7 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/stl_bind.h>
 #include <pybind11/functional.h>
 
 // ── DocEngine ──
@@ -55,6 +56,11 @@ using namespace nexora::query;
 using namespace nexora::graph;
 #endif
 
+#ifdef NEXORA_BUILD_GRAPH
+PYBIND11_MAKE_OPAQUE(std::vector<nexora::graph::NodeMappingDef>);
+PYBIND11_MAKE_OPAQUE(std::vector<nexora::graph::EdgeMappingDef>);
+#endif
+
 // ══════════════════════════════════════════════════════════════
 // §0  Helper — تبدیل DBResult به Python dict
 // ══════════════════════════════════════════════════════════════
@@ -73,6 +79,16 @@ static py::dict result_to_dict(const DBResult& r) {
 
 PYBIND11_MODULE(nexoradb, m) {
     m.doc() = "NexoraDB — High-performance Document + Graph Database (C++ core)";
+
+    // ── bind_vector: اینها را اول تعریف می‌کنیم ──
+    // بدون این، append() روی کپی کار می‌کند نه روی object اصلی
+    py::bind_vector<std::vector<SchemaField>>(m, "SchemaFieldList");
+    py::bind_vector<std::vector<std::string>>(m, "StringList");
+
+#ifdef NEXORA_BUILD_GRAPH
+    py::bind_vector<std::vector<NodeMappingDef>>(m, "NodeMappingList");
+    py::bind_vector<std::vector<EdgeMappingDef>>(m, "EdgeMappingList");
+#endif
 
     // ──────────────────────────────────────────────────────────
     // §1  DBResult
@@ -691,7 +707,49 @@ PYBIND11_MODULE(nexoradb, m) {
                  [](DocEngine& e, TxHandle* tx) -> DBResult {
                      if (!tx) return DBResult::Err("null transaction");
                      return e.RollbackTransaction(*tx);
-                 }, py::arg("tx"));
+                 }, py::arg("tx"))
+
+            .def("insert_one_tx",
+                 [](DocEngine& e, TxHandle* tx,
+                    const std::string& col, const std::string& doc) -> DBResult {
+                     if (!tx) return DBResult::Err("null transaction");
+                     py::gil_scoped_release rel;
+                     return e.InsertOneTx(*tx, col, doc);
+                 },
+                 py::arg("tx"), py::arg("collection"), py::arg("document"),
+                 "InsertOne داخل transaction")
+
+            .def("update_by_id_tx",
+                 [](DocEngine& e, TxHandle* tx,
+                    const std::string& col, const std::string& id,
+                    const UpdateSpec& spec) -> DBResult {
+                     if (!tx) return DBResult::Err("null transaction");
+                     py::gil_scoped_release rel;
+                     return e.UpdateByIdTx(*tx, col, id, spec);
+                 },
+                 py::arg("tx"), py::arg("collection"), py::arg("doc_id"),
+                 py::arg("update_spec"),
+                 "UpdateById داخل transaction")
+
+            .def("delete_by_id_tx",
+                 [](DocEngine& e, TxHandle* tx,
+                    const std::string& col, const std::string& id) -> DBResult {
+                     if (!tx) return DBResult::Err("null transaction");
+                     py::gil_scoped_release rel;
+                     return e.DeleteByIdTx(*tx, col, id);
+                 },
+                 py::arg("tx"), py::arg("collection"), py::arg("doc_id"),
+                 "DeleteById داخل transaction")
+
+            .def("find_by_id_tx",
+                 [](DocEngine& e, TxHandle* tx,
+                    const std::string& col, const std::string& id) -> DBResult {
+                     if (!tx) return DBResult::Err("null transaction");
+                     py::gil_scoped_release rel;
+                     return e.FindByIdTx(*tx, col, id);
+                 },
+                 py::arg("tx"), py::arg("collection"), py::arg("doc_id"),
+                 "FindById داخل transaction");
 
     // ──────────────────────────────────────────────────────────
     // §8  TxHandle

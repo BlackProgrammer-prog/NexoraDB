@@ -1066,6 +1066,15 @@ namespace nexora {
             rocksdb::Status s = tx_handle.Get()->Put(
                     MakeDocKey(collection_name, doc_id), bson_document);
             ROCKS_CHECK(s, "InsertOneTx");
+
+            std::string seq_key = std::string(keys::kSeq) + collection_name;
+            std::string seq_val;
+            s = tx_handle.Get()->Get(read_options_, seq_key, &seq_val);
+            if (!s.ok() && !s.IsNotFound()) ROCKS_CHECK(s, "InsertOneTx seq read");
+            int64_t cnt = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
+            s = tx_handle.Get()->Put(seq_key, std::to_string(cnt));
+            ROCKS_CHECK(s, "InsertOneTx seq write");
+
             return DBResult::Ok(doc_id);
         }
 
@@ -1100,6 +1109,17 @@ namespace nexora {
 
             s = tx_handle.Get()->Delete(doc_key);
             ROCKS_CHECK(s, "DeleteByIdTx delete");
+
+            std::string seq_key = std::string(keys::kSeq) + collection_name;
+            std::string seq_val;
+            s = tx_handle.Get()->Get(read_options_, seq_key, &seq_val);
+            if (!s.ok() && !s.IsNotFound()) ROCKS_CHECK(s, "DeleteByIdTx seq read");
+            if (!seq_val.empty()) {
+                int64_t cnt = std::max(0LL, std::stoll(seq_val) - 1);
+                s = tx_handle.Get()->Put(seq_key, std::to_string(cnt));
+                ROCKS_CHECK(s, "DeleteByIdTx seq write");
+            }
+
             return DBResult::Ok("1");
         }
 
