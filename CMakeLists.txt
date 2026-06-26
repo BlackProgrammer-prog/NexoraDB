@@ -1,30 +1,3 @@
-#cmake_minimum_required(VERSION 3.22)
-#project(NexoraDB)
-#
-#set(CMAKE_CXX_STANDARD 20)
-#
-#add_executable(NexoraDB main.cpp)
-#
-#find_package(fmt CONFIG REQUIRED)
-#find_package(RocksDB CONFIG REQUIRED)
-#find_package(Snappy CONFIG QUIET)
-#find_package(zstd   CONFIG QUIET)
-#
-#
-#add_subdirectory(core)
-#add_subdirectory(query)
-#add_subdirectory(utils)
-#
-#target_link_libraries(nexora_core PUBLIC nexora_query)
-#
-#target_link_libraries(NexoraDB PRIVATE
-#        nexora_core
-#        utils_lib
-#        fmt::fmt
-#        RocksDB::rocksdb
-#)
-#
-
 cmake_minimum_required(VERSION 3.22)
 project(NexoraDB CXX)
 
@@ -38,18 +11,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # ─────────────────────────────────────────────────────────────
 # §2  Build Options
 # ─────────────────────────────────────────────────────────────
-option(NEXORA_BUILD_GRAPH "Build GraphEngine (LiveGraph, GraphManager, ...)" ON)
-option(NEXORA_DEBUG_LOG   "Enable debug logging (NX_LOG macros)"             OFF)
-option(NEXORA_ENABLE_ASAN "Enable AddressSanitizer"                          OFF)
+option(NEXORA_BUILD_GRAPH   "Build GraphEngine"          ON)
+option(NEXORA_BUILD_PYTHON  "Build Python bindings"      ON)
+option(NEXORA_DEBUG_LOG     "Enable debug logging"       OFF)
+option(NEXORA_ENABLE_ASAN   "Enable AddressSanitizer"   OFF)
 
 # ─────────────────────────────────────────────────────────────
-# §3  vcpkg toolchain (اگر VCPKG_ROOT تنظیم شده باشد)
+# §3  vcpkg toolchain
 # ─────────────────────────────────────────────────────────────
 if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE
             "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
             CACHE STRING "vcpkg toolchain")
-    message(STATUS "vcpkg toolchain: $ENV{VCPKG_ROOT}")
+    message(STATUS "vcpkg: $ENV{VCPKG_ROOT}")
 endif()
 
 # ─────────────────────────────────────────────────────────────
@@ -58,11 +32,7 @@ endif()
 if(MSVC)
     add_compile_options(/W4 /WX- /O2 /MP /utf-8)
 else()
-    add_compile_options(
-            -Wall -Wextra -Wpedantic
-            -Wno-unused-parameter
-            -O2 -fPIC
-    )
+    add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter -O2 -fPIC)
     if(NEXORA_ENABLE_ASAN)
         add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
         add_link_options(-fsanitize=address)
@@ -74,106 +44,137 @@ if(NEXORA_DEBUG_LOG)
 endif()
 
 # ─────────────────────────────────────────────────────────────
-# §5  وابستگی‌های خارجی (vcpkg)
+# §5  External dependencies
 # ─────────────────────────────────────────────────────────────
 find_package(RocksDB CONFIG REQUIRED)
-message(STATUS "RocksDB: found")
-
-find_package(fmt CONFIG REQUIRED)
-message(STATUS "fmt: found")
-
-# Threads برای GraphEngine (shared_mutex, thread)
+find_package(fmt     CONFIG REQUIRED)
 find_package(Threads REQUIRED)
-message(STATUS "Threads: found")
+find_package(Snappy  CONFIG QUIET)
+find_package(zstd    CONFIG QUIET)
 
-# فشرده‌سازی اضافی (اختیاری)
-find_package(Snappy CONFIG QUIET)
-find_package(zstd   CONFIG QUIET)
+message(STATUS "RocksDB : found")
+message(STATUS "fmt     : found")
+message(STATUS "Threads : found")
 
 # ─────────────────────────────────────────────────────────────
-# §6  زیرماژول‌ها — ترتیب مهم است!
+# §6  Internal library chain
 #
-#  زنجیره وابستگی:
-#    nexora_query   (بدون وابستگی داخلی)
+#   nexora_query  (no deps)
 #        ↑
-#    nexora_core    (← nexora_query + RocksDB)
+#   nexora_core   ← nexora_query + RocksDB
 #        ↑
-#    nexora_graph   (← nexora_core + Threads)
+#   nexora_graph  ← nexora_core + Threads
 #        ↑
-#    NexoraDB exe   (← nexora_graph یا nexora_core)
+#   nexoradb (Python .so) ← nexora_graph
+#   NexoraDB (test exe)   ← nexora_graph
 # ─────────────────────────────────────────────────────────────
 
-# 1. Query Layer
-add_subdirectory(query)
+add_subdirectory(query)   # 1st — no deps
+add_subdirectory(core)    # 2nd — needs nexora_query
+#        core/CMakeLists.txt links nexora_query + RocksDB
 
-# 2. Core / DocEngine
-add_subdirectory(core)
-
-# 3. Graph Engine
 if(NEXORA_BUILD_GRAPH)
     add_subdirectory(graph)
-    message(STATUS "GraphEngine: ENABLED")
-else()
-    message(STATUS "GraphEngine: disabled")
-endif()
-
-# ─────────────────────────────────────────────────────────────
-# §7  وابستگی‌های cross-module (بعد از تعریف همه targets)
-# ─────────────────────────────────────────────────────────────
-
-# core → query  (قبلاً در core/CMakeLists.txt تعریف شده ولی اینجا هم تکرار می‌کنیم)
-# target_link_libraries(nexora_core PUBLIC nexora_query)   ← already in core/CMakeLists.txt
-
-# graph → core + Threads
-if(NEXORA_BUILD_GRAPH)
+    # graph/CMakeLists.txt defines nexora_graph target
+    # اینجا وابستگی cross-module را کامل می‌کنیم:
     target_link_libraries(nexora_graph PUBLIC nexora_core Threads::Threads)
+    message(STATUS "GraphEngine : ENABLED")
+else()
+    message(STATUS "GraphEngine : disabled")
 endif()
 
 # ─────────────────────────────────────────────────────────────
-# §8  Executable — NexoraDB (تست)
+# §7  Python binding module  (nexoradb.so)
+# ─────────────────────────────────────────────────────────────
+if(NEXORA_BUILD_PYTHON)
+    # Use pybind11's new FindPython mode so Debug C++ builds still target the
+    # ABI of the selected Python interpreter, not a Python debug ABI.
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+    unset(PYTHON_IS_DEBUG CACHE)
+    find_package(pybind11 CONFIG REQUIRED)
+    message(STATUS "Python   : ${Python_VERSION}")
+    message(STATUS "pybind11 : ${pybind11_VERSION}")
+
+    pybind11_add_module(nexoradb_py
+            bindings/nexoradb_bind.cpp
+    )
+
+    # نام فایل خروجی: nexoradb.cpython-3xx.so (بدون پیشوند lib)
+    set_target_properties(nexoradb_py PROPERTIES
+            OUTPUT_NAME "nexoradb"
+            PREFIX      ""
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+
+    add_custom_command(TARGET nexoradb_py POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:nexoradb_py>
+                    "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:nexoradb_py>"
+            COMMENT "Copying nexoradb Python module next to build-tree tests"
+    )
+
+    if(NOT MSVC AND NOT PYTHON_IS_DEBUG)
+        target_compile_options(nexoradb_py PRIVATE -UPy_DEBUG)
+    endif()
+
+    target_include_directories(nexoradb_py PRIVATE
+            ${CMAKE_SOURCE_DIR}   # برای "core/DocEngine.h", "graph/GraphManager.h"
+    )
+
+    # وابستگی به کتابخانه‌های C++
+    if(NEXORA_BUILD_GRAPH)
+        target_link_libraries(nexoradb_py PRIVATE nexora_graph)
+        target_compile_definitions(nexoradb_py PRIVATE NEXORA_BUILD_GRAPH)
+    else()
+        target_link_libraries(nexoradb_py PRIVATE nexora_core)
+    endif()
+
+    # محل نصب: کنار فایل‌های Python
+    install(TARGETS nexoradb_py
+            LIBRARY DESTINATION ${CMAKE_SOURCE_DIR}
+    )
+
+    message(STATUS "Python binding : ENABLED → nexoradb.so")
+else()
+    message(STATUS "Python binding : disabled")
+endif()
+
+# ─────────────────────────────────────────────────────────────
+# §8  Test executable  (NexoraDB)
 # ─────────────────────────────────────────────────────────────
 add_executable(NexoraDB main.cpp)
 
+target_include_directories(NexoraDB PRIVATE ${CMAKE_SOURCE_DIR})
+
 if(NEXORA_BUILD_GRAPH)
-    target_link_libraries(NexoraDB PRIVATE
-            nexora_graph    # graph → core → query → RocksDB (همه را می‌آورد)
-            fmt::fmt
-    )
+    target_link_libraries(NexoraDB PRIVATE nexora_graph fmt::fmt)
+    target_compile_definitions(NexoraDB PRIVATE NEXORA_BUILD_GRAPH)
 else()
-    target_link_libraries(NexoraDB PRIVATE
-            nexora_core     # core → query → RocksDB
-            fmt::fmt
-    )
+    target_link_libraries(NexoraDB PRIVATE nexora_core fmt::fmt)
 endif()
 
-target_include_directories(NexoraDB PRIVATE
-        ${CMAKE_SOURCE_DIR}   # برای include هایی مثل "core/DocEngine.h"
-)
-
-# تعریف ماکرو NEXORA_BUILD_GRAPH برای main.cpp تا #if defined() کار کند
-if(NEXORA_BUILD_GRAPH)
-    target_compile_definitions(NexoraDB PRIVATE NEXORA_BUILD_GRAPH)
+if(NEXORA_BUILD_PYTHON)
+    add_dependencies(NexoraDB nexoradb_py)
 endif()
 
 # ─────────────────────────────────────────────────────────────
-# §9  خلاصه Build
+# §9  Build summary
 # ─────────────────────────────────────────────────────────────
 message(STATUS "")
 message(STATUS "══════════════════════════════════════════════")
 message(STATUS "  NexoraDB Build Configuration")
 message(STATUS "══════════════════════════════════════════════")
-message(STATUS "  C++ Standard  : ${CMAKE_CXX_STANDARD}")
-message(STATUS "  Build Type    : ${CMAKE_BUILD_TYPE}")
-message(STATUS "  GraphEngine   : ${NEXORA_BUILD_GRAPH}")
-message(STATUS "  Debug Log     : ${NEXORA_DEBUG_LOG}")
-message(STATUS "  ASAN          : ${NEXORA_ENABLE_ASAN}")
+message(STATUS "  C++ Standard   : ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Build Type     : ${CMAKE_BUILD_TYPE}")
+message(STATUS "  GraphEngine    : ${NEXORA_BUILD_GRAPH}")
+message(STATUS "  Python Binding : ${NEXORA_BUILD_PYTHON}")
+message(STATUS "  Debug Log      : ${NEXORA_DEBUG_LOG}")
+message(STATUS "  ASAN           : ${NEXORA_ENABLE_ASAN}")
 message(STATUS "")
-message(STATUS "  Target chain:")
-message(STATUS "    nexora_query  (Condition, UpdateSpec, Evaluator)")
-message(STATUS "    nexora_core   (DocEngine) → nexora_query + RocksDB")
-if(NEXORA_BUILD_GRAPH)
-    message(STATUS "    nexora_graph  (LiveGraph, GraphManager) → nexora_core + Threads")
-endif()
-message(STATUS "    NexoraDB exe  → nexora_graph (or nexora_core)")
+message(STATUS "  nexora_query → nexora_core → nexora_graph")
+message(STATUS "                                    ↓")
+message(STATUS "                      nexoradb.so (Python)")
+message(STATUS "                      NexoraDB    (C++ test)")
 message(STATUS "══════════════════════════════════════════════")
 message(STATUS "")
