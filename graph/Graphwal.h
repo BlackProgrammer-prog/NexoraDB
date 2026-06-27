@@ -35,6 +35,7 @@
 #include "Graphtypes.h"
 
 #include <atomic>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -150,6 +151,13 @@ namespace nexora {
              * @brief آخرین seq اختصاص‌یافته
              */
             uint64_t lastSeq() const noexcept { return next_seq_.load() - 1; }
+
+            /**
+             * @brief آخرین رکوردهای WAL را از فایل می‌خواند.
+             * @param limit حداکثر تعداد رکوردها؛ پیش‌فرض 20
+             * @return رکوردها به ترتیب قدیمی‌تر به جدیدتر
+             */
+            std::vector<WalRecord> loadRecent(size_t limit = 20) const;
 
         private:
             std::filesystem::path  wal_path_;

@@ -74,6 +74,7 @@
 #include "../core/DocEngine.h"
 
 #include <atomic>
+#include <cstddef>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -382,11 +383,18 @@ namespace nexora {
              * @brief وضعیت WAL یک گراف
              */
             struct WalStatus {
-                uint64_t total_entries;
-                uint64_t pending_entries;
-                bool     has_pending;
+                uint64_t total_entries   = 0;
+                uint64_t pending_entries = 0;
+                bool     has_pending     = false;
             };
             WalStatus getWalStatus(const std::string& graph_name) const;
+
+            /**
+             * @brief آخرین رکوردهای WAL یک گراف را برمی‌گرداند.
+             * @param limit حداکثر تعداد رکوردها؛ پیش‌فرض 20
+             */
+            std::vector<WalRecord> getRecentWalEntries(const std::string& graph_name,
+                                                       size_t limit = 20) const;
 
             /**
              * @brief WAL قدیمی را پاک می‌کند (باید دوره‌ای صدا شود)

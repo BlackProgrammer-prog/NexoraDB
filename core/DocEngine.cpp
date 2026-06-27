@@ -34,11 +34,17 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <stdexcept>
+
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 // ─────────────────────────────────────────────────────────────
 // ماکروهای کمکی
@@ -1226,6 +1232,46 @@ namespace nexora {
             for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next())
                 result.push_back(it->key().ToString().substr(prefix.size()));
             return result;
+        }
+
+        uint64_t DocEngine::GetRamUsageBytes() const {
+#if defined(__linux__)
+            std::ifstream statm("/proc/self/statm");
+            uint64_t total_pages = 0;
+            uint64_t resident_pages = 0;
+            if (!(statm >> total_pages >> resident_pages)) return 0;
+
+            long page_size = sysconf(_SC_PAGESIZE);
+            if (page_size <= 0) return 0;
+            return resident_pages * static_cast<uint64_t>(page_size);
+#else
+            return 0;
+#endif
+        }
+
+        uint64_t DocEngine::GetDiskUsageBytes() const {
+            namespace fs = std::filesystem;
+
+            std::error_code ec;
+            if (!fs::exists(db_path_, ec)) return 0;
+
+            uint64_t total = 0;
+            fs::recursive_directory_iterator it(
+                    db_path_, fs::directory_options::skip_permission_denied, ec);
+            fs::recursive_directory_iterator end;
+
+            for (; it != end; it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                if (!it->is_regular_file(ec)) continue;
+
+                auto size = it->file_size(ec);
+                if (!ec) total += static_cast<uint64_t>(size);
+                ec.clear();
+            }
+            return total;
         }
 
     } // namespace core

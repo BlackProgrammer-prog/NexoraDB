@@ -724,6 +724,16 @@ namespace nexora {
             return ws;
         }
 
+        std::vector<WalRecord> GraphManager::getRecentWalEntries(
+                const std::string& graph_name,
+                size_t limit) const
+        {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            auto it = graphs_.find(graph_name);
+            if (it == graphs_.end() || !it->second->wal) return {};
+            return it->second->wal->loadRecent(limit);
+        }
+
         size_t GraphManager::purgeWAL(const std::string& graph_name) {
             std::lock_guard<std::mutex> lock(registry_mutex_);
             auto it = graphs_.find(graph_name);

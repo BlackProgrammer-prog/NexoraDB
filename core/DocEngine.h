@@ -792,6 +792,18 @@ namespace nexora {
              */
             std::vector<std::string> ListCollections() const;
 
+            /**
+             * @brief مقدار RAM فعلی مصرف‌شده توسط process دیتابیس، بر حسب byte.
+             *
+             * @note در build لینوکسی از RSS پردازش خوانده می‌شود.
+             */
+            uint64_t GetRamUsageBytes() const;
+
+            /**
+             * @brief فضای دیسک اشغال‌شده توسط دایرکتوری RocksDB، بر حسب byte.
+             */
+            uint64_t GetDiskUsageBytes() const;
+
         private:
             // ──────────────────────────────────────────────────────────
             // 6.15  پیاده‌سازی‌های داخلی

@@ -73,6 +73,21 @@ static py::dict result_to_dict(const DBResult& r) {
     return d;
 }
 
+#ifdef NEXORA_BUILD_GRAPH
+static const char* wal_op_to_string(WalOpType op) {
+    switch (op) {
+        case WalOpType::AddNode:    return "AddNode";
+        case WalOpType::RemoveNode: return "RemoveNode";
+        case WalOpType::AddEdge:    return "AddEdge";
+        case WalOpType::RemoveEdge: return "RemoveEdge";
+        case WalOpType::Begin:      return "Begin";
+        case WalOpType::Commit:     return "Commit";
+        case WalOpType::Rollback:   return "Rollback";
+        default:                    return "Unknown";
+    }
+}
+#endif
+
 // ══════════════════════════════════════════════════════════════
 // PYBIND11_MODULE
 // ══════════════════════════════════════════════════════════════
@@ -611,6 +626,12 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("get_collection_size", &DocEngine::GetCollectionSize,
                  py::arg("collection"),
                  "تعداد اسناد → int (O(1))")
+
+            .def("get_ram_usage_bytes", &DocEngine::GetRamUsageBytes,
+                 "RAM فعلی مصرف‌شده توسط process دیتابیس، بر حسب byte")
+
+            .def("get_disk_usage_bytes", &DocEngine::GetDiskUsageBytes,
+                 "فضای دیسک اشغال‌شده توسط دایرکتوری دیتابیس، بر حسب byte")
 
             .def("get_schema",
                  [](DocEngine& e, const std::string& col) -> py::object {
@@ -1196,6 +1217,29 @@ PYBIND11_MODULE(nexoradb, m) {
                      d["has_pending"]     = ws.has_pending;
                      return d;
                  }, py::arg("graph_name"))
+
+            .def("get_recent_wal_entries",
+                 [](GraphManager& gm, const std::string& name, size_t limit) {
+                     auto entries = gm.getRecentWalEntries(name, limit);
+                     py::list out;
+                     for (const auto& rec : entries) {
+                         py::dict d;
+                         d["seq"]             = rec.seq;
+                         d["timestamp_ms"]    = rec.timestamp_ms;
+                         d["op"]              = wal_op_to_string(rec.op);
+                         d["op_code"]         = static_cast<unsigned int>(rec.op);
+                         d["node_or_edge_id"] = rec.node_or_edge_id;
+                         d["src_id"]          = rec.src_id;
+                         d["dst_id"]          = rec.dst_id;
+                         d["type_id"]         = rec.type_id;
+                         d["flags"]           = rec.flags;
+                         d["applied"]         = rec.applied;
+                         out.append(d);
+                     }
+                     return out;
+                 },
+                 py::arg("graph_name"), py::arg("limit") = 20,
+                 "آخرین رکوردهای WAL گراف → list[dict]")
             .def("purge_wal",    &GraphManager::purgeWAL,    py::arg("graph_name"));
 
 #endif // NEXORA_BUILD_GRAPH
