@@ -633,6 +633,22 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("get_disk_usage_bytes", &DocEngine::GetDiskUsageBytes,
                  "فضای دیسک اشغال‌شده توسط دایرکتوری دیتابیس، بر حسب byte")
 
+            .def("create_internal_user", &DocEngine::CreateInternalUser,
+                 py::arg("user_json"),
+                 "ساخت کاربر داخلی دیتابیس در system collection مخفی")
+
+            .def("get_internal_user", &DocEngine::GetInternalUser,
+                 py::arg("username"),
+                 "دریافت کاربر داخلی دیتابیس بر اساس username")
+
+            .def("update_internal_user", &DocEngine::UpdateInternalUser,
+                 py::arg("username"), py::arg("user_json"),
+                 "جایگزینی کامل سند کاربر داخلی دیتابیس")
+
+            .def("delete_internal_user", &DocEngine::DeleteInternalUser,
+                 py::arg("username"),
+                 "حذف منطقی کاربر داخلی دیتابیس با status='deleted'")
+
             .def("get_schema",
                  [](DocEngine& e, const std::string& col) -> py::object {
                      auto s = e.GetSchema(col);
