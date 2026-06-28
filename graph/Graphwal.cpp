@@ -251,5 +251,27 @@ namespace nexora {
             return !pending.empty();
         }
 
+        std::vector<WalRecord> GraphWAL::loadRecent(size_t limit) const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!is_open_ || limit == 0) return {};
+
+            const uint64_t total = total_entries_.load();
+            const uint64_t count = std::min<uint64_t>(total, static_cast<uint64_t>(limit));
+            const uint64_t start = total - count;
+
+            std::vector<WalRecord> result;
+            result.reserve(static_cast<size_t>(count));
+
+            wal_file_.seekg(static_cast<std::streamoff>(start * sizeof(WalRecord)),
+                            std::ios::beg);
+            for (uint64_t i = 0; i < count; ++i) {
+                WalRecord rec{};
+                if (!wal_file_.read(reinterpret_cast<char*>(&rec), sizeof(WalRecord))) break;
+                result.push_back(rec);
+            }
+            wal_file_.clear();
+            return result;
+        }
+
     } // namespace graph
 } // namespace nexora
