@@ -124,7 +124,7 @@ if(NEXORA_BUILD_PYTHON)
 
     # وابستگی به کتابخانه‌های C++
     if(NEXORA_BUILD_GRAPH)
-        target_link_libraries(nexoradb_py PRIVATE nexora_graph)
+        target_link_libraries(nexoradb_py PRIVATE nexora_graph_algorithms)
         target_compile_definitions(nexoradb_py PRIVATE NEXORA_BUILD_GRAPH)
     else()
         target_link_libraries(nexoradb_py PRIVATE nexora_core)

@@ -41,7 +41,9 @@ import shutil
 
 # ── اطمینان از اینکه nexoradb.so در همین پوشه است ──
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
 
 try:
     import nexoradb
@@ -449,6 +451,26 @@ show_nbrs("ALL out from u1",      gm.neighbors("social","u1","out","",100))
 
 print(f"  hasEdge u1→u2 FOLLOWS: {gm.has_edge('social','u1','u2','FOLLOWS')}")
 print(f"  hasEdge u2→u1 FOLLOWS: {gm.has_edge('social','u2','u1','FOLLOWS')}")
+
+# ── Built-in Algorithms ───────────────────────────────────────
+sep("15.1 Built-in Graph Algorithms")
+
+mf = gm.run_mutual_friends("social", ["u1", "u2", "FOLLOWS"])
+print(f"  MutualFriends: success={mf.success} json={mf.result_json} "
+      f"time={mf.elapsed_ms:.3f}ms")
+assert mf.success, mf.error_msg
+mf_data = json.loads(mf.result_json)
+assert mf_data["count"] == 1, mf_data
+assert mf_data["mutual_friends"] == ["u3"], mf_data
+
+cc = gm.run_connected_components("social", [])
+print(f"  ConnectedComponents: success={cc.success} json={cc.result_json} "
+      f"time={cc.elapsed_ms:.3f}ms")
+assert cc.success, cc.error_msg
+cc_data = json.loads(cc.result_json)
+assert cc_data["total_components"] >= 1, cc_data
+assert cc_data["total_nodes"] >= 3, cc_data
+assert cc_data["largest_component_size"] >= 3, cc_data
 
 # ── Live Update ──────────────────────────────────────────────
 sep("16. Live Update")
