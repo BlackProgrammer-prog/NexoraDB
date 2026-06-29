@@ -87,10 +87,12 @@ namespace nexora {
         }
 
         void ChunkedSortedVector::forEach(
-                const std::function<void(const AdjEntry&)>& fn) const {
-            for (const auto& chunk : chunks)
-                for (const auto& e : chunk)
-                    fn(e);
+                const std::function<bool(const AdjEntry&)>& fn) const {
+            for (const auto& chunk : chunks) {
+                for (const auto& e : chunk) {
+                    if (!fn(e)) return;
+                }
+            }
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -145,13 +147,21 @@ namespace nexora {
             return heavy_in.remove(neighbor, type_id);
         }
 
-        void NodeAdj::forEachOut(const std::function<void(const AdjEntry&)>& fn) const {
-            if (!out_heavy) for (const auto& e : out_edges) fn(e);
+        void NodeAdj::forEachOut(const std::function<bool(const AdjEntry&)>& fn) const {
+            if (!out_heavy) {
+                for (const auto& e : out_edges) {
+                    if (!fn(e)) return;
+                }
+            }
             else heavy_out.forEach(fn);
         }
 
-        void NodeAdj::forEachIn(const std::function<void(const AdjEntry&)>& fn) const {
-            if (!in_heavy) for (const auto& e : in_edges) fn(e);
+        void NodeAdj::forEachIn(const std::function<bool(const AdjEntry&)>& fn) const {
+            if (!in_heavy) {
+                for (const auto& e : in_edges) {
+                    if (!fn(e)) return;
+                }
+            }
             else heavy_in.forEach(fn);
         }
 
@@ -491,9 +501,11 @@ namespace nexora {
             std::vector<EdgeId> to_remove;
             adj_[dense_id].forEachOut([&](const AdjEntry& e) {
                 to_remove.push_back(e.edge_id);
+                return true;
             });
             adj_[dense_id].forEachIn([&](const AdjEntry& e) {
                 to_remove.push_back(e.edge_id);
+                return true;
             });
 
             for (EdgeId eid : to_remove) {
@@ -572,6 +584,7 @@ namespace nexora {
             bool exists = false;
             adj_[src_id].forEachOut([&](const AdjEntry& e) {
                 if (e.neighbor == dst_id && e.type_id == edge_type) exists = true;
+                return !exists;
             });
             if (exists) {
                 // edge_id موجود را پیدا کن
@@ -579,6 +592,7 @@ namespace nexora {
                 adj_[src_id].forEachOut([&](const AdjEntry& e) {
                     if (e.neighbor == dst_id && e.type_id == edge_type)
                         found = e.edge_id;
+                    return found == kInvalidEdgeId;
                 });
                 return found;
             }
@@ -694,6 +708,7 @@ namespace nexora {
                 adj_[src_id].forEachOut([&](const AdjEntry& e) {
                     if (e.neighbor == dst_id && e.type_id == *tid)
                         found = e.edge_id;
+                    return found == kInvalidEdgeId;
                 });
             }
             rlock.unlock();
@@ -761,6 +776,7 @@ namespace nexora {
             bool found = false;
             adj_[src_id].forEachOut([&](const AdjEntry& e) {
                 if (e.neighbor == dst_id && e.type_id == *tid) found = true;
+                return !found;
             });
             return found;
         }
@@ -798,13 +814,14 @@ namespace nexora {
             result.reserve(std::min(limit > 0 ? limit : size_t{64}, size_t{1024}));
 
             auto collect = [&](const std::function<void(
-                    const std::function<void(const AdjEntry&)>&)>& iter) {
+                    const std::function<bool(const AdjEntry&)>&)>& iter) {
                 iter([&](const AdjEntry& e) {
-                    if (limit > 0 && result.size() >= limit) return;
-                    if (type_id != kInvalidTypeId && e.type_id != type_id) return;
+                    if (limit > 0 && result.size() >= limit) return false;
+                    if (type_id != kInvalidTypeId && e.type_id != type_id) return true;
                     DenseId nb = e.neighbor;
                     if (nb < node_records_.size() && node_records_[nb].isActive())
                         result.push_back(nb);
+                    return limit == 0 || result.size() < limit;
                 });
             };
 
@@ -867,7 +884,7 @@ namespace nexora {
                 const std::function<bool(const AdjEntry&)>& fn) const {
             std::shared_lock lock(mutex_);
             if (dense_id >= adj_.size()) return;
-            adj_[dense_id].forEachOut([&](const AdjEntry& e) { fn(e); });
+            adj_[dense_id].forEachOut(fn);
         }
 
         void LiveGraph::forEachInEdge(
@@ -875,7 +892,7 @@ namespace nexora {
                 const std::function<bool(const AdjEntry&)>& fn) const {
             std::shared_lock lock(mutex_);
             if (dense_id >= adj_.size()) return;
-            adj_[dense_id].forEachIn([&](const AdjEntry& e) { fn(e); });
+            adj_[dense_id].forEachIn(fn);
         }
 
 // ══════════════════════════════════════════════════════════════

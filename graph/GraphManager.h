@@ -69,11 +69,13 @@
 #include "GraphIdStore.h"
 #include "Livegraph.h"
 #include "StaticGraph.h"
+#include "algorithms/AlgorithmBase.h"
 
 // DocEngine (برای IterateCollection، GetForeignKeys، ExtractField)
 #include "../core/DocEngine.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <future>
@@ -100,6 +102,40 @@ namespace nexora {
             uint64_t    nodes_built = 0;
             uint64_t    edges_built = 0;
             double      elapsed_ms  = 0.0;
+        };
+
+/**
+ * @class JobHandle
+ * @brief Handle برگشتی از GraphManager::submitJob برای گرفتن نتیجه async
+ */
+        class JobHandle {
+        public:
+            JobHandle() = default;
+            explicit JobHandle(std::future<algorithms::AlgoResult>&& future)
+                    : future_(std::move(future)) {}
+
+            JobHandle(const JobHandle&)            = delete;
+            JobHandle& operator=(const JobHandle&) = delete;
+            JobHandle(JobHandle&&) noexcept        = default;
+            JobHandle& operator=(JobHandle&&) noexcept = default;
+
+            bool valid() const noexcept { return future_.valid(); }
+
+            algorithms::AlgoResult result() {
+                if (!future_.valid())
+                    return {false, "Invalid job handle", "", 0.0};
+                return future_.get();
+            }
+
+            template <class Rep, class Period>
+            std::future_status waitFor(
+                    const std::chrono::duration<Rep, Period>& timeout) const {
+                if (!future_.valid()) return std::future_status::deferred;
+                return future_.wait_for(timeout);
+            }
+
+        private:
+            mutable std::future<algorithms::AlgoResult> future_;
         };
 
 /**
@@ -325,6 +361,30 @@ namespace nexora {
                     const std::string& graph_name,
                     const std::vector<std::string>& node_types = {},
                     const std::vector<std::string>& edge_types = {}) const;
+
+            /**
+             * @brief اجرای LockAlgorithm روی LiveGraph با shared_lock.
+             *
+             * الگوریتم در thread caller اجرا می‌شود و فقط باید از APIهای const
+             * گراف استفاده کند.
+             */
+            algorithms::AlgoResult runLock(
+                    const std::string& graph_name,
+                    algorithms::LockAlgorithm& algo,
+                    const std::vector<ExtId>& params) const;
+
+            /**
+             * @brief submit یک JobAlgorithm روی snapshot جدا از LiveGraph.
+             *
+             * snapshot در لحظه submit ساخته می‌شود، سپس الگوریتم در background
+             * thread روی همان snapshot immutable اجرا می‌شود.
+             *
+             * @note شیء algo باید تا پایان job زنده بماند.
+             */
+            JobHandle submitJob(
+                    const std::string& graph_name,
+                    algorithms::JobAlgorithm& algo,
+                    const std::vector<ExtId>& params) const;
 
             // ──────────────────────────────────────────────────────────
             // §6  Live Update hooks (DocEngine این‌ها را صدا می‌زند)

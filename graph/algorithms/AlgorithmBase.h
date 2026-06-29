@@ -33,8 +33,8 @@
  */
 
 #include "../Livegraph.h"
+#include "../StaticGraph.h"
 
-#include <future>
 #include <string>
 
 namespace nexora {
@@ -57,110 +57,7 @@ namespace nexora {
             };
 
 // ══════════════════════════════════════════════════════════════
-// §2  StaticGraphView — snapshot برای JobAlgorithm
-// ══════════════════════════════════════════════════════════════
-
-/**
- * @class StaticGraphView
- * @brief یک snapshot read-only از LiveGraph برای الگوریتم‌های سنگین
- *
- * @details
- * GraphManager این snapshot را می‌سازد و به JobAlgorithm می‌دهد.
- * بعد از پایان job، snapshot آزاد می‌شود.
- * تیم الگوریتم فقط از متدهای read-only این کلاس استفاده می‌کند.
- */
-            class StaticGraphView {
-            public:
-                explicit StaticGraphView(const LiveGraph& source);
-                ~StaticGraphView() = default;
-
-                // ── Read API برای تیم الگوریتم ──
-
-                uint64_t nodeCount() const noexcept { return node_count_; }
-                uint64_t edgeCount() const noexcept { return edge_count_; }
-
-                /**
-                 * @brief همسایه‌های یک node
-                 * @param dense_id   DenseId node شروع
-                 * @param direction  Out / In / Both
-                 * @param type_id    فیلتر نوع edge (kInvalidTypeId = همه)
-                 */
-                std::vector<DenseId> neighbors(DenseId    dense_id,
-                                               Direction   direction,
-                                               TypeId      type_id = kInvalidTypeId) const;
-
-                /**
-                 * @brief iterate روی تمام nodes
-                 */
-                void forEachNode(const std::function<bool(DenseId, TypeId)>& fn) const;
-
-                /**
-                 * @brief iterate روی تمام edges
-                 */
-                void forEachEdge(
-                        const std::function<bool(EdgeId, DenseId src, DenseId dst, TypeId)>& fn) const;
-
-                /**
-                 * @brief out_degree یک node
-                 */
-                uint64_t outDegree(DenseId dense_id) const;
-
-                /**
-                 * @brief in_degree یک node
-                 */
-                uint64_t inDegree(DenseId dense_id) const;
-
-                /**
-                 * @brief TypeId نوع node
-                 */
-                TypeId nodeType(DenseId dense_id) const;
-
-                /**
-                 * @brief نام نوع از TypeId
-                 */
-                std::string typeName(TypeId type_id) const;
-
-                /**
-                 * @brief ExtId از DenseId
-                 */
-                ExtId extId(DenseId dense_id) const;
-
-                bool hasNode(DenseId dense_id) const;
-                bool hasEdge(DenseId src, DenseId dst, TypeId type_id = kInvalidTypeId) const;
-
-                /**
-                 * @brief snapshot این گراف از چه version بود
-                 */
-                uint64_t snapshotVersion() const noexcept { return snapshot_version_; }
-
-            private:
-                // کپی فشرده از گراف (فقط ساختار، بدون properties)
-                struct NodeSnap {
-                    TypeId   type_id;
-                    uint64_t out_degree;
-                    uint64_t in_degree;
-                    ExtId    ext_id;
-                };
-
-                struct EdgeSnap {
-                    DenseId src;
-                    DenseId dst;
-                    TypeId  type_id;
-                };
-
-                std::vector<NodeSnap>                           nodes_;
-                std::unordered_map<EdgeId, EdgeSnap>            edges_;
-                std::unordered_map<DenseId, std::vector<AdjEntry>> out_adj_;
-                std::unordered_map<DenseId, std::vector<AdjEntry>> in_adj_;
-                std::unordered_map<TypeId, std::string>          type_names_;
-
-                uint64_t node_count_       = 0;
-                uint64_t edge_count_       = 0;
-                uint64_t snapshot_version_ = 0;
-            };
-
-// ══════════════════════════════════════════════════════════════
-// §3  LockAlgorithm Base — الگوریتم‌های سبک
+// §2  LockAlgorithm Base — الگوریتم‌های سبک
 // ══════════════════════════════════════════════════════════════
 
 /**
@@ -220,7 +117,7 @@ namespace nexora {
             };
 
 // ══════════════════════════════════════════════════════════════
-// §4  JobAlgorithm Base — الگوریتم‌های سنگین
+// §3  JobAlgorithm Base — الگوریتم‌های سنگین
 // ══════════════════════════════════════════════════════════════
 
 /**
@@ -228,7 +125,7 @@ namespace nexora {
  * @brief Base class برای الگوریتم‌های سنگین با snapshot
  *
  * @details
- * - GraphManager یک snapshot (StaticGraphView) می‌سازد
+ * - GraphManager یک snapshot (StaticGraph) می‌سازد
  * - الگوریتم در یک background thread اجرا می‌شود
  * - بعد از پایان، snapshot آزاد می‌شود
  * - گراف زنده در حین اجرا تغییر می‌کند (snapshot جدا است)
@@ -238,7 +135,7 @@ namespace nexora {
  * ```cpp
  * class PageRankAlgo : public JobAlgorithm {
  * public:
- *     AlgoResult run(const StaticGraphView& snapshot,
+ *     AlgoResult run(const StaticGraph& snapshot,
  *                    const std::vector<ExtId>& params) override {
  *         // snapshot جداست از LiveGraph — تغییرات بعدی گراف تأثیر نمی‌گذارند
  *         int max_iter = std::stoi(params[0]);
@@ -275,7 +172,7 @@ namespace nexora {
                  * snapshot بعد از return این تابع آزاد می‌شود.
                  * هیچ وابستگی به LiveGraph یا RocksDB نداشته باشید.
                  */
-                virtual AlgoResult run(const StaticGraphView&       snapshot,
+                virtual AlgoResult run(const StaticGraph&           snapshot,
                                        const std::vector<ExtId>&    params) = 0;
 
                 virtual std::string name() const = 0;

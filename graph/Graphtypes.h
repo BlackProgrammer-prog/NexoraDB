@@ -242,7 +242,7 @@ namespace nexora {
             bool remove(DenseId neighbor, TypeId type_id);
             bool contains(DenseId neighbor, TypeId type_id) const;
             size_t size() const noexcept;
-            void forEach(const std::function<void(const AdjEntry&)>& fn) const;
+            void forEach(const std::function<bool(const AdjEntry&)>& fn) const;
         };
 
 /**
@@ -279,8 +279,8 @@ namespace nexora {
             void addIn(const AdjEntry& e);
             bool removeOut(DenseId neighbor, TypeId type_id);
             bool removeIn(DenseId neighbor, TypeId type_id);
-            void forEachOut(const std::function<void(const AdjEntry&)>& fn) const;
-            void forEachIn(const std::function<void(const AdjEntry&)>& fn) const;
+            void forEachOut(const std::function<bool(const AdjEntry&)>& fn) const;
+            void forEachIn(const std::function<bool(const AdjEntry&)>& fn) const;
 
         private:
             void checkAndUpgrade();  ///< بررسی heavy threshold و upgrade در صورت نیاز
@@ -402,8 +402,8 @@ namespace nexora {
 /// callback که تیم الگوریتم پیاده‌سازی می‌کند
 /// ورودی: snapshot گراف ثابت در RAM
 /// این callback در background thread اجرا می‌شود
-        class StaticGraphView;  // forward declaration
-        using AlgorithmJobFn = std::function<JobResult(const StaticGraphView&)>;
+        class StaticGraph;  // forward declaration
+        using AlgorithmJobFn = std::function<JobResult(const StaticGraph&)>;
 
 // ══════════════════════════════════════════════════════════════
 // §13  Direction (اضافه شد — قبلاً در این فایل تعریف نشده بود)

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
@@ -192,6 +193,13 @@ namespace nexora {
                     }
                 }
                 return def.name.empty() ? std::nullopt : std::optional<GraphDefinition>(def);
+            }
+
+            std::future<algorithms::AlgoResult> readyAlgoFuture(
+                    algorithms::AlgoResult result) {
+                std::promise<algorithms::AlgoResult> promise;
+                promise.set_value(std::move(result));
+                return promise.get_future();
             }
         } // anonymous namespace
 
@@ -611,6 +619,67 @@ namespace nexora {
             std::shared_lock<std::shared_mutex> sh(it->second->rw_mutex);
             return std::make_unique<StaticGraph>(
                     *it->second->live_graph, node_types, edge_types, graph_name);
+        }
+
+        algorithms::AlgoResult GraphManager::runLock(
+                const std::string& graph_name,
+                algorithms::LockAlgorithm& algo,
+                const std::vector<ExtId>& params) const
+        {
+            std::lock_guard<std::mutex> reg_lock(registry_mutex_);
+            auto it = graphs_.find(graph_name);
+            if (it == graphs_.end())
+                return {false, "Graph '" + graph_name + "' not found", "", 0.0};
+            if (!it->second->live_graph)
+                return {false, "Graph '" + graph_name + "' is not a live graph", "", 0.0};
+            if (!it->second->built)
+                return {false, "Graph '" + graph_name + "' is not built/rendered", "", 0.0};
+
+            std::shared_lock<std::shared_mutex> graph_lock(it->second->rw_mutex);
+            try {
+                return algo.run(*it->second->live_graph, params);
+            } catch (const std::exception& ex) {
+                return {false, std::string("LockAlgorithm '") + algo.name() +
+                               "' failed: " + ex.what(), "", 0.0};
+            } catch (...) {
+                return {false, std::string("LockAlgorithm '") + algo.name() +
+                               "' failed with unknown exception", "", 0.0};
+            }
+        }
+
+        JobHandle GraphManager::submitJob(
+                const std::string& graph_name,
+                algorithms::JobAlgorithm& algo,
+                const std::vector<ExtId>& params) const
+        {
+            auto snapshot = createSnapshot(graph_name);
+            if (!snapshot) {
+                return JobHandle(readyAlgoFuture(
+                        {false, "Unable to create snapshot for graph '" + graph_name + "'",
+                         "", 0.0}));
+            }
+
+            return JobHandle(std::async(
+                    std::launch::async,
+                    [snapshot = std::move(snapshot), &algo, params]() mutable {
+                        try {
+                            return algo.run(*snapshot, params);
+                        } catch (const std::exception& ex) {
+                            return algorithms::AlgoResult{
+                                    false,
+                                    std::string("JobAlgorithm '") + algo.name() +
+                                            "' failed: " + ex.what(),
+                                    "",
+                                    0.0};
+                        } catch (...) {
+                            return algorithms::AlgoResult{
+                                    false,
+                                    std::string("JobAlgorithm '") + algo.name() +
+                                            "' failed with unknown exception",
+                                    "",
+                                    0.0};
+                        }
+                    }));
         }
 
 // ══════════════════════════════════════════════════════════════
