@@ -45,6 +45,7 @@
 #  include "graph/GraphManager.h"
 #  include "graph/StaticGraph.h"
 #  include "graph/Graphtypes.h"
+#  include "graph/algorithms/BuiltinAlgorithms.h"
 #endif
 
 namespace py = pybind11;
@@ -942,6 +943,19 @@ PYBIND11_MODULE(nexoradb, m) {
                        " edges=" + std::to_string(r.edges_built) + ">";
             });
 
+    // ── AlgoResult ──
+
+    py::class_<algorithms::AlgoResult>(m, "AlgoResult",
+                                       "نتیجه استاندارد الگوریتم‌های گراف")
+            .def_readonly("success",     &algorithms::AlgoResult::success)
+            .def_readonly("error_msg",   &algorithms::AlgoResult::error_msg)
+            .def_readonly("result_json", &algorithms::AlgoResult::result_json)
+            .def_readonly("elapsed_ms",  &algorithms::AlgoResult::elapsed_ms)
+            .def("__repr__", [](const algorithms::AlgoResult& r) {
+                return "<AlgoResult success=" + std::string(r.success ? "True":"False") +
+                       " elapsed_ms=" + std::to_string(r.elapsed_ms) + ">";
+            });
+
     // ── GraphStats ──
 
     py::class_<GraphStats>(m, "GraphStats")
@@ -1165,6 +1179,24 @@ PYBIND11_MODULE(nexoradb, m) {
                  },
                  py::arg("graph_name"), py::arg("src_ext_id"),
                  py::arg("dst_ext_id"), py::arg("edge_type") = "")
+
+            .def("run_mutual_friends",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runMutualFriends(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params"),
+                 "اجرای MutualFriends به صورت LockAlgorithm")
+
+            .def("run_connected_components",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runConnectedComponents(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 "اجرای ConnectedComponents به صورت JobAlgorithm")
 
                     // Snapshot برای الگوریتم سنگین
             .def("create_snapshot",

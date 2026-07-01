@@ -86,20 +86,19 @@ endif()
 set(ALGO_BASE_SOURCES
         algorithms/AlgorithmBase.h
         algorithms/AlgorithmBase.cpp
+        algorithms/BuiltinAlgorithms.h
 )
 
 # تیم الگوریتم فایل‌های خود را اینجا اضافه می‌کند:
-# set(ALGO_USER_SOURCES
-#     algorithms/CommonFollowers.cpp
-#     algorithms/ShortestPath.cpp
-#     algorithms/PageRank.cpp
-#     algorithms/CommunityDetection.cpp
-# )
+set(ALGO_USER_SOURCES
+        algorithms/MutualFriends.cpp
+        algorithms/ConnectedComponents.cpp
+)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/algorithms/AlgorithmBase.cpp")
     add_library(nexora_graph_algorithms STATIC
             ${ALGO_BASE_SOURCES}
-            # ${ALGO_USER_SOURCES}
+            ${ALGO_USER_SOURCES}
     )
 
     target_include_directories(nexora_graph_algorithms
