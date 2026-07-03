@@ -2,7 +2,11 @@ import { collectionEndpoints } from '../../../api/endpoints/collectionEndpoints'
 import { USE_MOCK_API } from '../../../api/client/apiConfig'
 import { httpClient } from '../../../api/client/httpClient'
 import { mockApiAdapter } from '../../../mocks/mockApiAdapter'
-import type { Collection, CreateCollectionInput } from '../types/collection.types'
+import type {
+  Collection,
+  CreateCollectionInput,
+  UpdateCollectionInput,
+} from '../types/collection.types'
 
 export const collectionApi = {
   listCollections(): Promise<Collection[]> {
@@ -20,6 +24,20 @@ export const collectionApi = {
 
     return httpClient.post<Collection, CreateCollectionInput>(
       collectionEndpoints.create,
+      input,
+    )
+  },
+
+  updateCollection(
+    collectionName: string,
+    input: UpdateCollectionInput,
+  ): Promise<Collection> {
+    if (USE_MOCK_API) {
+      return mockApiAdapter.updateCollection(collectionName, input)
+    }
+
+    return httpClient.put<Collection, UpdateCollectionInput>(
+      collectionEndpoints.update(collectionName),
       input,
     )
   },
