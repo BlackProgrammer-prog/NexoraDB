@@ -1,12 +1,14 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { cn } from '../shared/utils/cn'
 
-export type AppPage = 'dashboard' | 'collections' | 'documents'
+export type AppPage = 'dashboard' | 'collections' | 'documents' | 'graphs' | 'query'
 
 const navItems: Array<{ label: string; path: string }> = [
   { label: 'Dashboard', path: '/dashboard' },
   { label: 'Collections', path: '/collections' },
   { label: 'Documents', path: '/documents' },
+  { label: 'Graphs', path: '/graphs' },
+  { label: 'Query editor', path: '/query' },
 ]
 
 export function DashboardLayout() {

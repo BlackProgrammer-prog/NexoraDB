@@ -22,4 +22,25 @@ export const mockCollections: Collection[] = [
     sizeBytes: 12288,
     updatedAt: '2026-06-13T18:05:00.000Z',
   },
+  {
+    createdAt: '2026-06-09T09:10:00.000Z',
+    documentCount: 2,
+    name: 'posts',
+    sizeBytes: 2048,
+    updatedAt: '2026-06-18T10:05:00.000Z',
+  },
+  {
+    createdAt: '2026-06-09T09:20:00.000Z',
+    documentCount: 2,
+    name: 'comments',
+    sizeBytes: 1536,
+    updatedAt: '2026-06-18T11:30:00.000Z',
+  },
+  {
+    createdAt: '2026-06-09T09:30:00.000Z',
+    documentCount: 2,
+    name: 'follows',
+    sizeBytes: 1024,
+    updatedAt: '2026-06-18T12:45:00.000Z',
+  },
 ]

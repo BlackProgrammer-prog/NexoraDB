@@ -9,3 +9,7 @@ export interface Collection {
 export interface CreateCollectionInput {
   name: string
 }
+
+export interface UpdateCollectionInput {
+  name: string
+}

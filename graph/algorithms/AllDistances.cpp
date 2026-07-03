@@ -83,7 +83,6 @@
  */
 
 #include "BuiltinAlgorithms.h"
-
 #include <algorithm>
 #include <chrono>
 #include <limits>
