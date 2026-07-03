@@ -147,7 +147,7 @@ namespace nexora {
             std::unique_ptr<GraphStorage> storage;
             std::unique_ptr<GraphWAL>     wal;
             std::unique_ptr<GraphIdStore> id_store;
-            std::unique_ptr<LiveGraph>    live_graph;  ///< null اگر STATIC باشد
+            std::unique_ptr<LiveGraph>    live_graph;  ///< backing graph for Live and Static modes
             mutable std::shared_mutex     rw_mutex;    ///< محافظت از live_graph
             bool                          built = false;
         };
