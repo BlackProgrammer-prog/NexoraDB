@@ -267,11 +267,11 @@ namespace nexora {
             // در MVP از storage->metaPath() استفاده می‌کنیم
             // h->id_store = std::make_unique<GraphIdStore>(raw_db, def.name);
 
-            // LiveGraph
-            if (def.mode == GraphMode::Live) {
-                h->live_graph = std::make_unique<LiveGraph>(
-                        h->storage.get(), h->wal.get(), def.name);
-            }
+            // Backing graph used for both modes.
+            // Live graphs receive incremental updates; Static graphs are only
+            // rebuilt/rendered explicitly and then queried read-only.
+            h->live_graph = std::make_unique<LiveGraph>(
+                    h->storage.get(), h->wal.get(), def.name);
 
             return h;
         }
@@ -487,10 +487,9 @@ namespace nexora {
                 handle = it->second.get();
             }
 
-            if (!handle->live_graph) {
-                result.error_msg = "Graph is STATIC — use snapshot";
-                return result;
-            }
+            if (!handle->live_graph)
+                handle->live_graph = std::make_unique<LiveGraph>(
+                        handle->storage.get(), handle->wal.get(), graph_name);
 
             // clear + set dirty
             handle->storage->updateMetaState(GraphState::Building);
@@ -631,7 +630,7 @@ namespace nexora {
             if (it == graphs_.end())
                 return {false, "Graph '" + graph_name + "' not found", "", 0.0};
             if (!it->second->live_graph)
-                return {false, "Graph '" + graph_name + "' is not a live graph", "", 0.0};
+                return {false, "Graph '" + graph_name + "' has no backing graph", "", 0.0};
             if (!it->second->built)
                 return {false, "Graph '" + graph_name + "' is not built/rendered", "", 0.0};
 

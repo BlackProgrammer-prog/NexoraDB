@@ -1198,6 +1198,42 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
                  "اجرای ConnectedComponents به صورت JobAlgorithm")
 
+            .def("run_most_connected",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runMostConnected(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 "اجرای MostConnected به صورت LockAlgorithm")
+
+            .def("run_network_stats",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runNetworkStats(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 "اجرای NetworkStats به صورت LockAlgorithm")
+
+            .def("run_community_detection",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runCommunityDetection(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 "اجرای CommunityDetection به صورت JobAlgorithm")
+
+            .def("run_all_distances",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runAllDistances(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 "اجرای AllDistances به صورت JobAlgorithm")
+
                     // Snapshot برای الگوریتم سنگین
             .def("create_snapshot",
                  [](GraphManager& gm, const std::string& name,

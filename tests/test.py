@@ -472,6 +472,104 @@ assert cc_data["total_components"] >= 1, cc_data
 assert cc_data["total_nodes"] >= 3, cc_data
 assert cc_data["largest_component_size"] >= 3, cc_data
 
+mc = gm.run_most_connected("social", ["2", "out", "User"])
+print(f"  MostConnected: success={mc.success} json={mc.result_json} "
+      f"time={mc.elapsed_ms:.3f}ms")
+assert mc.success, mc.error_msg
+mc_data = json.loads(mc.result_json)
+assert mc_data["metric"] == "out", mc_data
+assert mc_data["limit"] == 2, mc_data
+assert len(mc_data["results"]) == 2, mc_data
+assert mc_data["results"][0]["id"] == "u1", mc_data
+assert mc_data["results"][0]["out"] >= mc_data["results"][1]["out"], mc_data
+
+ns = gm.run_network_stats("social", ["full"])
+print(f"  NetworkStats: success={ns.success} json={ns.result_json} "
+      f"time={ns.elapsed_ms:.3f}ms")
+assert ns.success, ns.error_msg
+ns_data = json.loads(ns.result_json)
+assert ns_data["mode"] == "full", ns_data
+assert ns_data["basic"]["active_nodes"] == stats.active_nodes, ns_data
+assert ns_data["basic"]["active_edges"] == stats.active_edges, ns_data
+assert ns_data["node_types"]["User"] >= 3, ns_data
+assert ns_data["node_types"]["Post"] == 2, ns_data
+assert ns_data["edge_types"]["FOLLOWS"] == 3, ns_data
+assert "degree" in ns_data, ns_data
+
+cd = gm.run_community_detection("social", ["10", "2", "members", "User"])
+print(f"  CommunityDetection: success={cd.success} json={cd.result_json} "
+      f"time={cd.elapsed_ms:.3f}ms")
+assert cd.success, cd.error_msg
+cd_data = json.loads(cd.result_json)
+assert cd_data["algorithm"] == "label_propagation", cd_data
+assert cd_data["total_communities"] >= 1, cd_data
+assert cd_data["total_nodes_assigned"] >= 3, cd_data
+assert cd_data["summary"]["largest_community_size"] >= 3, cd_data
+assert "members" in cd_data["communities"][0], cd_data
+assert set(cd_data["communities"][0]["members"]) >= {"u1", "u2", "u3"}, cd_data
+
+ad = gm.run_all_distances("social", ["u1", "", "2", "User"])
+print(f"  AllDistances: success={ad.success} json={ad.result_json} "
+      f"time={ad.elapsed_ms:.3f}ms")
+assert ad.success, ad.error_msg
+ad_data = json.loads(ad.result_json)
+assert ad_data["mode"] == "sssp", ad_data
+assert ad_data["source"] == "u1", ad_data
+assert ad_data["max_hops"] == 2, ad_data
+dist_by_id = {item["id"]: item["distance"] for item in ad_data["distances"]}
+assert dist_by_id["u2"] == 1, ad_data
+assert dist_by_id["u3"] == 1, ad_data
+
+# ── GraphMode.Static باید همان built-in algorithms را پشتیبانی کند ───────
+sep("15.2 Built-in Algorithms — GraphMode.Static")
+
+static_def = nexoradb.GraphDefinition()
+static_def.name                  = "social_static"
+static_def.mode                  = nexoradb.GraphMode.Static
+static_def.directed              = True
+static_def.heterogeneous         = True
+static_def.auto_build_on_startup = False
+static_def.node_mappings = nexoradb.NodeMappingList([nm_user, nm_post])
+static_def.edge_mappings = nexoradb.EdgeMappingList([em_follows, em_authored, em_likes])
+
+assert gm.create_graph(static_def), "create static graph failed"
+static_br = gm.build_graph("social_static")
+print(f"  buildGraph(static): success={static_br.success} "
+      f"nodes={static_br.nodes_built} edges={static_br.edges_built}")
+assert static_br.success, static_br.error_msg
+
+static_mf = gm.run_mutual_friends("social_static", ["u1", "u2", "FOLLOWS"])
+assert static_mf.success, static_mf.error_msg
+assert json.loads(static_mf.result_json)["mutual_friends"] == ["u3"]
+
+static_mc = gm.run_most_connected("social_static", ["2", "out", "User"])
+assert static_mc.success, static_mc.error_msg
+assert json.loads(static_mc.result_json)["results"][0]["id"] == "u1"
+
+static_ns = gm.run_network_stats("social_static", ["full"])
+assert static_ns.success, static_ns.error_msg
+static_ns_data = json.loads(static_ns.result_json)
+assert static_ns_data["basic"]["active_nodes"] == stats.active_nodes, static_ns_data
+assert static_ns_data["edge_types"]["FOLLOWS"] == 3, static_ns_data
+
+static_cc = gm.run_connected_components("social_static", [])
+assert static_cc.success, static_cc.error_msg
+assert json.loads(static_cc.result_json)["largest_component_size"] >= 3
+
+static_cd = gm.run_community_detection("social_static", ["10", "2", "members", "User"])
+assert static_cd.success, static_cd.error_msg
+assert json.loads(static_cd.result_json)["total_nodes_assigned"] >= 3
+
+static_ad = gm.run_all_distances("social_static", ["u1", "", "2", "User"])
+assert static_ad.success, static_ad.error_msg
+static_dist_by_id = {
+    item["id"]: item["distance"]
+    for item in json.loads(static_ad.result_json)["distances"]
+}
+assert static_dist_by_id["u2"] == 1
+assert static_dist_by_id["u3"] == 1
+print("  Static graph algorithms: all 6 passed")
+
 # ── Live Update ──────────────────────────────────────────────
 sep("16. Live Update")
 

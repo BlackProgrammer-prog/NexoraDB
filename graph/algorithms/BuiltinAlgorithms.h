@@ -15,6 +15,22 @@ AlgoResult runConnectedComponents(GraphManager& manager,
                                   const std::string& graph_name,
                                   const std::vector<ExtId>& params);
 
+AlgoResult runMostConnected(GraphManager& manager,
+                            const std::string& graph_name,
+                            const std::vector<ExtId>& params);
+
+AlgoResult runNetworkStats(GraphManager& manager,
+                           const std::string& graph_name,
+                           const std::vector<ExtId>& params);
+
+AlgoResult runCommunityDetection(GraphManager& manager,
+                                 const std::string& graph_name,
+                                 const std::vector<ExtId>& params);
+
+AlgoResult runAllDistances(GraphManager& manager,
+                           const std::string& graph_name,
+                           const std::vector<ExtId>& params);
+
 } // namespace algorithms
 } // namespace graph
 } // namespace nexora
