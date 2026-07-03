@@ -93,6 +93,10 @@ set(ALGO_BASE_SOURCES
 set(ALGO_USER_SOURCES
         algorithms/MutualFriends.cpp
         algorithms/ConnectedComponents.cpp
+        algorithms/MostConnected.cpp
+        algorithms/NetworkStats.cpp
+        algorithms/CommunityDetection.cpp
+        algorithms/AllDistances.cpp
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/algorithms/AlgorithmBase.cpp")
