@@ -56,6 +56,18 @@ _FLAG_PARAMS: dict[str, dict[str, str]] = {
     "CommunityDetection": {"members": "members"},
 }
 
+_PYBIND_LOCK_DISPATCH: dict[str, str] = {
+    "MutualFriends": "run_mutual_friends",
+    "MostConnected": "run_most_connected",
+    "NetworkStats": "run_network_stats",
+}
+
+_PYBIND_JOB_DISPATCH: dict[str, str] = {
+    "ConnectedComponents": "run_connected_components",
+    "CommunityDetection": "run_community_detection",
+    "AllDistances": "run_all_distances",
+}
+
 
 def algo_params_to_positional(algo: str, named: dict[str, Any],
                               limit: Optional[int] = None,
@@ -937,7 +949,17 @@ class Executor:
         gm = self._require_gm()
         params = algo_params_to_positional(s.algo, s.params, limit=s.limit)
 
-        # مسیر ۱: binding مستقیم C++ (اگر GraphManager.run_lock داشته باشد)
+        # مسیر ۱: binding های فعلی Pybind به ازای هر الگوریتم
+        method_name = _PYBIND_LOCK_DISPATCH.get(s.algo)
+        if method_name and hasattr(gm, method_name):
+            r = getattr(gm, method_name)(s.graph, params)
+            return {"success": getattr(r, "success", False),
+                    "algo": s.algo,
+                    "elapsed_ms": getattr(r, "elapsed_ms", 0.0),
+                    "result": _try_json(getattr(r, "result_json", "")),
+                    "error": getattr(r, "error_msg", "")}
+
+        # مسیر ۲: binding generic آینده (اگر GraphManager.run_lock داشته باشد)
         if hasattr(gm, "run_lock"):
             try:
                 r = gm.run_lock(s.graph, s.algo, params)
@@ -949,7 +971,7 @@ class Executor:
             except Exception:  # noqa: BLE001
                 pass
 
-        # مسیر ۲: runner ثبت‌شده Python
+        # مسیر ۳: runner ثبت‌شده Python
         runner = self._algo_runners.get(s.algo)
         if runner is not None:
             out = runner(gm, s.graph, params)
@@ -965,7 +987,21 @@ class Executor:
         gm = self._require_gm()
         params = algo_params_to_positional(s.algo, s.params, top=s.returns_top)
 
-        # مسیر ۱: binding مستقیم
+        # مسیر ۱: binding های فعلی Pybind به ازای هر الگوریتم (سنکرون)
+        method_name = _PYBIND_JOB_DISPATCH.get(s.algo)
+        if method_name and hasattr(gm, method_name):
+            r = getattr(gm, method_name)(s.graph, params)
+            job_id = self._next_job_id()
+            self._jobs[job_id] = _DoneJob(r)
+            self._job_meta[job_id] = {
+                "algo": s.algo, "graph": s.graph, "submitted": time.time()}
+            return {"success": getattr(r, "success", False),
+                    "job_id": job_id,
+                    "algo": s.algo,
+                    "status": "done",
+                    "error": getattr(r, "error_msg", "")}
+
+        # مسیر ۲: binding generic آینده
         if hasattr(gm, "submit_job"):
             try:
                 handle = gm.submit_job(s.graph, s.algo, params)
@@ -979,7 +1015,7 @@ class Executor:
             except Exception:  # noqa: BLE001
                 pass
 
-        # مسیر ۲: runner ثبت‌شده Python — سنکرون اجرا می‌شود
+        # مسیر ۳: runner ثبت‌شده Python — سنکرون اجرا می‌شود
         runner = self._algo_runners.get(s.algo)
         if runner is not None:
             job_id = self._next_job_id()
