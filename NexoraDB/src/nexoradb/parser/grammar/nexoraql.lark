@@ -1,0 +1,315 @@
+// ══════════════════════════════════════════════════════════════
+// NexoraQL Grammar — Lark (Earley)
+// زبان کوئری NexoraDB: Document Store + Graph + Algorithms
+// ══════════════════════════════════════════════════════════════
+
+start: (statement ";")+
+
+?statement: create_collection
+          | drop_collection
+          | alter_collection
+          | show_collections
+          | collection_exists
+          | describe_collection
+          | create_index
+          | drop_index
+          | show_indexes
+          | add_fk
+          | drop_fk
+          | show_fks
+          | insert_batch
+          | insert_stmt
+          | select_stmt
+          | count_stmt
+          | exists_stmt
+          | update_stmt
+          | delete_stmt
+          | begin_tx
+          | commit_tx
+          | rollback_tx
+          | create_graph
+          | use_graph
+          | show_graphs
+          | describe_graph
+          | drop_graph
+          | map_node
+          | map_edge
+          | build_graph
+          | render_graph
+          | refresh_graph
+          | compact_graph
+          | graph_wal_status
+          | purge_wal
+          | replay_wal
+          | graph_status
+          | graph_stats
+          | snapshot_graph
+          | traverse_stmt
+          | get_node
+          | edge_exists
+          | run_lock
+          | run_job
+          | job_status
+          | job_result
+          | job_cancel
+          | show_jobs
+          | system_status
+          | system_info
+
+// ──────────────────────────────────────────────────────────────
+// §1  DDL — Collections
+// ──────────────────────────────────────────────────────────────
+
+create_collection: "CREATE"i "COLLECTION"i NAME schema_body? strict_kw?
+schema_body: "(" field_def ("," field_def)* ")"
+strict_kw: "STRICT"i
+
+field_def: NAME dtype field_flag*
+dtype: "STRING"i   -> t_string
+     | "INT32"i    -> t_int32
+     | "INT64"i    -> t_int64
+     | "FLOAT64"i  -> t_float64
+     | "BOOL"i     -> t_bool
+     | "ARRAY"i    -> t_array
+     | "OBJECT"i   -> t_object
+     | "BINARY"i   -> t_binary
+field_flag: "REQUIRED"i        -> f_required
+          | "UNIQUE"i          -> f_unique
+          | "DEFAULT"i value   -> f_default
+
+drop_collection:     "DROP"i "COLLECTION"i NAME
+alter_collection:    "ALTER"i "COLLECTION"i NAME "SET"i "SCHEMA"i schema_body
+show_collections:    "SHOW"i "COLLECTIONS"i
+collection_exists:   "COLLECTION"i "EXISTS"i NAME
+describe_collection: "DESCRIBE"i "COLLECTION"i NAME
+
+// ──────────────────────────────────────────────────────────────
+// §2  DDL — Index & Foreign Key
+// ──────────────────────────────────────────────────────────────
+
+create_index: "CREATE"i unique_kw? "INDEX"i NAME "ON"i NAME "(" NAME ("," NAME)* ")"
+unique_kw: "UNIQUE"i
+drop_index:   "DROP"i "INDEX"i NAME "ON"i NAME
+show_indexes: "SHOW"i "INDEXES"i "ON"i NAME
+
+add_fk:   "ADD"i "FOREIGN"i "KEY"i NAME "ON"i NAME "(" NAME ")" "REFERENCES"i NAME "(" NAME ")"
+drop_fk:  "DROP"i "FOREIGN"i "KEY"i NAME "ON"i NAME
+show_fks: "SHOW"i "FOREIGN"i "KEYS"i "ON"i NAME
+
+// ──────────────────────────────────────────────────────────────
+// §3  DML — Insert
+// ──────────────────────────────────────────────────────────────
+
+insert_stmt:  "INSERT"i "INTO"i NAME "VALUES"i "(" string ")"
+insert_batch: "INSERT"i "INTO"i NAME "BATCH"i "VALUES"i batch_item ("," batch_item)*
+batch_item:   "(" string ")"
+
+// ──────────────────────────────────────────────────────────────
+// §4  DML — Select / Count / Exists
+// ──────────────────────────────────────────────────────────────
+
+select_stmt: "SELECT"i projection "FROM"i NAME join_clause* where_clause? limit_clause? skip_clause?
+projection: STAR                            -> proj_all
+          | field_path ("," field_path)*    -> proj_fields
+STAR: "*"
+
+join_clause: "LOOKUP"i "JOIN"i NAME "ON"i field_path "=" field_path
+
+count_stmt:  "COUNT"i "FROM"i NAME where_clause?
+exists_stmt: "EXISTS"i "IN"i NAME where_clause
+
+limit_clause: "LIMIT"i INT
+skip_clause:  "SKIP"i INT
+
+// ──────────────────────────────────────────────────────────────
+// §5  DML — Update
+// ──────────────────────────────────────────────────────────────
+
+update_stmt: "UPDATE"i many_kw? NAME update_op+ where_clause
+many_kw: "MANY"i
+
+?update_op: set_op
+          | inc_op
+          | unset_op
+          | push_op
+          | pull_op
+          | addtoset_op
+          | mul_op
+          | setmin_op
+          | setmax_op
+
+set_op:    "SET"i assign ("," assign)*
+assign:    field_path "=" value          -> assign_value
+         | field_path "=" "NOW"i "(" ")" -> assign_now
+
+inc_op:    "INCREMENT"i inc_pair ("," inc_pair)*
+inc_pair:  field_path "BY"i SIGNED_NUMBER
+
+unset_op:  "UNSET"i field_path ("," field_path)*
+push_op:   "PUSH"i field_path "=" value
+pull_op:   "PULL"i field_path "=" value
+addtoset_op: "ADD"i "TO"i "SET"i field_path "=" value
+mul_op:    "MULTIPLY"i mul_pair ("," mul_pair)*
+mul_pair:  field_path "BY"i SIGNED_NUMBER
+setmin_op: "SET"i "MIN"i field_path "=" value
+setmax_op: "SET"i "MAX"i field_path "=" value
+
+// ──────────────────────────────────────────────────────────────
+// §6  DML — Delete
+// ──────────────────────────────────────────────────────────────
+
+delete_stmt: "DELETE"i "FROM"i NAME where_clause
+
+// ──────────────────────────────────────────────────────────────
+// §7  TCL — Transactions
+// ──────────────────────────────────────────────────────────────
+
+begin_tx:    "BEGIN"i "TRANSACTION"i
+commit_tx:   "COMMIT"i
+rollback_tx: "ROLLBACK"i
+
+// ──────────────────────────────────────────────────────────────
+// §8  WHERE — Condition expression
+// ──────────────────────────────────────────────────────────────
+
+where_clause: "WHERE"i condition
+
+?condition: or_expr
+?or_expr:  and_expr
+         | or_expr "OR"i and_expr    -> or_expr
+?and_expr: atom_expr
+         | and_expr "AND"i atom_expr -> and_expr
+?atom_expr: comparison
+          | "NOT"i atom_expr         -> not_expr
+          | "(" condition ")"
+          | "true"i                  -> cond_true
+
+comparison: field_path comp_op value                     -> cmp
+          | field_path "IN"i "(" value_list ")"          -> in_cmp
+          | field_path "NOT"i "IN"i "(" value_list ")"   -> nin_cmp
+          | field_path "EXISTS"i                         -> exists_cmp
+          | field_path "NOT"i "EXISTS"i                  -> nexists_cmp
+          | field_path "LIKE"i string                    -> like_cmp
+          | field_path "STARTS"i "WITH"i string          -> starts_cmp
+          | field_path "CONTAINS"i string                -> contains_cmp
+
+comp_op: "="  -> op_eq
+       | "!=" -> op_neq
+       | ">=" -> op_gte
+       | "<=" -> op_lte
+       | ">"  -> op_gt
+       | "<"  -> op_lt
+
+value_list: value ("," value)*
+
+// ──────────────────────────────────────────────────────────────
+// §9  GDL — Graph Definition
+// ──────────────────────────────────────────────────────────────
+
+create_graph: "CREATE"i graph_mode "GRAPH"i NAME graph_opt* where_clause?
+graph_mode: "LIVE"i   -> mode_live
+          | "STATIC"i -> mode_static
+graph_opt: "HETEROGENEOUS"i -> g_hetero
+         | "DIRECTED"i      -> g_directed
+         | "UNDIRECTED"i    -> g_undirected
+
+use_graph:      "USE"i "GRAPH"i NAME
+show_graphs:    "SHOW"i "GRAPHS"i
+describe_graph: "DESCRIBE"i "GRAPH"i NAME
+drop_graph:     "DROP"i "GRAPH"i NAME
+
+map_node: "MAP"i "NODE"i NAME "FROM"i NAME "KEY"i field_path properties_clause? where_clause?
+map_edge: "MAP"i "EDGE"i NAME "FROM"i NAME unwind_clause? "SOURCE"i field_path "AS"i NAME "TARGET"i field_path "AS"i NAME edge_dir? properties_clause?
+
+unwind_clause: "UNWIND"i field_path "AS"i NAME
+edge_dir: "DIRECTED"i   -> e_directed
+        | "UNDIRECTED"i -> e_undirected
+properties_clause: "PROPERTIES"i field_path ("," field_path)*
+
+// ──────────────────────────────────────────────────────────────
+// §10  GML — Build / Render / Maintain
+// ──────────────────────────────────────────────────────────────
+
+build_graph: "BUILD"i "GRAPH"i NAME build_opt?
+build_opt: "VERBOSE"i        -> b_verbose
+         | "NODES"i "ONLY"i  -> b_nodes_only
+         | "EDGES"i "ONLY"i  -> b_edges_only
+
+render_graph:  "RENDER"i "GRAPH"i NAME
+refresh_graph: "REFRESH"i "GRAPH"i NAME ("EVERY"i INT "HOURS"i)?
+compact_graph: "COMPACT"i "GRAPH"i NAME
+
+graph_wal_status: "GRAPH"i "WAL"i "STATUS"i NAME
+purge_wal:        "PURGE"i "GRAPH"i "WAL"i NAME
+replay_wal:       "REPLAY"i "GRAPH"i "WAL"i NAME
+graph_status:     "GRAPH"i "STATUS"i NAME
+graph_stats:      "GRAPH"i "STATS"i NAME
+snapshot_graph:   "SNAPSHOT"i "GRAPH"i NAME "INTO"i NAME
+
+// ──────────────────────────────────────────────────────────────
+// §11  GQL — Traversal
+// ──────────────────────────────────────────────────────────────
+
+traverse_stmt: "TRAVERSE"i NAME "(" string ")" direction edge_sel "DEPTH"i INT ("LIMIT"i INT)?
+direction: "OUT"i  -> d_out
+         | "IN"i   -> d_in
+         | "BOTH"i -> d_both
+edge_sel: NAME | STAR
+
+get_node:    "GET"i "NODE"i NAME "(" string ")"
+edge_exists: "EDGE"i "EXISTS"i NAME "(" string ")" ARROW_L NAME ARROW_R NAME "(" string ")"
+ARROW_L: "-["
+ARROW_R: "]->"
+
+// ──────────────────────────────────────────────────────────────
+// §12  GAL — Algorithms
+// ──────────────────────────────────────────────────────────────
+
+run_lock: "RUN"i "LOCK"i NAME "ON"i NAME with_clause? ("LIMIT"i INT)?
+run_job:  "RUN"i "JOB"i NAME "ON"i NAME with_clause? ("RETURNS"i "TOP"i INT)?
+
+with_clause: "WITH"i with_param ("," with_param)*
+with_param:  NAME "=" with_value
+?with_value: value
+           | "[" value ("," value)* "]" -> wlist
+
+job_status: "JOB"i "STATUS"i string
+job_result: "JOB"i "RESULT"i string
+job_cancel: "JOB"i "CANCEL"i string
+show_jobs:  "SHOW"i "JOBS"i ("ON"i NAME)?
+
+// ──────────────────────────────────────────────────────────────
+// §13  SYS
+// ──────────────────────────────────────────────────────────────
+
+system_status: "SYSTEM"i "STATUS"i
+system_info:   "SYSTEM"i "INFO"i
+
+// ──────────────────────────────────────────────────────────────
+// §14  Values & Terminals
+// ──────────────────────────────────────────────────────────────
+
+?value: string
+      | SIGNED_NUMBER -> number
+      | "true"i       -> vtrue
+      | "false"i      -> vfalse
+      | "null"i       -> vnull
+
+string: SQ_STRING | DQ_STRING
+
+field_path: NAME ("." NAME)*
+
+NAME: /[A-Za-z_][A-Za-z0-9_]*/
+SQ_STRING: /'(\\.|[^'\\])*'/
+DQ_STRING: /"(\\.|[^"\\])*"/
+
+%import common.SIGNED_NUMBER
+%import common.INT
+%import common.WS
+
+COMMENT:    /--[^\r\n]*/
+ML_COMMENT: /\/\*[\s\S]*?\*\//
+
+%ignore WS
+%ignore COMMENT
+%ignore ML_COMMENT
