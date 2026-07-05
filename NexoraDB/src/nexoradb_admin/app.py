@@ -47,6 +47,7 @@ from .models import (
     SetupStateResponse,
 )
 from .native import create_doc_engine, create_graph_manager, load_native_module
+from .query_runner import QueryExecuteRequest, QueryExecuteResponse, execute_query
 from .security import TokenError, decode_access_token
 from .service import (
     InternalUserEngine,
@@ -116,6 +117,15 @@ def create_app(
 
     def get_graph_metadata_store() -> GraphMetadataStore:
         return app.state.graph_metadata_store
+
+    def get_optional_graph_manager() -> Any | None:
+        try:
+            native = get_native_module()
+        except RuntimeError:
+            return None
+        if not getattr(native, "GRAPH_ENABLED", False):
+            return None
+        return get_graph_manager()
 
     def get_token_payload_from_header(authorization: str | None) -> dict[str, Any] | None:
         if authorization is None or not authorization.startswith("Bearer "):
@@ -273,6 +283,18 @@ def create_app(
         current_engine: Any = Depends(get_engine),
     ) -> None:
         delete_document(current_engine, collection_name, document_id)
+
+    @app.post("/query/execute", response_model=QueryExecuteResponse)
+    def execute_query_route(
+        payload: QueryExecuteRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> QueryExecuteResponse:
+        return execute_query(
+            engine=current_engine,
+            graph_manager=get_optional_graph_manager(),
+            payload=payload,
+        )
 
     @app.get("/graphs")
     def graphs(
