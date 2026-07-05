@@ -9,3 +9,5 @@ nexoradb.cpython-310-x86_64-linux-gnu.so
 /NexoraDB/src/nexoradb/parser/__pycache__
 /NexoraDB/src/nexoradb/__pycache__
 /NexoraDB/src/nexoradb.egg-info
+/NexoraDB/src/nexoradb_admin/__pycache__
+/NexoraDB/nexoradb-data
