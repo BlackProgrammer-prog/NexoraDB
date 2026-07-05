@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
-import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_DEFAULT_DEV_AUTH_SECRET = "nexoradb-admin-development-secret-change-in-production"
+_DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
 
 def _split_csv(value: str) -> list[str]:
@@ -19,10 +21,12 @@ class AdminApiSettings:
         default_factory=lambda: Path(os.getenv("NEXORADB_GRAPH_DIR", "./graph_data"))
     )
     auth_secret: str = field(
-        default_factory=lambda: os.getenv("NEXORADB_AUTH_SECRET", secrets.token_urlsafe(48))
+        default_factory=lambda: os.getenv("NEXORADB_AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
     )
     access_token_ttl_seconds: int = field(
-        default_factory=lambda: int(os.getenv("NEXORADB_ACCESS_TOKEN_TTL_SECONDS", "3600"))
+        default_factory=lambda: int(
+            os.getenv("NEXORADB_ACCESS_TOKEN_TTL_SECONDS", str(_DEFAULT_ACCESS_TOKEN_TTL_SECONDS))
+        )
     )
     allowed_origins: tuple[str, ...] = field(
         default_factory=lambda: tuple(
