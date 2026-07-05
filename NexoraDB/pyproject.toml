@@ -45,7 +45,8 @@ dependencies = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.7.0",
-    "argon2-cffi>=23.1.0"
+    "argon2-cffi>=23.1.0",
+    "python-socketio>=5.11.0"
 ]
 
 
@@ -54,7 +55,8 @@ api = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.7.0",
-    "argon2-cffi>=23.1.0"
+    "argon2-cffi>=23.1.0",
+    "python-socketio>=5.11.0"
 ]
 
 dashboard = [
@@ -76,6 +78,7 @@ all = [
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.7.0",
     "argon2-cffi>=23.1.0",
+    "python-socketio>=5.11.0",
 
 ]
 
