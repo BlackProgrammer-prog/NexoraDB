@@ -62,3 +62,12 @@ def create_doc_engine(settings: AdminApiSettings) -> Any:
     if hasattr(engine, "is_healthy") and not engine.is_healthy():
         raise RuntimeError(f"DocEngine failed to open: {settings.db_path}")
     return engine
+
+
+def create_graph_manager(settings: AdminApiSettings, engine: Any) -> Any:
+    native = load_native_module(settings)
+    if not getattr(native, "GRAPH_ENABLED", False):
+        raise RuntimeError("NexoraDB graph engine is not enabled in the loaded native module")
+    graph_manager = native.GraphManager(engine, str(settings.graph_dir))
+    graph_manager.startup()
+    return graph_manager

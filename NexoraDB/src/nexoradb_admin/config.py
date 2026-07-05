@@ -15,6 +15,9 @@ class AdminApiSettings:
     db_path: Path = field(
         default_factory=lambda: Path(os.getenv("NEXORADB_DB_PATH", "./nexoradb-data"))
     )
+    graph_dir: Path = field(
+        default_factory=lambda: Path(os.getenv("NEXORADB_GRAPH_DIR", "./graph_data"))
+    )
     auth_secret: str = field(
         default_factory=lambda: os.getenv("NEXORADB_AUTH_SECRET", secrets.token_urlsafe(48))
     )

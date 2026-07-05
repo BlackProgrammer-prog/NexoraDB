@@ -22,6 +22,21 @@ from .document_store import (
     rename_collection,
     replace_document,
 )
+from .graph_store import (
+    CreateGraphRequest,
+    GraphEdgeRequest,
+    GraphMetadataStore,
+    GraphNodeRequest,
+    create_edge,
+    create_graph,
+    create_node,
+    delete_edge,
+    delete_graph,
+    delete_node,
+    list_graphs,
+    update_edge,
+    update_node,
+)
 from .monitoring import MonitoringSocketServer, MonitoringState
 from .models import (
     AdminRegisterRequest,
@@ -31,7 +46,7 @@ from .models import (
     PublicUser,
     SetupStateResponse,
 )
-from .native import create_doc_engine
+from .native import create_doc_engine, create_graph_manager, load_native_module
 from .security import TokenError, decode_access_token
 from .service import (
     InternalUserEngine,
@@ -68,6 +83,9 @@ def create_app(
     )
     app.state.settings = app_settings
     app.state.engine = engine
+    app.state.graph_manager = None
+    app.state.native_module = None
+    app.state.graph_metadata_store = GraphMetadataStore(app_settings.graph_dir)
     app.state.monitoring_state = monitoring_state or MonitoringState()
 
     @app.exception_handler(HTTPException)
@@ -85,6 +103,19 @@ def create_app(
         if app.state.engine is None:
             app.state.engine = resolved_engine_factory(app.state.settings)
         return app.state.engine
+
+    def get_native_module() -> Any:
+        if app.state.native_module is None:
+            app.state.native_module = load_native_module(app.state.settings)
+        return app.state.native_module
+
+    def get_graph_manager() -> Any:
+        if app.state.graph_manager is None:
+            app.state.graph_manager = create_graph_manager(app.state.settings, get_engine())
+        return app.state.graph_manager
+
+    def get_graph_metadata_store() -> GraphMetadataStore:
+        return app.state.graph_metadata_store
 
     def get_token_payload_from_header(authorization: str | None) -> dict[str, Any] | None:
         if authorization is None or not authorization.startswith("Bearer "):
@@ -242,6 +273,132 @@ def create_app(
         current_engine: Any = Depends(get_engine),
     ) -> None:
         delete_document(current_engine, collection_name, document_id)
+
+    @app.get("/graphs")
+    def graphs(
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> list[dict[str, Any]]:
+        return list_graphs(graph_manager=graph_manager, metadata_store=metadata_store)
+
+    @app.post("/graphs", status_code=status.HTTP_201_CREATED)
+    def create_graph_route(
+        payload: CreateGraphRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        native: Any = Depends(get_native_module),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return create_graph(
+            native=native,
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            payload=payload,
+        )
+
+    @app.delete("/graphs/{graph_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_graph_route(
+        graph_id: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> None:
+        delete_graph(graph_manager=graph_manager, metadata_store=metadata_store, graph_id=graph_id)
+
+    @app.post("/graphs/{graph_id}/nodes")
+    def create_graph_node_route(
+        graph_id: str,
+        payload: GraphNodeRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return create_node(
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+            payload=payload,
+        )
+
+    @app.put("/graphs/{graph_id}/nodes/{node_id}")
+    def update_graph_node_route(
+        graph_id: str,
+        node_id: str,
+        payload: GraphNodeRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return update_node(
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+            node_id=node_id,
+            payload=payload,
+        )
+
+    @app.delete("/graphs/{graph_id}/nodes/{node_id}")
+    def delete_graph_node_route(
+        graph_id: str,
+        node_id: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return delete_node(
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+            node_id=node_id,
+        )
+
+    @app.post("/graphs/{graph_id}/edges")
+    def create_graph_edge_route(
+        graph_id: str,
+        payload: GraphEdgeRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return create_edge(
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+            payload=payload,
+        )
+
+    @app.put("/graphs/{graph_id}/edges/{edge_id}")
+    def update_graph_edge_route(
+        graph_id: str,
+        edge_id: str,
+        payload: GraphEdgeRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return update_edge(
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+            edge_id=edge_id,
+            payload=payload,
+        )
+
+    @app.delete("/graphs/{graph_id}/edges/{edge_id}")
+    def delete_graph_edge_route(
+        graph_id: str,
+        edge_id: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return delete_edge(
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+            edge_id=edge_id,
+        )
 
     return app
 
