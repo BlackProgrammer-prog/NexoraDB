@@ -14,6 +14,7 @@ sys.path.insert(0, str(SRC))
 
 from nexoradb_admin.app import create_app  # noqa: E402
 from nexoradb_admin.config import AdminApiSettings  # noqa: E402
+from nexoradb_admin.graph_store import GraphMetadataStore  # noqa: E402
 from nexoradb_admin.monitoring import MonitoringSocketServer, MonitoringState  # noqa: E402
 
 
@@ -50,6 +51,55 @@ class FakeInternalUserEngine:
             return FakeResult(False, error_msg="username cannot be changed")
         self.users[username] = user
         return FakeResult(True, "1")
+
+
+class FakeGraphMode:
+    Live = "live"
+
+
+class FakeGraphDefinition:
+    def __init__(self) -> None:
+        self.name = ""
+        self.mode = None
+        self.directed = True
+        self.heterogeneous = True
+        self.auto_build_on_startup = False
+
+
+class FakeNativeModule:
+    GraphMode = FakeGraphMode
+    GraphDefinition = FakeGraphDefinition
+
+
+class FakeGraphStats:
+    active_nodes = 0
+    active_edges = 0
+    version = 1
+
+
+class FakeGraphManager:
+    def __init__(self) -> None:
+        self.graphs: set[str] = set()
+
+    def create_graph(self, definition: FakeGraphDefinition) -> bool:
+        if not definition.name or definition.name in self.graphs:
+            return False
+        self.graphs.add(definition.name)
+        return True
+
+    def drop_graph(self, graph_name: str) -> bool:
+        if graph_name not in self.graphs:
+            return False
+        self.graphs.remove(graph_name)
+        return True
+
+    def list_graphs(self) -> list[str]:
+        return sorted(self.graphs)
+
+    def get_stats(self, graph_name: str) -> FakeGraphStats:
+        if graph_name not in self.graphs:
+            raise RuntimeError("graph not found")
+        return FakeGraphStats()
 
     def is_healthy(self) -> bool:
         return True
@@ -276,3 +326,84 @@ def test_collection_and_document_crud_routes_require_admin_token() -> None:
 
     delete_collection_response = client.delete("/collections/members", headers=headers)
     assert delete_collection_response.status_code == 204
+
+
+def test_graph_crud_routes_use_graph_manager_and_metadata(tmp_path) -> None:
+    engine = FakeInternalUserEngine()
+    settings = AdminApiSettings(auth_secret="x" * 48, graph_dir=tmp_path / "graphs")
+    app = create_app(settings=settings, engine=engine)
+    app.state.native_module = FakeNativeModule()
+    app.state.graph_manager = FakeGraphManager()
+    app.state.graph_metadata_store = GraphMetadataStore(settings.graph_dir)
+    client = TestClient(app)
+    client.post(
+        "/auth/register",
+        json={
+            "firstName": "Database",
+            "lastName": "Administrator",
+            "email": "admin@example.com",
+            "password": "StrongPass123",
+            "confirmPassword": "StrongPass123",
+        },
+    )
+    login_response = client.post(
+        "/auth/login",
+        json={"username": "root", "password": "StrongPass123"},
+    )
+    headers = {"Authorization": f"Bearer {login_response.json()['accessToken']}"}
+
+    create_graph_response = client.post(
+        "/graphs",
+        json={"name": "social graph", "description": "People and follows"},
+        headers=headers,
+    )
+    assert create_graph_response.status_code == 201
+    graph = create_graph_response.json()
+    assert graph["id"] == "social_graph"
+    assert graph["name"] == "social graph"
+
+    create_node_response = client.post(
+        "/graphs/social_graph/nodes",
+        json={"label": "Admin", "type": "User", "data": {"role": "admin"}},
+        headers=headers,
+    )
+    assert create_node_response.status_code == 200
+    first_node = create_node_response.json()["nodes"][0]
+
+    second_node_response = client.post(
+        "/graphs/social_graph/nodes",
+        json={"label": "App", "type": "Service", "data": {}},
+        headers=headers,
+    )
+    second_node = second_node_response.json()["nodes"][1]
+
+    edge_response = client.post(
+        "/graphs/social_graph/edges",
+        json={
+            "source": first_node["id"],
+            "target": second_node["id"],
+            "label": "connects",
+            "data": {"since": "today"},
+        },
+        headers=headers,
+    )
+    assert edge_response.status_code == 200
+    edge = edge_response.json()["edges"][0]
+
+    update_node_response = client.put(
+        f"/graphs/social_graph/nodes/{first_node['id']}",
+        json={"label": "Root", "type": "User", "data": {"role": "root"}},
+        headers=headers,
+    )
+    assert update_node_response.status_code == 200
+    assert update_node_response.json()["nodes"][0]["label"] == "Root"
+
+    delete_edge_response = client.delete(
+        f"/graphs/social_graph/edges/{edge['id']}",
+        headers=headers,
+    )
+    assert delete_edge_response.status_code == 200
+    assert delete_edge_response.json()["edges"] == []
+
+    delete_graph_response = client.delete("/graphs/social_graph", headers=headers)
+    assert delete_graph_response.status_code == 204
