@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import AdminApiSettings
+from .monitoring import MonitoringSocketServer, MonitoringState
 from .models import (
     AdminRegisterRequest,
     AuthResponse,
@@ -32,6 +33,7 @@ def create_app(
     settings: AdminApiSettings | None = None,
     engine: InternalUserEngine | None = None,
     engine_factory: Callable[[AdminApiSettings], InternalUserEngine] | None = None,
+    monitoring_state: MonitoringState | None = None,
 ) -> FastAPI:
     app_settings = settings or AdminApiSettings()
     app_settings.validate_for_startup()
@@ -52,6 +54,7 @@ def create_app(
     )
     app.state.settings = app_settings
     app.state.engine = engine
+    app.state.monitoring_state = monitoring_state or MonitoringState()
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
@@ -69,6 +72,17 @@ def create_app(
             app.state.engine = resolved_engine_factory(app.state.settings)
         return app.state.engine
 
+    def get_token_payload_from_header(authorization: str | None) -> dict[str, Any] | None:
+        if authorization is None or not authorization.startswith("Bearer "):
+            return None
+        try:
+            return decode_access_token(
+                authorization.removeprefix("Bearer ").strip(),
+                app.state.settings,
+            )
+        except TokenError:
+            return None
+
     def current_token_payload(
         authorization: str | None = Header(default=None),
         current_settings: AdminApiSettings = Depends(get_settings),
@@ -85,6 +99,21 @@ def create_app(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"message": str(exc)},
             ) from exc
+
+    @app.middleware("http")
+    async def record_monitoring_request(request: Request, call_next: Callable[..., Any]) -> Any:
+        response = await call_next(request)
+        payload = get_token_payload_from_header(request.headers.get("authorization"))
+        client_host = request.client.host if request.client else "unknown"
+        user = str(payload["sub"]) if payload and payload.get("sub") else None
+        client_id = f"http:{user or client_host}"
+        await app.state.monitoring_state.record_request(
+            client_id=client_id,
+            address=client_host,
+            user=user,
+            kind="http",
+        )
+        return response
 
     @app.get("/health", response_model=MessageResponse)
     def health() -> MessageResponse:
@@ -123,4 +152,33 @@ def create_app(
     return app
 
 
-app = create_app()
+def create_asgi_app(
+    *,
+    settings: AdminApiSettings | None = None,
+    engine: InternalUserEngine | None = None,
+    engine_factory: Callable[[AdminApiSettings], InternalUserEngine] | None = None,
+) -> Any:
+    app_settings = settings or AdminApiSettings()
+    monitoring_state = MonitoringState()
+    fastapi_app = create_app(
+        settings=app_settings,
+        engine=engine,
+        engine_factory=engine_factory,
+        monitoring_state=monitoring_state,
+    )
+
+    def get_engine_for_monitoring() -> Any:
+        if fastapi_app.state.engine is None:
+            fastapi_app.state.engine = (engine_factory or create_doc_engine)(app_settings)
+        return fastapi_app.state.engine
+
+    monitoring_server = MonitoringSocketServer(
+        settings=app_settings,
+        state=monitoring_state,
+        engine_provider=get_engine_for_monitoring,
+    )
+    fastapi_app.state.monitoring_server = monitoring_server
+    return monitoring_server.asgi_app(fastapi_app)
+
+
+app = create_asgi_app()
