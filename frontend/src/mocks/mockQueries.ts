@@ -1,9 +1,8 @@
 export const mockQueryExamples = [
-  'SHOW COLLECTIONS',
-  'FIND users',
-  'FIND posts',
-  'FIND comments',
-  'FIND follows',
-  'SHOW GRAPHS',
-  'FIND GRAPH social',
+  'SHOW COLLECTIONS;',
+  'SYSTEM STATUS;',
+  'SYSTEM INFO;',
+  'SELECT * FROM users LIMIT 50;',
+  'COUNT FROM users;',
+  'SHOW GRAPHS;',
 ]

@@ -29,7 +29,7 @@ export function QueryResultPanel({
   if (isIdle || !result) {
     return (
       <EmptyState
-        description="Run a mock query to preview tabular rows and raw JSON output."
+        description="Run a NexoraQL statement to preview tabular rows and raw JSON output."
         title="No query has been executed"
       />
     )

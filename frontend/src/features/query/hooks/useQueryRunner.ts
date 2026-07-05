@@ -12,12 +12,10 @@ export function useQueryRunner() {
   async function runQuery(query: string) {
     setError(null)
     setState('loading')
-    const startedAt = performance.now()
 
     try {
       const response = await queryApi.executeQuery({ query })
-      const executionTimeMs = Math.max(0, Math.round(performance.now() - startedAt))
-      setResult({ ...response, executionTimeMs })
+      setResult(response)
       setState('success')
     } catch (runError) {
       setResult(null)
