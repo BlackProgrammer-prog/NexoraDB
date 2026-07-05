@@ -8,9 +8,8 @@ import {
   type ReactNode,
 } from 'react'
 import { authApi } from '../services/authApi'
+import { clearStoredToken, persistToken, readStoredToken } from '../services/authTokenStorage'
 import type { AdminUser, LoginInput, RegisterInput } from '../types/auth.types'
-
-const TOKEN_STORAGE_KEY = 'nexoradb_admin_access_token'
 
 interface AuthContextValue {
   user: AdminUser | null
@@ -23,18 +22,6 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
-
-function readStoredToken() {
-  return window.localStorage.getItem(TOKEN_STORAGE_KEY)
-}
-
-function persistToken(accessToken: string) {
-  window.localStorage.setItem(TOKEN_STORAGE_KEY, accessToken)
-}
-
-function clearStoredToken() {
-  window.localStorage.removeItem(TOKEN_STORAGE_KEY)
-}
 
 interface AuthProviderProps {
   children: ReactNode

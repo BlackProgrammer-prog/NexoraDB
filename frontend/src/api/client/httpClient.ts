@@ -1,5 +1,6 @@
 import { API_BASE_URL } from './apiConfig'
 import { ApiError } from './apiError'
+import { readStoredToken } from '../../features/auth/services/authTokenStorage'
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
@@ -48,10 +49,12 @@ async function request<TResponse, TBody = unknown>(
   path: string,
   options: RequestOptions<TBody> = {},
 ): Promise<TResponse> {
+  const accessToken = readStoredToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...options.headers,
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),

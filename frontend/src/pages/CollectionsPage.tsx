@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { CollectionList } from '../features/collections/components/CollectionList'
 import { CreateCollectionModal } from '../features/collections/components/CreateCollectionModal'
 import { UpdateCollectionModal } from '../features/collections/components/UpdateCollectionModal'
@@ -9,14 +10,19 @@ import { PageHeader } from '../shared/components/layout/PageHeader'
 import { Section } from '../shared/components/layout/Section'
 import { Button } from '../shared/components/ui/Button'
 import { useDisclosure } from '../shared/hooks/useDisclosure'
-import { useState } from 'react'
 
 export function CollectionsPage() {
   const createModal = useDisclosure()
   const updateModal = useDisclosure()
   const { data: collections, error, isLoading, refetch } = useCollections()
   const [collectionToEdit, setCollectionToEdit] = useState<Collection | null>(null)
-  const [selectedCollectionName, setSelectedCollectionName] = useState('users')
+  const [selectedCollectionName, setSelectedCollectionName] = useState('')
+
+  useEffect(() => {
+    if (!selectedCollectionName && collections?.length) {
+      setSelectedCollectionName(collections[0].name)
+    }
+  }, [collections, selectedCollectionName])
 
   async function deleteCollection(collection: Collection) {
     await collectionApi.deleteCollection(collection.name)
@@ -35,7 +41,7 @@ export function CollectionsPage() {
     <div className="space-y-8">
       <PageHeader
         actions={<Button onClick={createModal.open}>New collection</Button>}
-        description="Collection data is isolated behind feature services and can switch from mocks to FastAPI."
+        description="Browse and manage NexoraDB collections through the native document engine."
         title="Collections"
       />
       <Section title="Available collections">

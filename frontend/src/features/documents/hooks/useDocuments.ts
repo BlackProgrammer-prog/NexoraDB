@@ -4,7 +4,7 @@ import { documentApi } from '../services/documentApi'
 
 export function useDocuments(collectionName: string) {
   const loadDocuments = useCallback(
-    () => documentApi.listDocuments(collectionName),
+    () => (collectionName ? documentApi.listDocuments(collectionName) : Promise.resolve([])),
     [collectionName],
   )
 
