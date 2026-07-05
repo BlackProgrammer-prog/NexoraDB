@@ -120,7 +120,7 @@ export function GraphsPage() {
     <div className="space-y-8">
       <PageHeader
         actions={<Button onClick={createGraphModal.open}>New graph</Button>}
-        description="Manage graph records, nodes, and edges through the mock API adapter."
+        description="Manage graph definitions through the NexoraDB graph engine and edit dashboard graph records."
         title="Graphs"
       />
       <Section title="Available graphs">
