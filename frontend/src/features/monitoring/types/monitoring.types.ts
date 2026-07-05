@@ -4,9 +4,12 @@ export interface ActiveConnection {
   id: string
   address?: string
   user?: string
+  kind?: string
+  activeWithinSeconds?: number
 }
 
 export interface MonitoringMetrics {
+  databaseHealthy: boolean
   ramUsedBytes: number
   ramTotalBytes?: number
   ssdUsedBytes: number
