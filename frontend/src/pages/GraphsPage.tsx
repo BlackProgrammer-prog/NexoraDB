@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { CreateGraphModal } from '../features/graphs/components/CreateGraphModal'
 import { DeleteGraphModal } from '../features/graphs/components/DeleteGraphModal'
 import { EdgeEditorModal } from '../features/graphs/components/EdgeEditorModal'
+import { GraphAlgorithmPanel } from '../features/graphs/components/GraphAlgorithmPanel'
 import { GraphEditor } from '../features/graphs/components/GraphEditor'
 import { GraphList } from '../features/graphs/components/GraphList'
 import { NodeEditorModal } from '../features/graphs/components/NodeEditorModal'
@@ -26,7 +27,7 @@ export function GraphsPage() {
   const [selectedGraphId, setSelectedGraphId] = useState<string | null>(null)
 
   const selectedGraph = useMemo(
-    () => graphs?.find((graph) => graph.id === selectedGraphId) ?? graphs?.[0] ?? null,
+    () => graphs?.find((graph) => graph.id === selectedGraphId) ?? null,
     [graphs, selectedGraphId],
   )
 
@@ -143,6 +144,12 @@ export function GraphsPage() {
           onEditEdge={openEdgeEditor}
           onEditNode={openNodeEditor}
         />
+      </Section>
+      <Section
+        description="Select a graph above, then run built-in graph algorithms through the NexoraQL parser."
+        title="Graph algorithms"
+      >
+        <GraphAlgorithmPanel graph={selectedGraph} />
       </Section>
       <CreateGraphModal
         isOpen={createGraphModal.isOpen}
