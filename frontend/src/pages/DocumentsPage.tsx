@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { CollectionSidebar } from '../features/collections/components/CollectionSidebar'
 import { useCollections } from '../features/collections/hooks/useCollections'
 import { DeleteDocumentModal } from '../features/documents/components/DeleteDocumentModal'
@@ -19,12 +19,18 @@ export function DocumentsPage() {
   const { data: collections } = useCollections()
   const [documentToDelete, setDocumentToDelete] = useState<DocumentRecord | null>(null)
   const [documentToEdit, setDocumentToEdit] = useState<DocumentRecord | null>(null)
-  const [selectedCollectionName, setSelectedCollectionName] = useState('users')
+  const [selectedCollectionName, setSelectedCollectionName] = useState('')
   const activeCollectionName = useMemo(
-    () => selectedCollectionName || collections?.[0]?.name || 'users',
+    () => selectedCollectionName || collections?.[0]?.name || '',
     [collections, selectedCollectionName],
   )
   const { data: documents, error, isLoading, refetch } = useDocuments(activeCollectionName)
+
+  useEffect(() => {
+    if (!selectedCollectionName && collections?.length) {
+      setSelectedCollectionName(collections[0].name)
+    }
+  }, [collections, selectedCollectionName])
 
   function openCreateDocument() {
     setDocumentToEdit(null)
@@ -66,8 +72,12 @@ export function DocumentsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        actions={<Button onClick={openCreateDocument}>New document</Button>}
-        description="Document components consume hooks only; API details stay in the document service."
+        actions={
+          <Button disabled={!activeCollectionName} onClick={openCreateDocument}>
+            New document
+          </Button>
+        }
+        description="Create, inspect, update, and delete JSON documents without writing queries."
         title="Documents"
       />
       <div className="grid gap-6 xl:grid-cols-[18rem_1fr]">
@@ -76,7 +86,11 @@ export function DocumentsPage() {
           selectedCollectionName={activeCollectionName}
         />
         <Section
-          description={`Showing mock data for "${activeCollectionName}".`}
+          description={
+            activeCollectionName
+              ? `Showing documents for "${activeCollectionName}".`
+              : 'Create a collection first to browse documents.'
+          }
           title="Selected collection"
         >
           <DocumentList

@@ -11,7 +11,7 @@ export function QueryPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        description="Run demo database queries against the mock API adapter."
+        description="Run NexoraQL against the native NexoraDB engine and inspect execution time."
         title="Query editor"
       />
       <Card>

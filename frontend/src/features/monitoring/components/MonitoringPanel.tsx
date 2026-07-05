@@ -10,6 +10,8 @@ import {
   type ChartConfiguration,
 } from 'chart.js'
 import { useEffect, useMemo, useRef } from 'react'
+import { API_BASE_URL } from '../../../api/client/apiConfig'
+import { useAuth } from '../../auth/context/AuthContext'
 import { Card } from '../../../shared/components/ui/Card'
 import { cn } from '../../../shared/utils/cn'
 import { useMonitoringSocket } from '../hooks/useMonitoringSocket'
@@ -18,7 +20,7 @@ import type { ConnectionStatus, RequestsSample } from '../types/monitoring.types
 Chart.register(CategoryScale, LinearScale, LineController, LineElement, PointElement, Filler, Tooltip)
 
 const monitoringSocketUrl =
-  import.meta.env.VITE_MONITORING_WS_URL ?? 'ws://localhost:8080/ws/metrics'
+  import.meta.env.VITE_MONITORING_SOCKET_URL ?? API_BASE_URL
 
 function formatBytes(bytes?: number): string {
   if (bytes === undefined || !Number.isFinite(bytes)) {
@@ -46,7 +48,7 @@ function formatPercent(used: number, total?: number): string {
 
 function connectionLabel(status: ConnectionStatus): string {
   if (status === 'connected') {
-    return 'Connected'
+    return 'Connect'
   }
 
   if (status === 'connecting') {
@@ -124,10 +126,15 @@ function RequestsLineChart({ samples }: { samples: RequestsSample[] }) {
 }
 
 export function MonitoringPanel() {
-  const { error, metrics, reconnect, samples, status } = useMonitoringSocket(monitoringSocketUrl)
+  const { accessToken } = useAuth()
+  const { error, metrics, reconnect, samples, status } = useMonitoringSocket(
+    monitoringSocketUrl,
+    accessToken,
+  )
   const connectionCount = metrics.activeConnections.length
-  const connectionStatusClass = status === 'connected' ? 'text-green-700' : 'text-red-700'
-  const statusMark = status === 'connected' ? '✓' : 'x'
+  const isHealthy = status === 'connected' && metrics.databaseHealthy
+  const connectionStatusClass = isHealthy ? 'text-green-700' : 'text-red-700'
+  const statusMark = isHealthy ? '✓' : 'x'
 
   const cards = useMemo(
     () => [
@@ -135,15 +142,15 @@ export function MonitoringPanel() {
         label: 'RAM used',
         value: formatBytes(metrics.ramUsedBytes),
         detail: metrics.ramTotalBytes
-          ? `${formatPercent(metrics.ramUsedBytes, metrics.ramTotalBytes)} of ${formatBytes(metrics.ramTotalBytes)}`
-          : 'Mock monitoring data',
+          ? `${formatPercent(metrics.ramUsedBytes, metrics.ramTotalBytes)} of ${formatBytes(metrics.ramTotalBytes)}; used from nexoradb.so`
+          : metrics.databaseHealthy ? 'From nexoradb.so' : 'Waiting for database health',
       },
       {
         label: 'SSD used',
         value: formatBytes(metrics.ssdUsedBytes),
         detail: metrics.ssdTotalBytes
-          ? `${formatPercent(metrics.ssdUsedBytes, metrics.ssdTotalBytes)} of ${formatBytes(metrics.ssdTotalBytes)}`
-          : 'Mock monitoring data',
+          ? `${formatPercent(metrics.ssdUsedBytes, metrics.ssdTotalBytes)} of ${formatBytes(metrics.ssdTotalBytes)}; used from nexoradb.so`
+          : metrics.databaseHealthy ? 'From nexoradb.so' : 'Waiting for database health',
       },
       {
         label: 'Requests / sec',
@@ -153,7 +160,7 @@ export function MonitoringPanel() {
       {
         label: 'Active connections',
         value: String(connectionCount),
-        detail: 'Updated from mock data',
+        detail: 'Apps active in the last 10 seconds',
       },
     ],
     [connectionCount, metrics, samples.length],
@@ -164,12 +171,14 @@ export function MonitoringPanel() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-lg font-semibold text-slate-950">Live health</h2>
-          <p className="text-sm text-slate-500">Mock monitoring data; WebSocket is disabled for now</p>
+          <p className="text-sm text-slate-500">
+            Realtime database health from the FastAPI Socket.IO channel
+          </p>
         </div>
         <button
           className={cn(
             'inline-flex h-10 items-center justify-center gap-2 rounded-md border px-4 text-sm font-semibold transition hover:bg-slate-50',
-            status === 'connected'
+            isHealthy
               ? 'border-green-200 bg-green-50 text-green-800'
               : 'border-red-200 bg-red-50 text-red-800',
           )}
@@ -184,7 +193,7 @@ export function MonitoringPanel() {
           >
             {statusMark}
           </span>
-          {connectionLabel(status)}
+          {isHealthy ? connectionLabel(status) : 'Reconnect'}
         </button>
       </div>
 
@@ -222,7 +231,7 @@ export function MonitoringPanel() {
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-semibold text-slate-950">Active connections</h3>
-              <p className="text-sm text-slate-500">Mock list from each update</p>
+              <p className="text-sm text-slate-500">Apps active in the last 10 seconds</p>
             </div>
             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
               {connectionCount}
@@ -237,9 +246,11 @@ export function MonitoringPanel() {
                   key={connection.id}
                 >
                   <span className="block font-medium text-slate-950">{connection.id}</span>
-                  {connection.address || connection.user ? (
+                  {connection.address || connection.user || connection.kind ? (
                     <span className="text-xs text-slate-500">
-                      {[connection.user, connection.address].filter(Boolean).join(' | ')}
+                      {[connection.user, connection.kind, connection.address]
+                        .filter(Boolean)
+                        .join(' | ')}
                     </span>
                   ) : null}
                 </li>

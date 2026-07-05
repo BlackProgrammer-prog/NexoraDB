@@ -1,4 +1,5 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useAuth } from '../features/auth/context/AuthContext'
 import { cn } from '../shared/utils/cn'
 
 export type AppPage = 'dashboard' | 'collections' | 'documents' | 'graphs' | 'query'
@@ -12,6 +13,14 @@ const navItems: Array<{ label: string; path: string }> = [
 ]
 
 export function DashboardLayout() {
+  const navigate = useNavigate()
+  const { logout, user } = useAuth()
+
+  function handleLogout() {
+    logout()
+    navigate('/login', { replace: true })
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-950">
       <div className="flex min-h-screen flex-col lg:flex-row">
@@ -44,6 +53,18 @@ export function DashboardLayout() {
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="flex h-16 items-center justify-between border-b border-slate-200 bg-white px-6">
             <p className="text-sm font-medium text-slate-600">NexoraDB Console</p>
+            <div className="flex items-center gap-3">
+              <span className="hidden text-sm text-slate-500 sm:inline">
+                {user?.username ?? 'Admin'}
+              </span>
+              <button
+                className="rounded-md border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-950"
+                onClick={handleLogout}
+                type="button"
+              >
+                Sign out
+              </button>
+            </div>
           </header>
           <main className="flex-1 p-4 sm:p-6 lg:p-8">
             <Outlet />

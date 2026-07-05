@@ -41,7 +41,12 @@ classifiers = [
 ]
 
 dependencies = [
-    "lark>=1.1.9"
+    "lark>=1.1.9",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "argon2-cffi>=23.1.0",
+    "python-socketio>=5.11.0"
 ]
 
 
@@ -49,7 +54,9 @@ dependencies = [
 api = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
-    "pydantic>=2.7.0"
+    "pydantic>=2.7.0",
+    "argon2-cffi>=23.1.0",
+    "python-socketio>=5.11.0"
 ]
 
 dashboard = [
@@ -70,6 +77,8 @@ all = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.7.0",
+    "argon2-cffi>=23.1.0",
+    "python-socketio>=5.11.0",
 
 ]
 
@@ -87,7 +96,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["nexoradb*"]
+include = ["nexoradb*", "nexoradb_admin*"]
 
 
 [tool.setuptools.package-data]
@@ -124,5 +133,5 @@ pythonpath = [
 
 [tool.mypy]
 python_version = "3.10"
-packages = ["nexoradb"]
+packages = ["nexoradb", "nexoradb_admin"]
 ignore_missing_imports = true
