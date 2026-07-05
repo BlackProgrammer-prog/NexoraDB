@@ -8,6 +8,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import AdminApiSettings
+from .document_store import (
+    CreateCollectionRequest,
+    DocumentRequest,
+    UpdateCollectionRequest,
+    create_collection,
+    create_document,
+    delete_collection,
+    delete_document,
+    get_document,
+    list_collections,
+    list_documents,
+    rename_collection,
+    replace_document,
+)
 from .monitoring import MonitoringSocketServer, MonitoringState
 from .models import (
     AdminRegisterRequest,
@@ -49,7 +63,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(app_settings.allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
     app.state.settings = app_settings
@@ -148,6 +162,86 @@ def create_app(
         current_engine: InternalUserEngine = Depends(get_engine),
     ) -> PublicUser:
         return get_current_public_user(current_engine, str(token_payload["sub"]))
+
+    @app.get("/collections")
+    def collections(
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> list[dict[str, Any]]:
+        return list_collections(current_engine)
+
+    @app.post("/collections", status_code=status.HTTP_201_CREATED)
+    def create_collection_route(
+        payload: CreateCollectionRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> dict[str, Any]:
+        return create_collection(current_engine, payload)
+
+    @app.put("/collections/{collection_name}")
+    def update_collection_route(
+        collection_name: str,
+        payload: UpdateCollectionRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> dict[str, Any]:
+        return rename_collection(current_engine, collection_name, payload)
+
+    @app.delete("/collections/{collection_name}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_collection_route(
+        collection_name: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> None:
+        delete_collection(current_engine, collection_name)
+
+    @app.get("/collections/{collection_name}/documents")
+    def documents(
+        collection_name: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> list[dict[str, Any]]:
+        return list_documents(current_engine, collection_name)
+
+    @app.get("/collections/{collection_name}/documents/{document_id}")
+    def document_detail(
+        collection_name: str,
+        document_id: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> dict[str, Any]:
+        return get_document(current_engine, collection_name, document_id)
+
+    @app.post("/collections/{collection_name}/documents", status_code=status.HTTP_201_CREATED)
+    def create_document_route(
+        collection_name: str,
+        payload: DocumentRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> dict[str, Any]:
+        return create_document(current_engine, collection_name, payload)
+
+    @app.put("/collections/{collection_name}/documents/{document_id}")
+    def update_document_route(
+        collection_name: str,
+        document_id: str,
+        payload: DocumentRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> dict[str, Any]:
+        return replace_document(current_engine, collection_name, document_id, payload)
+
+    @app.delete(
+        "/collections/{collection_name}/documents/{document_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_document_route(
+        collection_name: str,
+        document_id: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+    ) -> None:
+        delete_document(current_engine, collection_name, document_id)
 
     return app
 
