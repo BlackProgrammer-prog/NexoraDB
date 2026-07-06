@@ -46,7 +46,8 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.7.0",
     "argon2-cffi>=23.1.0",
-    "python-socketio>=5.11.0"
+    "python-socketio>=5.11.0",
+    "textual>=0.86.0"
 ]
 
 
@@ -56,7 +57,8 @@ api = [
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.7.0",
     "argon2-cffi>=23.1.0",
-    "python-socketio>=5.11.0"
+    "python-socketio>=5.11.0",
+    "textual>=0.86.0"
 ]
 
 dashboard = [
@@ -79,8 +81,16 @@ all = [
     "pydantic>=2.7.0",
     "argon2-cffi>=23.1.0",
     "python-socketio>=5.11.0",
+    "textual>=0.86.0",
 
 ]
+
+
+[project.scripts]
+nexoradb = "nexoradb.commands:main"
+nexoradb-server = "nexoradb.commands.server:main"
+nexoradb-dashboard = "nexoradb.commands.dashboard:main"
+nexoradb-cli = "nexoradb.cli:main"
 
 
 [project.urls]
