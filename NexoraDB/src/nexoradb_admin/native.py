@@ -27,11 +27,9 @@ def _load_native_from_path(path: Path) -> ModuleType:
         module = sys.modules["nexoradb"]
         if hasattr(module, "DocEngine"):
             return module
-        raise RuntimeError(
-            "Python package 'nexoradb' is already loaded, so nexoradb.so cannot be loaded "
-            "under the same module name. Start the API before importing the Python package, "
-            "or pass an engine into create_app()."
-        )
+        if hasattr(module, "__path__"):
+            return _load_native_into_package(path, module)
+        raise RuntimeError("Python module 'nexoradb' is already loaded without DocEngine")
 
     spec = importlib.util.spec_from_file_location("nexoradb", path)
     if spec is None or spec.loader is None:
@@ -40,6 +38,27 @@ def _load_native_from_path(path: Path) -> ModuleType:
     sys.modules["nexoradb"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_native_into_package(path: Path, package: ModuleType) -> ModuleType:
+    spec = importlib.util.spec_from_file_location("nexoradb", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load native NexoraDB module from {path}")
+
+    native_module = importlib.util.module_from_spec(spec)
+    sys.modules["nexoradb"] = native_module
+    try:
+        spec.loader.exec_module(native_module)
+    finally:
+        sys.modules["nexoradb"] = package
+
+    for name in dir(native_module):
+        if name in {"__name__", "__package__", "__loader__", "__spec__"}:
+            continue
+        setattr(package, name, getattr(native_module, name))
+    if not hasattr(package, "DocEngine"):
+        raise RuntimeError(f"native NexoraDB module loaded from {path} without DocEngine")
+    return package
 
 
 def load_native_module(settings: AdminApiSettings) -> ModuleType:

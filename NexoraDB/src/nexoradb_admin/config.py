@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _DEFAULT_DEV_AUTH_SECRET = "nexoradb-admin-development-secret-change-in-production"
+_DEFAULT_DEV_API_TOKEN_SECRET = "nexoradb-api-development-token-secret-change-in-production"
 _DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
 
@@ -22,6 +23,9 @@ class AdminApiSettings:
     )
     auth_secret: str = field(
         default_factory=lambda: os.getenv("NEXORADB_AUTH_SECRET", _DEFAULT_DEV_AUTH_SECRET)
+    )
+    api_token_secret: str = field(
+        default_factory=lambda: os.getenv("NEXORADB_API_TOKEN_SECRET", _DEFAULT_DEV_API_TOKEN_SECRET)
     )
     access_token_ttl_seconds: int = field(
         default_factory=lambda: int(
@@ -48,5 +52,9 @@ class AdminApiSettings:
     def validate_for_startup(self) -> None:
         if self.environment.lower() == "production" and "NEXORADB_AUTH_SECRET" not in os.environ:
             raise RuntimeError("NEXORADB_AUTH_SECRET is required in production")
+        if self.environment.lower() == "production" and "NEXORADB_API_TOKEN_SECRET" not in os.environ:
+            raise RuntimeError("NEXORADB_API_TOKEN_SECRET is required in production")
         if len(self.auth_secret) < 32:
             raise RuntimeError("NEXORADB_AUTH_SECRET must be at least 32 characters")
+        if len(self.api_token_secret) < 32:
+            raise RuntimeError("NEXORADB_API_TOKEN_SECRET must be at least 32 characters")
