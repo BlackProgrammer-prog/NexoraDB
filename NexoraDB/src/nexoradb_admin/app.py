@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
+from .api_bridge import (
+    AVAILABLE_APP_SCOPES,
+    CreateAppTokenRequest,
+    CreateAppTokenResponse,
+    create_api_router,
+    create_app_token,
+)
 from .config import AdminApiSettings
 from .document_store import (
     CreateCollectionRequest,
@@ -160,13 +169,15 @@ def create_app(
         response = await call_next(request)
         payload = get_token_payload_from_header(request.headers.get("authorization"))
         client_host = request.client.host if request.client else "unknown"
-        user = str(payload["sub"]) if payload and payload.get("sub") else None
-        client_id = f"http:{user or client_host}"
+        app_id = getattr(request.state, "nexoradb_app_id", None)
+        app_name = getattr(request.state, "nexoradb_app_name", None)
+        user = app_name or (str(payload["sub"]) if payload and payload.get("sub") else None)
+        client_id = f"app:{app_id}" if app_id else f"http:{user or client_host}"
         await app.state.monitoring_state.record_request(
             client_id=client_id,
             address=client_host,
             user=user,
-            kind="http",
+            kind="api-driver" if app_id else "http",
         )
         return response
 
@@ -203,6 +214,26 @@ def create_app(
         current_engine: InternalUserEngine = Depends(get_engine),
     ) -> PublicUser:
         return get_current_public_user(current_engine, str(token_payload["sub"]))
+
+    @app.post("/apps/tokens", response_model=CreateAppTokenResponse)
+    def create_application_token(
+        payload: CreateAppTokenRequest,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_settings: AdminApiSettings = Depends(get_settings),
+    ) -> CreateAppTokenResponse:
+        return create_app_token(
+            app_id=payload.appId,
+            app_name=payload.appName,
+            scopes=payload.scopes,
+            secret=current_settings.api_token_secret,
+            expires_in_seconds=payload.expiresInSeconds,
+        )
+
+    @app.get("/apps/scopes")
+    def application_token_scopes(
+        _: dict[str, Any] = Depends(current_token_payload),
+    ) -> dict[str, list[str]]:
+        return {"scopes": list(AVAILABLE_APP_SCOPES)}
 
     @app.get("/collections")
     def collections(
@@ -283,6 +314,13 @@ def create_app(
         current_engine: Any = Depends(get_engine),
     ) -> None:
         delete_document(current_engine, collection_name, document_id)
+
+    app.include_router(
+        create_api_router(
+            engine_provider=get_engine,
+            graph_manager_provider=get_optional_graph_manager,
+        )
+    )
 
     @app.post("/query/execute", response_model=QueryExecuteResponse)
     def execute_query_route(
@@ -415,11 +453,19 @@ def create_app(
         graph_manager: Any = Depends(get_graph_manager),
         metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
     ) -> dict[str, Any]:
-        return delete_edge(
+        return         delete_edge(
             graph_manager=graph_manager,
             metadata_store=metadata_store,
             graph_id=graph_id,
             edge_id=edge_id,
+        )
+
+    dashboard_static = Path(__file__).resolve().parent.parent / "nexoradb" / "dashboard" / "static"
+    if dashboard_static.is_dir():
+        app.mount(
+            "/admin",
+            StaticFiles(directory=str(dashboard_static), html=True),
+            name="admin-dashboard-static",
         )
 
     return app
