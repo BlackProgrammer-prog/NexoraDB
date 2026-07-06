@@ -133,7 +133,7 @@ class MonitoringSocketServer:
         return socketio.ASGIApp(
             self.sio,
             other_asgi_app=fastapi_app,
-            socketio_path="/socket.io",
+            socketio_path="socket.io",
         )
 
     async def emit_snapshot(self, sid: str | None = None) -> None:
@@ -199,7 +199,7 @@ class MonitoringSocketServer:
             try:
                 payload = decode_access_token(token, self.settings)
             except TokenError:
-                return False
+                raise socketio.exceptions.ConnectionRefusedError("invalid monitoring token") from None
 
             address = str(environ.get("REMOTE_ADDR") or "")
             await self.state.touch_connection(
