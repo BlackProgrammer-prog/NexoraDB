@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../features/auth/context/AuthContext'
 import { cn } from '../shared/utils/cn'
 
-export type AppPage = 'dashboard' | 'collections' | 'documents' | 'graphs' | 'query'
+export type AppPage = 'dashboard' | 'collections' | 'documents' | 'graphs' | 'query' | 'app-tokens'
 
 const navItems: Array<{ label: string; path: string }> = [
   { label: 'Dashboard', path: '/dashboard' },
@@ -10,6 +10,7 @@ const navItems: Array<{ label: string; path: string }> = [
   { label: 'Documents', path: '/documents' },
   { label: 'Graphs', path: '/graphs' },
   { label: 'Query editor', path: '/query' },
+  { label: 'App tokens', path: '/app-tokens' },
 ]
 
 export function DashboardLayout() {

@@ -1,6 +1,7 @@
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
 import { useAuth } from '../features/auth/context/AuthContext'
 import { DashboardLayout } from '../layouts/DashboardLayout'
+import { AppTokensPage } from '../pages/AppTokensPage'
 import { CollectionsPage } from '../pages/CollectionsPage'
 import { DashboardPage } from '../pages/DashboardPage'
 import { DocumentsPage } from '../pages/DocumentsPage'
@@ -48,6 +49,7 @@ export function AppRoutes() {
           <Route element={<DocumentsPage />} path="/documents" />
           <Route element={<GraphsPage />} path="/graphs" />
           <Route element={<QueryPage />} path="/query" />
+          <Route element={<AppTokensPage />} path="/app-tokens" />
         </Route>
       </Route>
       <Route element={<NotFoundPage />} path="*" />
