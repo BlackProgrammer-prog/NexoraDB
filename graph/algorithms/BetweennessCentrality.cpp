@@ -8,8 +8,7 @@
 #include <numeric>
 #include <sstream>
 namespace nexora::graph::algorithms {
-
-
+    
     BetweennessCentrality::BfsState::BfsState(size_t N, size_t s_idx)
     : pred(N), sigma(N, 0.0), dist(N, -1)
     {
