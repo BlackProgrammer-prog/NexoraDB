@@ -153,3 +153,11 @@ namespace nexora::graph::algorithms {
         j << "]}";
         return j.str();
     }
+    double ShortestPath::elapsedMs(
+            const std::chrono::steady_clock::time_point& t0)
+    {
+        return std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+    }
+
+}
