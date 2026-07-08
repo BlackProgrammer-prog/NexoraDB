@@ -9,3 +9,12 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace nexora::graph::algorithms {
+
+    class AreConnected final : public LockAlgorithm {
+    public:
+        std::string name() const override;
+
+        AlgoResult run(const LiveGraph&           graph,
+                       const std::vector<ExtId>& params) override;
