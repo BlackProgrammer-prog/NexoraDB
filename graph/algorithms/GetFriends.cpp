@@ -63,3 +63,43 @@ namespace nexora::graph::algorithms {
 
         return AlgoResult{true, "", buildJson(graph, user_id, friends, limit_applied), ms};
     }
+    void GetFriends::collectNeighbors(const LiveGraph&      graph,
+                                      DenseId               uid,
+                                      TypeId                edge_type,
+                                      size_t                limit,
+                                      std::vector<DenseId>& out_vec)
+    {
+        auto accept = [&](const AdjEntry& e) -> bool {
+            if (out_vec.size() >= limit) return false;
+            if (edge_type == kInvalidTypeId || e.type_id == edge_type)
+                out_vec.push_back(e.neighbor);
+            return true;
+        };
+
+        graph.forEachOutEdge(uid, accept);
+
+        if (out_vec.size() < limit)
+            graph.forEachInEdge(uid, accept);
+    }
+
+
+    std::string GetFriends::buildJson(const LiveGraph&            graph,
+                                      const ExtId&                user_id,
+                                      const std::vector<DenseId>& friends,
+                                      bool                        limit_applied)
+    {
+        std::ostringstream j;
+        j << "{\"user_id\":\""    << user_id         << "\""
+          << ",\"friend_count\":" << friends.size()
+          << ",\"limit_applied\":" << (limit_applied ? "true" : "false")
+          << ",\"friends\":[";
+
+        for (size_t i = 0; i < friends.size(); ++i) {
+            if (i) j << ",";
+            j << "\"" << graph.getExtId(friends[i]) << "\"";
+        }
+        j << "]}";
+        return j.str();
+    }
+
+}
