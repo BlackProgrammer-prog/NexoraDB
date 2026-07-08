@@ -1,11 +1,6 @@
 //
 // Created by Acer on 7/9/2026.
 //
-
-#ifndef NEXORADB_INFLUENCEMAXIMIZATION_H
-#define NEXORADB_INFLUENCEMAXIMIZATION_H
-
-#endif //NEXORADB_INFLUENCEMAXIMIZATION_H
 #pragma once
 #include "AlgorithmBase.h"
 #include <deque>
