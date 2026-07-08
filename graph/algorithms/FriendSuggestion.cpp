@@ -48,3 +48,4 @@ namespace nexora::graph::algorithms {
 
         return AlgoResult{true, "", buildJson(graph, user_id, ranked), ms};
     }
+    
