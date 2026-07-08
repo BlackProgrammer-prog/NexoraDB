@@ -70,3 +70,38 @@ namespace nexora::graph::algorithms {
         return AlgoResult{true, "", buildJson(snapshot, nodes, order, betweenness, show), ms};
     }
 
+    void BetweennessCentrality::forwardBfs(
+            const StaticGraph&                    snapshot,
+            const std::vector<DenseId>&           nodes,
+            const std::unordered_map<DenseId,size_t>& idx,
+            size_t                                s_idx,
+            BfsState&                             st)
+    {
+        while (!st.queue.empty()) {
+            size_t v = st.queue.front();
+            st.queue.pop_front();
+            st.bfs_stack.push(v);
+
+            auto expand = [&](DenseId nbr_id) -> bool {
+                auto it = idx.find(nbr_id);
+                if (it == idx.end()) return true;
+                size_t w = it->second;
+
+                if (st.dist[w] < 0) {
+                    st.dist[w] = st.dist[v] + 1;
+                    st.queue.push_back(w);
+                }
+                if (st.dist[w] == st.dist[v] + 1) {
+                    st.sigma[w] += st.sigma[v];
+                    st.pred[w].push_back(v);
+                }
+                return true;
+            };
+
+            snapshot.forEachNeighbor(nodes[v], Direction::Out,
+                                     [&](DenseId n, TypeId) -> bool { return expand(n); });
+            snapshot.forEachNeighbor(nodes[v], Direction::In,
+                                     [&](DenseId n, TypeId) -> bool { return expand(n); });
+        }
+    }
+
