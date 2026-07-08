@@ -1,16 +1,13 @@
-//
-// Created by Acer on 7/8/2026.
-//
 #include "GetFriends.h"
 #include <algorithm>
 #include <chrono>
 #include <sstream>
 namespace nexora::graph::algorithms {
 
-// ─────────────────────────────────────────────────────────────────────────────
+
     std::string GetFriends::name() const { return "GetFriends"; }
 
-// ─────────────────────────────────────────────────────────────────────────────
+
     AlgoResult GetFriends::run(const LiveGraph&           graph,
                                const std::vector<ExtId>& params)
     {
