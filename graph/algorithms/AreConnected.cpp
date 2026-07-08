@@ -45,3 +45,22 @@ namespace nexora::graph::algorithms {
 
         visited_fwd[src] = 0;   queue_fwd.push_back(src);
         visited_bwd[dst] = 0;   queue_bwd.push_back(dst);
+
+        for (int depth = 1; depth <= kMaxDepth; ++depth) {
+            if (queue_fwd.empty() || queue_bwd.empty()) break;
+
+
+            const bool expand_fwd = (queue_fwd.size() <= queue_bwd.size());
+
+            BfsQueue&    q_a = expand_fwd ? queue_fwd  : queue_bwd;
+            VisitedMap&  v_a = expand_fwd ? visited_fwd: visited_bwd;
+            const VisitedMap& v_o = expand_fwd ? visited_bwd: visited_fwd;
+
+            if (expandLevel(graph, q_a, v_a, v_o, q_a.size()))
+                return AlgoResult{true, "", buildJson(true, depth, params[0], params[1]),
+                                  elapsedMs(t0)};
+        }
+
+        return AlgoResult{true, "", buildJson(false, -1, params[0], params[1]),
+                          elapsedMs(t0)};
+    }
