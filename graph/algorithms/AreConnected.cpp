@@ -64,3 +64,37 @@ namespace nexora::graph::algorithms {
         return AlgoResult{true, "", buildJson(false, -1, params[0], params[1]),
                           elapsedMs(t0)};
     }
+
+    bool AreConnected::expandLevel(const LiveGraph&  graph,
+                                   BfsQueue&         q_a,
+                                   VisitedMap&       v_a,
+                                   const VisitedMap& v_o,
+                                   size_t            level_size)
+    {
+        for (size_t qi = 0; qi < level_size; ++qi) {
+            DenseId cur = q_a.front();
+            q_a.pop_front();
+
+            bool hit = false;
+
+            auto check = [&](DenseId nbr) -> bool {
+                if (v_o.count(nbr)) { hit = true; return false; }
+                if (!v_a.count(nbr)) {
+                    v_a[nbr] = v_a[cur] + 1;
+                    q_a.push_back(nbr);
+                }
+                return true;
+            };
+
+            graph.forEachOutEdge(cur, [&](const AdjEntry& e) -> bool {
+                return check(e.neighbor);
+            });
+            if (hit) return true;
+
+            graph.forEachInEdge(cur, [&](const AdjEntry& e) -> bool {
+                return check(e.neighbor);
+            });
+            if (hit) return true;
+        }
+        return false;
+    }
