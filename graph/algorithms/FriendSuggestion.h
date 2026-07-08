@@ -17,3 +17,10 @@ namespace nexora::graph::algorithms {
 
         AlgoResult run(const LiveGraph&           graph,
                        const std::vector<ExtId>& params) override;
+    private:
+        static constexpr size_t kDefaultLimit = 10;
+        static constexpr size_t kMaxLimit     = 1'000;
+        
+        using FilterSet     = std::unordered_set<DenseId>;
+        using ScoreMap      = std::unordered_map<DenseId, int>;
+        using RankedVec     = std::vector<std::pair<int, DenseId>>;
