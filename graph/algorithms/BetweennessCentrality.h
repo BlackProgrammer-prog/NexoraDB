@@ -28,3 +28,15 @@ namespace nexora::graph::algorithms {
 
             explicit BfsState(size_t N, size_t s_idx);
         };
+
+        static void forwardBfs(const StaticGraph&                    snapshot,
+                               const std::vector<DenseId>&           nodes,
+                               const std::unordered_map<DenseId,size_t>& idx,
+                               size_t                                s_idx,
+                               BfsState&                             state);
+        
+        static void backwardPass(size_t                s_idx,
+                                 const BfsState&       state,
+                                 std::vector<double>&  betweenness);
+
+        static void normalize(std::vector<double>& bc, size_t N);
