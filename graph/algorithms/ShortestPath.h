@@ -15,30 +15,31 @@ namespace nexora::graph::algorithms {
     public:
         std::string name() const override;
 
-        AlgoResult run(const LiveGraph&           graph,
-                       const std::vector<ExtId>& params) override;
+        AlgoResult run(const LiveGraph &graph,
+                       const std::vector <ExtId> &params) override;
 
     private:
         static constexpr int kMaxDepth = 12;
         using ParentMap = std::unordered_map<DenseId, DenseId>;
-        using BfsQueue  = std::deque<DenseId>;
+        using BfsQueue = std::deque<DenseId>;
 
-        static bool expandLevel(const LiveGraph& graph,
-                                BfsQueue&        q_active,
-                                ParentMap&       p_active,
-                                const ParentMap& p_other,
-                                size_t           level_size,
-                                DenseId&         meet_out);
+        static bool expandLevel(const LiveGraph &graph,
+                                BfsQueue &q_active,
+                                ParentMap &p_active,
+                                const ParentMap &p_other,
+                                size_t level_size,
+                                DenseId &meet_out);
 
-        static std::vector<DenseId> rebuildLeft(DenseId            meet,
-                                                const ParentMap&   parent_fwd);
+        static std::vector <DenseId> rebuildLeft(DenseId meet,
+                                                 const ParentMap &parent_fwd);
 
-        static std::vector<DenseId> rebuildRight(DenseId           meet,
-                                                 const ParentMap&  parent_bwd);
+        static std::vector <DenseId> rebuildRight(DenseId meet,
+                                                  const ParentMap &parent_bwd);
 
-        static std::string buildJson(const LiveGraph&            graph,
-                                     const std::vector<DenseId>& path);
+        static std::string buildJson(const LiveGraph &graph,
+                                     const std::vector <DenseId> &path);
 
         static double elapsedMs(
-                const std::chrono::steady_clock::time_point& t0);
+                const std::chrono::steady_clock::time_point &t0);
     };
+}
