@@ -55,3 +55,12 @@ namespace nexora::graph::algorithms {
             forwardBfs(snapshot, nodes, idx, s, state);
             backwardPass(s, state, betweenness);
         }
+
+        normalize(betweenness, N);
+        
+        std::vector<size_t> order(N);
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(),
+                  [&](size_t a, size_t b) { return betweenness[a] > betweenness[b]; });
+
+        const size_t show = std::min(top_k, N);
