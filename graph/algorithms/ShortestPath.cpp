@@ -66,3 +66,10 @@ namespace nexora::graph::algorithms {
               << ",\"user2\":\"" << params[1] << "\"}";
             return AlgoResult{true, "", j.str(), elapsedMs(t0)};
         }
+        auto path_left  = rebuildLeft (meet, parent_fwd);
+        auto path_right = rebuildRight(meet, parent_bwd);
+
+        path_left.insert(path_left.end(), path_right.begin(), path_right.end());
+
+        return AlgoResult{true, "", buildJson(graph, path_left), elapsedMs(t0)};
+    }
