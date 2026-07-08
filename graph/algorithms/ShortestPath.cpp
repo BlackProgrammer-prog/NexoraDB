@@ -58,3 +58,11 @@ namespace nexora::graph::algorithms {
             if (expandLevel(graph, q_a, p_a, p_o, q_a.size(), meet))
                 break;
         }
+
+        if (meet == kInvalidDenseId) {
+            std::ostringstream j;
+            j << "{\"found\":false,\"hops\":-1,\"path\":[]"
+              << ",\"user1\":\"" << params[0] << "\""
+              << ",\"user2\":\"" << params[1] << "\"}";
+            return AlgoResult{true, "", j.str(), elapsedMs(t0)};
+        }
