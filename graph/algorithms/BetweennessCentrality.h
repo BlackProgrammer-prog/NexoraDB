@@ -34,9 +34,18 @@ namespace nexora::graph::algorithms {
                                const std::unordered_map<DenseId,size_t>& idx,
                                size_t                                s_idx,
                                BfsState&                             state);
-        
+
         static void backwardPass(size_t                s_idx,
                                  const BfsState&       state,
                                  std::vector<double>&  betweenness);
 
         static void normalize(std::vector<double>& bc, size_t N);
+
+        static std::string buildJson(const StaticGraph&          snapshot,
+                                     const std::vector<DenseId>& nodes,
+                                     const std::vector<size_t>&  order,
+                                     const std::vector<double>&  bc,
+                                     size_t                      show_count);
+    };
+
+}
