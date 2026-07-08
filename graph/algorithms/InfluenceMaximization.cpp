@@ -81,7 +81,7 @@ namespace nexora::graph::algorithms {
             cur_reach += best_gain;
         }
         const double final_reach = simulateIC(adj, chosen, R, p, rng);
-        
+
         double ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
 
@@ -90,3 +90,18 @@ namespace nexora::graph::algorithms {
                           ms};
     }
 
+    InfluenceMaximization::AdjList
+    InfluenceMaximization::buildAdjList(const StaticGraph& snapshot)
+    {
+        AdjList adj;
+        adj.reserve(snapshot.nodeCount());
+
+        snapshot.forEachEdge(
+                [&](EdgeId, DenseId src, DenseId dst, TypeId) -> bool {
+                    adj[src].push_back(dst);
+                    adj[dst].push_back(src);   // undirected
+                    return true;
+                });
+
+        return adj;
+    }
