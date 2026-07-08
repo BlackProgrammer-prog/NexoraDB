@@ -105,3 +105,23 @@ namespace nexora::graph::algorithms {
         }
     }
 
+    void BetweennessCentrality::backwardPass(size_t               s_idx,
+    const BfsState&      st,
+            std::vector<double>& betweenness)
+{
+    const size_t N = betweenness.size();
+    std::vector<double> delta(N, 0.0);
+
+    // کپی قابل تغییر از stack (چون top/pop const نیست در std::stack)
+    auto stk = st.bfs_stack;
+
+    while (!stk.empty()) {
+    size_t w = stk.top();
+    stk.pop();
+    for (size_t v : st.pred[w]) {
+    delta[v] += (st.sigma[v] / st.sigma[w]) * (1.0 + delta[w]);
+}
+if (w != s_idx)
+betweenness[w] += delta[w];
+}
+}
