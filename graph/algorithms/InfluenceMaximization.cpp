@@ -46,3 +46,9 @@ namespace nexora::graph::algorithms {
                               "{\"k_seeds\":0,\"seeds\":[],\"estimated_reach\":0}", 0.0};
 
         K = std::min(K, N);
+        AdjList adj = buildAdjList(snapshot);
+        std::mt19937 rng(42u);
+        SeedSet               chosen;
+        std::vector<DenseId>  order;
+        std::vector<double>   gains;
+        double                cur_reach = 0.0;
