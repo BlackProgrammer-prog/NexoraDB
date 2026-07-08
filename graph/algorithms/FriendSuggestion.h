@@ -34,3 +34,10 @@ namespace nexora::graph::algorithms {
                                     DenseId          uid);
 
         static RankedVec rankAndTrim(const ScoreMap& scores, size_t limit);
+
+        static std::string buildJson(const LiveGraph&  graph,
+                                     const ExtId&      user_id,
+                                     const RankedVec&  ranked);
+    };
+
+}
