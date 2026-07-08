@@ -111,3 +111,15 @@ namespace nexora::graph::algorithms {
         }
         return false;
     }
+    std::vector<DenseId> ShortestPath::rebuildLeft(DenseId           meet,
+                                                   const ParentMap&  parent_fwd)
+    {
+        std::vector<DenseId> half;
+        for (DenseId v = meet; v != kInvalidDenseId; ) {
+            half.push_back(v);
+            auto it = parent_fwd.find(v);
+            v = (it != parent_fwd.end()) ? it->second : kInvalidDenseId;
+        }
+        std::reverse(half.begin(), half.end());
+        return half;
+    }
