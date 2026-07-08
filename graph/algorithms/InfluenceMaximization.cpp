@@ -52,3 +52,24 @@ namespace nexora::graph::algorithms {
         std::vector<DenseId>  order;
         std::vector<double>   gains;
         double                cur_reach = 0.0;
+
+        order.reserve(K);
+        gains.reserve(K);
+
+        for (size_t k = 0; k < K; ++k) {
+            DenseId best      = kInvalidDenseId;
+            double  best_gain = -1.0;
+
+            for (DenseId c : all_nodes) {
+                if (chosen.count(c)) continue;
+
+                chosen.insert(c);
+                const double new_reach = simulateIC(adj, chosen, R, p, rng);
+                const double gain      = new_reach - cur_reach;
+                chosen.erase(c);
+
+                if (gain > best_gain) {
+                    best_gain = gain;
+                    best      = c;
+                }
+            }
