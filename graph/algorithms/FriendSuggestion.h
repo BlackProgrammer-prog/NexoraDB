@@ -1,10 +1,6 @@
 //
 // Created by Acer on 7/9/2026.
 //
-
-#ifndef NEXORADB_FRIENDSUGGESTION_H
-#define NEXORADB_FRIENDSUGGESTION_H
-#endif //NEXORADB_FRIENDSUGGESTION_H
 #pragma once
 #include "AlgorithmBase.h"
 #include <string>
