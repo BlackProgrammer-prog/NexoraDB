@@ -104,15 +104,13 @@ namespace nexora::graph::algorithms {
                                      [&](DenseId n, TypeId) -> bool { return expand(n); });
         }
     }
-
-    void BetweennessCentrality::backwardPass(size_t               s_idx,
+    void BetweennessCentrality::backwardPass(size_t     s_idx,
     const BfsState&      st,
             std::vector<double>& betweenness)
 {
     const size_t N = betweenness.size();
     std::vector<double> delta(N, 0.0);
 
-    // کپی قابل تغییر از stack (چون top/pop const نیست در std::stack)
     auto stk = st.bfs_stack;
 
     while (!stk.empty()) {
@@ -125,11 +123,11 @@ if (w != s_idx)
 betweenness[w] += delta[w];
 }
 }
+
+
 void BetweennessCentrality::normalize(std::vector<double>& bc, size_t N)
 {
-    // فرمول نرمال‌سازی برای گراف undirected:
-    //   ÷ 2 چون هر مسیر دو بار شمرده شده (s→t و t→s)
-    //   ÷ (N-1)(N-2)/2 برای normalize به [0,1]
     const double norm = (N > 2) ? (2.0 / ((N - 1.0) * (N - 2.0))) : 1.0;
     for (auto& v : bc) v *= 0.5 * norm;
 }
+
