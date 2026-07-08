@@ -59,3 +59,24 @@ namespace nexora::graph::algorithms {
         graph.forEachOutEdge(uid, insert);
         graph.forEachInEdge(uid, insert);
     }
+
+    FriendSuggestion::ScoreMap
+    FriendSuggestion::countMutual(const LiveGraph& graph,
+                                  const FilterSet& direct_friends,
+                                  DenseId          uid)
+    {
+        ScoreMap scores;
+
+        for (DenseId fid : direct_friends) {
+            if (fid == uid) continue;   
+
+            auto visit = [&](const AdjEntry& e) -> bool {
+                if (!direct_friends.count(e.neighbor))
+                    scores[e.neighbor]++;
+                return true;
+            };
+            graph.forEachOutEdge(fid, visit);
+            graph.forEachInEdge(fid, visit);
+        }
+        return scores;
+    }
