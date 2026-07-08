@@ -131,3 +131,28 @@ void BetweennessCentrality::normalize(std::vector<double>& bc, size_t N)
     for (auto& v : bc) v *= 0.5 * norm;
 }
 
+std::string BetweennessCentrality::buildJson(
+        const StaticGraph&          snapshot,
+        const std::vector<DenseId>& nodes,
+        const std::vector<size_t>&  order,
+        const std::vector<double>&  bc,
+        size_t                      show_count)
+{
+    std::ostringstream j;
+    j << std::fixed << std::setprecision(6);
+    j << "{\"total_nodes\":" << nodes.size()
+      << ",\"showing\":"     << show_count
+      << ",\"nodes\":[";
+
+    for (size_t r = 0; r < show_count; ++r) {
+        const size_t i = order[r];
+        if (r) j << ",";
+        j << "{\"user_id\":\""  << snapshot.extId(nodes[i]) << "\""
+          << ",\"betweenness\":" << bc[i]
+          << ",\"rank\":"        << (r + 1) << "}";
+    }
+    j << "]}";
+    return j.str();
+}
+
+}
