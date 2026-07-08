@@ -14,6 +14,17 @@ namespace nexora::graph::algorithms {
     class BetweennessCentrality final : public JobAlgorithm {
     public:
         std::string name() const override;
-        
+
         AlgoResult run(const StaticGraph&         snapshot,
                        const std::vector<ExtId>& params) override;
+
+    private:
+        struct BfsState {
+            std::stack<size_t>              bfs_stack;
+            std::vector<std::vector<size_t>> pred;
+            std::vector<double>             sigma;
+            std::vector<int>                dist;
+            std::deque<size_t>              queue;
+
+            explicit BfsState(size_t N, size_t s_idx);
+        };
