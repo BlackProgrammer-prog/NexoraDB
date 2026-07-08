@@ -138,4 +138,18 @@ namespace nexora::graph::algorithms {
         }
         return half;
     }
-    
+    std::string ShortestPath::buildJson(const LiveGraph&            graph,
+                                        const std::vector<DenseId>& path)
+    {
+        const int hops = path.empty() ? -1 : static_cast<int>(path.size()) - 1;
+        std::ostringstream j;
+        j << "{\"found\":true"
+          << ",\"hops\":"  << hops
+          << ",\"path\":[";
+        for (size_t i = 0; i < path.size(); ++i) {
+            if (i) j << ",";
+            j << "\"" << graph.getExtId(path[i]) << "\"";
+        }
+        j << "]}";
+        return j.str();
+    }
