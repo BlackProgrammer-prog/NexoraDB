@@ -45,3 +45,16 @@ namespace nexora::graph::algorithms {
         queue_bwd.push_back(dst);
 
         DenseId meet = kInvalidDenseId;
+
+        for (int depth = 1; depth <= kMaxDepth; ++depth) {
+            if (queue_fwd.empty() || queue_bwd.empty()) break;
+
+            const bool expand_fwd = (queue_fwd.size() <= queue_bwd.size());
+
+            BfsQueue&       q_a = expand_fwd ? queue_fwd  : queue_bwd;
+            ParentMap&      p_a = expand_fwd ? parent_fwd : parent_bwd;
+            const ParentMap& p_o = expand_fwd ? parent_bwd : parent_fwd;
+
+            if (expandLevel(graph, q_a, p_a, p_o, q_a.size(), meet))
+                break;
+        }
