@@ -125,3 +125,11 @@ if (w != s_idx)
 betweenness[w] += delta[w];
 }
 }
+void BetweennessCentrality::normalize(std::vector<double>& bc, size_t N)
+{
+    // فرمول نرمال‌سازی برای گراف undirected:
+    //   ÷ 2 چون هر مسیر دو بار شمرده شده (s→t و t→s)
+    //   ÷ (N-1)(N-2)/2 برای normalize به [0,1]
+    const double norm = (N > 2) ? (2.0 / ((N - 1.0) * (N - 2.0))) : 1.0;
+    for (auto& v : bc) v *= 0.5 * norm;
+}
