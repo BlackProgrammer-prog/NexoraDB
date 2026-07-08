@@ -25,3 +25,22 @@ namespace nexora::graph::algorithms {
         using VisitedMap = std::unordered_map<DenseId, int>;
         using BfsQueue   = std::deque<DenseId>;
 
+        static bool expandLevel(const LiveGraph& graph,
+                                BfsQueue&        queue_active,
+                                VisitedMap&      visited_active,
+                                const VisitedMap& visited_other,
+                                size_t           level_size);
+
+
+        static std::string buildJson(bool               connected,
+                                     int                hops,
+                                     const std::string& u1,
+                                     const std::string& u2);
+
+
+        static double elapsedMs(
+                const std::chrono::steady_clock::time_point& t0);
+    };
+
+}
+
