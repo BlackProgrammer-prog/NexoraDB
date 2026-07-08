@@ -73,3 +73,28 @@ namespace nexora::graph::algorithms {
 
         return AlgoResult{true, "", buildJson(graph, path_left), elapsedMs(t0)};
     }
+    bool ShortestPath::expandLevel(const LiveGraph& graph,
+                                   BfsQueue&        q_a,
+                                   ParentMap&       p_a,
+                                   const ParentMap& p_o,
+                                   size_t           level_size,
+                                   DenseId&         meet_out)
+    {
+        for (size_t qi = 0; qi < level_size; ++qi) {
+            DenseId cur = q_a.front();
+            q_a.pop_front();
+
+            bool hit = false;
+
+            auto check = [&](DenseId nbr) -> bool {
+                if (p_o.count(nbr)) {
+                    meet_out = nbr;
+                    hit = true;
+                    return false;
+                }
+                if (!p_a.count(nbr)) {
+                    p_a[nbr] = cur;
+                    q_a.push_back(nbr);
+                }
+                return true;
+            };
