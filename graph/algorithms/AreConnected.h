@@ -18,3 +18,10 @@ namespace nexora::graph::algorithms {
 
         AlgoResult run(const LiveGraph&           graph,
                        const std::vector<ExtId>& params) override;
+
+    private:
+
+        static constexpr int kMaxDepth = 12;
+        using VisitedMap = std::unordered_map<DenseId, int>;
+        using BfsQueue   = std::deque<DenseId>;
+
