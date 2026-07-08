@@ -377,4 +377,4 @@ namespace nexora {
     } // namespace graph
 } // namespace nexora
 
-#endif //GITIGNORE_LIVEGRAPH_H
+#endif
