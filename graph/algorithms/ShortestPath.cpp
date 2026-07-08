@@ -35,3 +35,13 @@ namespace nexora::graph::algorithms {
             return AlgoResult{true, "",
                               buildJson(graph, {src}),
                               elapsedMs(t0)};
+
+        ParentMap parent_fwd, parent_bwd;
+        BfsQueue  queue_fwd,  queue_bwd;
+
+        parent_fwd[src] = kInvalidDenseId;
+        parent_bwd[dst] = kInvalidDenseId;
+        queue_fwd.push_back(src);
+        queue_bwd.push_back(dst);
+
+        DenseId meet = kInvalidDenseId;
