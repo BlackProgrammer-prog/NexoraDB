@@ -2,4 +2,7 @@
 // Created by Acer on 7/8/2026.
 //
 
+#ifndef NEXORADB_ARECONNECTED_H
+#define NEXORADB_ARECONNECTED_H
 
+#endif //NEXORADB_ARECONNECTED_H
