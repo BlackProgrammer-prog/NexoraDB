@@ -123,3 +123,19 @@ namespace nexora::graph::algorithms {
         std::reverse(half.begin(), half.end());
         return half;
     }
+
+    std::vector<DenseId> ShortestPath::rebuildRight(DenseId          meet,
+                                                    const ParentMap& parent_bwd)
+    {
+        std::vector<DenseId> half;
+        auto start_it = parent_bwd.find(meet);
+        DenseId v = (start_it != parent_bwd.end()) ? start_it->second : kInvalidDenseId;
+
+        while (v != kInvalidDenseId) {
+            half.push_back(v);
+            auto it = parent_bwd.find(v);
+            v = (it != parent_bwd.end()) ? it->second : kInvalidDenseId;
+        }
+        return half;
+    }
+    
