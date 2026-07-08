@@ -39,3 +39,9 @@ namespace nexora::graph::algorithms {
             graph.hasEdge(params[1], params[0], ""))
             return AlgoResult{true, "", buildJson(true, 1, params[0], params[1]),
                               elapsedMs(t0)};
+
+        VisitedMap visited_fwd, visited_bwd;
+        BfsQueue   queue_fwd,   queue_bwd;
+
+        visited_fwd[src] = 0;   queue_fwd.push_back(src);
+        visited_bwd[dst] = 0;   queue_bwd.push_back(dst);
