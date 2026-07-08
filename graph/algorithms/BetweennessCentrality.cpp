@@ -57,10 +57,16 @@ namespace nexora::graph::algorithms {
         }
 
         normalize(betweenness, N);
-        
+
         std::vector<size_t> order(N);
         std::iota(order.begin(), order.end(), 0);
         std::sort(order.begin(), order.end(),
                   [&](size_t a, size_t b) { return betweenness[a] > betweenness[b]; });
 
         const size_t show = std::min(top_k, N);
+        double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+
+        return AlgoResult{true, "", buildJson(snapshot, nodes, order, betweenness, show), ms};
+    }
+
