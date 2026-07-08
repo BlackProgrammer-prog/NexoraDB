@@ -6,3 +6,10 @@
 #define NEXORADB_BETWEENNESSCENTRALITY_H
 
 #endif //NEXORADB_BETWEENNESSCENTRALITY_H
+#pragma once
+#include "AlgorithmBase.h"
+#include <deque>
+#include <stack>
+#include <string>
+#include <unordered_map>
+#include <vector>
