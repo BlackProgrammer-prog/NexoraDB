@@ -16,18 +16,18 @@ namespace nexora::graph::algorithms {
     {
         auto t0 = std::chrono::steady_clock::now();
 
-        // ── ۱. validation ─────────────────────────────────────────────────────
+
         if (params.empty())
             return AlgoResult{false, "param[0] required: user_id"};
 
         const ExtId& user_id = params[0];
 
-        // ── ۲. ExtId → DenseId ────────────────────────────────────────────────
+
         DenseId uid = graph.getDenseId(user_id);
         if (uid == kInvalidDenseId)
             return AlgoResult{false, "User not found: " + user_id};
 
-        // ── ۳. parse limit ────────────────────────────────────────────────────
+
         size_t limit = SIZE_MAX;
         if (params.size() >= 2 && !params[1].empty()) {
             try   { limit = static_cast<size_t>(std::stoul(params[1])); }
@@ -37,3 +37,29 @@ namespace nexora::graph::algorithms {
             if (limit > kMaxLimit)
                 return AlgoResult{false, "limit exceeds maximum (" + std::to_string(kMaxLimit) + ")"};
         }
+
+
+        TypeId edge_type = kInvalidTypeId;
+        if (params.size() >= 3 && !params[2].empty()) {
+            auto tid = graph.getEdgeTypeId(params[2]);
+            if (!tid)
+                return AlgoResult{false, "Unknown edge type: " + params[2]};
+            edge_type = *tid;
+        }
+
+
+        std::vector<DenseId> friends;
+        collectNeighbors(graph, uid, edge_type, limit, friends);
+
+
+        std::sort(friends.begin(), friends.end());
+        friends.erase(std::unique(friends.begin(), friends.end()), friends.end());
+        const bool limit_applied = (friends.size() >= limit);
+        if (friends.size() > limit) friends.resize(limit);
+
+
+        double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+
+        return AlgoResult{true, "", buildJson(graph, user_id, friends, limit_applied), ms};
+    }
