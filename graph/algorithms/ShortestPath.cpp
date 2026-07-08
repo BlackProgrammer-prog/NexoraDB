@@ -98,3 +98,16 @@ namespace nexora::graph::algorithms {
                 }
                 return true;
             };
+
+            graph.forEachOutEdge(cur, [&](const AdjEntry& e) -> bool {
+                return check(e.neighbor);
+            });
+            if (hit) return true;
+
+            graph.forEachInEdge(cur, [&](const AdjEntry& e) -> bool {
+                return check(e.neighbor);
+            });
+            if (hit) return true;
+        }
+        return false;
+    }
