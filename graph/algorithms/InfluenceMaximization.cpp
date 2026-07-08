@@ -142,4 +142,36 @@ namespace nexora::graph::algorithms {
         }
         return activated.size();
     }
+    std::string InfluenceMaximization::buildJson(
+            const StaticGraph&          snapshot,
+            const std::vector<DenseId>& order,
+            const std::vector<double>&  gains,
+            double                      final_reach,
+            size_t                      N,
+            size_t                      K,
+            size_t                      R,
+            double                      p)
+    {
+        const double pct = (N > 0) ? (final_reach / N * 100.0) : 0.0;
 
+        std::ostringstream j;
+        j << std::fixed << std::setprecision(2);
+        j << "{\"k_seeds\":"         << K
+          << ",\"simulations\":"     << R
+          << ",\"propagation_prob\":" << p
+          << ",\"estimated_reach\":" << final_reach
+          << ",\"reach_percentage\":" << pct
+          << ",\"total_nodes\":"     << N
+          << ",\"seeds\":[";
+
+        for (size_t i = 0; i < order.size(); ++i) {
+            if (i) j << ",";
+            j << "{\"user_id\":\""       << snapshot.extId(order[i]) << "\""
+              << ",\"marginal_gain\":"   << gains[i]
+              << ",\"selection_order\":" << (i + 1) << "}";
+        }
+        j << "]}";
+        return j.str();
+    }
+
+}
