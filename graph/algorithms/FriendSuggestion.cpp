@@ -68,7 +68,7 @@ namespace nexora::graph::algorithms {
         ScoreMap scores;
 
         for (DenseId fid : direct_friends) {
-            if (fid == uid) continue;   
+            if (fid == uid) continue;
 
             auto visit = [&](const AdjEntry& e) -> bool {
                 if (!direct_friends.count(e.neighbor))
@@ -79,4 +79,21 @@ namespace nexora::graph::algorithms {
             graph.forEachInEdge(fid, visit);
         }
         return scores;
+    }
+    FriendSuggestion::RankedVec
+    FriendSuggestion::rankAndTrim(const ScoreMap& scores, size_t limit)
+    {
+        RankedVec ranked;
+        ranked.reserve(scores.size());
+        for (const auto& [id, score] : scores)
+            ranked.emplace_back(score, id);
+
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const auto& a, const auto& b) {
+                      if (a.first != b.first) return a.first > b.first;   // نزولی
+                      return a.second < b.second;                          // tie-break
+                  });
+
+        if (ranked.size() > limit) ranked.resize(limit);
+        return ranked;
     }
