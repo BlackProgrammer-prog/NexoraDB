@@ -30,3 +30,9 @@ namespace nexora::graph::algorithms {
                                 size_t           level_size,
                                 DenseId&         meet_out);
 
+        static std::vector<DenseId> rebuildLeft(DenseId            meet,
+                                                const ParentMap&   parent_fwd);
+
+        static std::vector<DenseId> rebuildRight(DenseId           meet,
+                                                 const ParentMap&  parent_bwd);
+
