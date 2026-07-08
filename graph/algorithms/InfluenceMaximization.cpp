@@ -8,7 +8,7 @@
 #include <sstream>
 #include <random>
 namespace nexora::graph::algorithms {
-    
+
     std::string InfluenceMaximization::name() const {
         return "InfluenceMaximization";
     }
@@ -32,3 +32,17 @@ namespace nexora::graph::algorithms {
         }
         if (K == 0) return AlgoResult{false, "K must be >= 1"};
         if (R == 0) return AlgoResult{false, "R must be >= 1"};
+
+        std::vector<DenseId> all_nodes;
+        all_nodes.reserve(snapshot.nodeCount());
+        snapshot.forEachNode([&](DenseId id, TypeId) -> bool {
+            all_nodes.push_back(id);
+            return true;
+        });
+
+        const size_t N = all_nodes.size();
+        if (N == 0)
+            return AlgoResult{true, "",
+                              "{\"k_seeds\":0,\"seeds\":[],\"estimated_reach\":0}", 0.0};
+
+        K = std::min(K, N);
