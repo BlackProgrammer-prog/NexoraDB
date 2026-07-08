@@ -90,10 +90,29 @@ namespace nexora::graph::algorithms {
 
         std::sort(ranked.begin(), ranked.end(),
                   [](const auto& a, const auto& b) {
-                      if (a.first != b.first) return a.first > b.first;   // نزولی
-                      return a.second < b.second;                          // tie-break
+                      if (a.first != b.first) return a.first > b.first;
+                      return a.second < b.second;
                   });
 
         if (ranked.size() > limit) ranked.resize(limit);
         return ranked;
     }
+    std::string FriendSuggestion::buildJson(const LiveGraph&  graph,
+                                            const ExtId&      user_id,
+                                            const RankedVec&  ranked)
+    {
+        std::ostringstream j;
+        j << "{\"user_id\":\""        << user_id      << "\""
+          << ",\"suggestion_count\":" << ranked.size()
+          << ",\"suggestions\":[";
+
+        for (size_t i = 0; i < ranked.size(); ++i) {
+            if (i) j << ",";
+            j << "{\"user_id\":\""     << graph.getExtId(ranked[i].second) << "\""
+              << ",\"mutual_friends\":" << ranked[i].first << "}";
+        }
+        j << "]}";
+        return j.str();
+    }
+
+}
