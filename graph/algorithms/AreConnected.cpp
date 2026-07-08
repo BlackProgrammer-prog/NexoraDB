@@ -98,3 +98,16 @@ namespace nexora::graph::algorithms {
         }
         return false;
     }
+    std::string AreConnected::buildJson(bool               connected,
+                                        int                hops,
+                                        const std::string& u1,
+                                        const std::string& u2)
+    {
+        std::ostringstream j;
+        j << "{\"connected\":"  << (connected ? "true" : "false")
+          << ",\"hops\":"       << hops
+          << ",\"user1\":\""    << u1 << "\""
+          << ",\"user2\":\""    << u2 << "\""
+          << "}";
+        return j.str();
+    }
