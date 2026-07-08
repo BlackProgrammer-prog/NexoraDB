@@ -47,3 +47,11 @@ namespace nexora::graph::algorithms {
         idx.reserve(N);
         for (size_t i = 0; i < N; ++i)
             idx[nodes[i]] = i;
+
+        std::vector<double> betweenness(N, 0.0);
+
+        for (size_t s = 0; s < N; ++s) {
+            BfsState state(N, s);
+            forwardBfs(snapshot, nodes, idx, s, state);
+            backwardPass(s, state, betweenness);
+        }
