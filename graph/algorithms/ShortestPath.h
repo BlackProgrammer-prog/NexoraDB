@@ -36,3 +36,9 @@ namespace nexora::graph::algorithms {
         static std::vector<DenseId> rebuildRight(DenseId           meet,
                                                  const ParentMap&  parent_bwd);
 
+        static std::string buildJson(const LiveGraph&            graph,
+                                     const std::vector<DenseId>& path);
+
+        static double elapsedMs(
+                const std::chrono::steady_clock::time_point& t0);
+    };
