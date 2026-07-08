@@ -48,4 +48,14 @@ namespace nexora::graph::algorithms {
 
         return AlgoResult{true, "", buildJson(graph, user_id, ranked), ms};
     }
-    
+    void FriendSuggestion::gatherNeighbors(const LiveGraph& graph,
+                                           DenseId          uid,
+                                           FilterSet&       filter_set)
+    {
+        auto insert = [&](const AdjEntry& e) -> bool {
+            filter_set.insert(e.neighbor);
+            return true;
+        };
+        graph.forEachOutEdge(uid, insert);
+        graph.forEachInEdge(uid, insert);
+    }
