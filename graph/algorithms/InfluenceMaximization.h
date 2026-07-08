@@ -17,3 +17,18 @@ namespace nexora::graph::algorithms {
 
         AlgoResult run(const StaticGraph&         snapshot,
                        const std::vector<ExtId>& params) override;
+
+    private:
+        static constexpr size_t kDefaultK = 5;
+        static constexpr size_t kDefaultR = 20;
+        static constexpr double kDefaultP = 0.1;
+
+        using AdjList = std::unordered_map<DenseId, std::vector<DenseId>>;
+        using SeedSet = std::unordered_set<DenseId>;
+        static AdjList buildAdjList(const StaticGraph& snapshot);
+
+        static double simulateIC(const AdjList&  adj,
+                                 const SeedSet&  seeds,
+                                 size_t          R,
+                                 double          p,
+                                 std::mt19937&   rng);
