@@ -116,3 +116,30 @@ namespace nexora::graph::algorithms {
             total += static_cast<double>(runOneSim(adj, seeds, p, rng));
         return total / static_cast<double>(R);
     }
+    size_t InfluenceMaximization::runOneSim(const AdjList& adj,
+                                            const SeedSet& seeds,
+                                            double         p,
+                                            std::mt19937&  rng)
+    {
+        std::uniform_real_distribution<double> dist01(0.0, 1.0);
+
+        SeedSet               activated(seeds.begin(), seeds.end());
+        std::deque<DenseId>   queue(seeds.begin(), seeds.end());
+
+        while (!queue.empty()) {
+            DenseId v = queue.front();
+            queue.pop_front();
+
+            auto it = adj.find(v);
+            if (it == adj.end()) continue;
+
+            for (DenseId nbr : it->second) {
+                if (!activated.count(nbr) && dist01(rng) < p) {
+                    activated.insert(nbr);
+                    queue.push_back(nbr);
+                }
+            }
+        }
+        return activated.size();
+    }
+
