@@ -80,4 +80,13 @@ namespace nexora::graph::algorithms {
             gains.push_back(best_gain);
             cur_reach += best_gain;
         }
+        const double final_reach = simulateIC(adj, chosen, R, p, rng);
+        
+        double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+
+        return AlgoResult{true, "",
+                          buildJson(snapshot, order, gains, final_reach, N, K, R, p),
+                          ms};
+    }
 
