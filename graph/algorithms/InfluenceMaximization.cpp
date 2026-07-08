@@ -73,3 +73,11 @@ namespace nexora::graph::algorithms {
                     best      = c;
                 }
             }
+            if (best == kInvalidDenseId) break;
+
+            chosen.insert(best);
+            order.push_back(best);
+            gains.push_back(best_gain);
+            cur_reach += best_gain;
+        }
+
