@@ -105,3 +105,14 @@ namespace nexora::graph::algorithms {
 
         return adj;
     }
+    double InfluenceMaximization::simulateIC(const AdjList& adj,
+                                             const SeedSet& seeds,
+                                             size_t         R,
+                                             double         p,
+                                             std::mt19937&  rng)
+    {
+        double total = 0.0;
+        for (size_t r = 0; r < R; ++r)
+            total += static_cast<double>(runOneSim(adj, seeds, p, rng));
+        return total / static_cast<double>(R);
+    }
