@@ -42,3 +42,8 @@ namespace nexora::graph::algorithms {
         const size_t N = nodes.size();
         if (N == 0)
             return AlgoResult{true, "", "{\"total_nodes\":0,\"nodes\":[]}", 0.0};
+
+        std::unordered_map<DenseId, size_t> idx;
+        idx.reserve(N);
+        for (size_t i = 0; i < N; ++i)
+            idx[nodes[i]] = i;
