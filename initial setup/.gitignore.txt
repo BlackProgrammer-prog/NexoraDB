@@ -1,0 +1,139 @@
+# Python / FastAPI
+
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+pythonenv*
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+logs/
+*.log.*
+access.log
+error.log
+pytest.log
+
+# Database & Graph Data
+/data/
+/database/
+*.db
+*.rocksdb
+*.wal
+*.nex
+*.nexr
+*.bson
+*.sst
+*.ldb
+MANIFEST-*
+CURRENT
+IDENTITY
+LOCK
+LOG
+LOG.old
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.cover
+coverage.xml
+.pytest_cache/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Build
+*.pyc
+.python-version
+myenv/
+*.pem
+*.p12
+*.key
+*.crt
+
+# Profiling
+*.prof
+*.gcda
+*.gcno
+*.gcov
+
+# Temporary
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Jupyter
+.ipynb_checkpoints/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# pytype
+.pytype/
+
+# Cython
+*.so
+*.pyd
+
+# Ruff
+.ruff_cache/
+
+# Translations
+*.mo
+*.pot
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/package-lock.json
+frontend/yarn.lock
