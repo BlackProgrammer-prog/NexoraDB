@@ -34,11 +34,17 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <stdexcept>
+
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 // ─────────────────────────────────────────────────────────────
 // ماکروهای کمکی
@@ -71,6 +77,8 @@ namespace nexora {
             constexpr char kMetaFk[]  = "meta:fk:";   ///< meta:fk:{col}:{name}
             constexpr char kIdx[]     = "idx:";       ///< idx:{col}:{field}:{val}:{id}
             constexpr char kSeq[]     = "seq:";       ///< seq:{col} — شمارنده اسناد
+            constexpr char kReservedPrefix[] = "__nexora_";
+            constexpr char kInternalUsers[]  = "__nexora_internal_users";
         } // namespace keys
 
 // ══════════════════════════════════════════════════════════════
@@ -143,6 +151,85 @@ namespace nexora {
                                             const std::string& value,
                                             const std::string& doc_id) {
             return std::string(keys::kIdx) + collection + ":" + field + ":" + value + ":" + doc_id;
+        }
+
+        bool DocEngine::IsReservedCollectionName(const std::string& name) {
+            return name.starts_with(keys::kReservedPrefix);
+        }
+
+        bool DocEngine::EnsureInternalCollections() {
+            const std::string meta_key = MakeMetaKey(keys::kMetaCol, keys::kInternalUsers);
+            std::string existing;
+            rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &existing);
+            if (!s.ok() && !s.IsNotFound()) return false;
+
+            rocksdb::WriteBatch batch;
+            if (s.IsNotFound()) {
+                batch.Put(meta_key, SerializeSchema(SchemaDefinition{}));
+            }
+
+            const std::string seq_key = std::string(keys::kSeq) + keys::kInternalUsers;
+            std::string seq_val;
+            s = txn_db_->Get(read_options_, seq_key, &seq_val);
+            if (!s.ok() && !s.IsNotFound()) return false;
+            if (s.IsNotFound()) {
+                batch.Put(seq_key, "0");
+            }
+
+            if (batch.Count() == 0) return true;
+            return txn_db_->Write(write_options_, &batch).ok();
+        }
+
+        bool DocEngine::ValidateInternalUserDocument(const std::string& user_json,
+                                                     std::string&       username_out,
+                                                     std::string&       error_out) const {
+            username_out = ExtractField(user_json, "username");
+            if (username_out.empty() || username_out == "null") {
+                error_out = "username is required";
+                return false;
+            }
+
+            const std::string password_hash = ExtractField(user_json, "password_hash");
+            if (password_hash.empty() || password_hash == "null") {
+                error_out = "password_hash is required";
+                return false;
+            }
+
+            const bool argon2id = password_hash.starts_with("$argon2id$");
+            const bool bcrypt = password_hash.starts_with("$2a$") ||
+                                password_hash.starts_with("$2b$") ||
+                                password_hash.starts_with("$2y$");
+            if (!argon2id && !bcrypt) {
+                error_out = "password_hash must be argon2id or bcrypt";
+                return false;
+            }
+
+            const std::string role = ExtractField(user_json, "role");
+            if (role != "admin" && role != "application") {
+                error_out = "invalid role";
+                return false;
+            }
+
+            const std::string status = ExtractField(user_json, "status");
+            if (!status.empty() && status != "active" &&
+                status != "disabled" && status != "deleted") {
+                error_out = "invalid status";
+                return false;
+            }
+
+            if (role == "admin") {
+                const std::string email = ExtractField(user_json, "email");
+                const std::string first_name = ExtractField(user_json, "first_name");
+                const std::string last_name = ExtractField(user_json, "last_name");
+                if (email.empty() || email == "null" ||
+                    first_name.empty() || first_name == "null" ||
+                    last_name.empty() || last_name == "null") {
+                    error_out = "admin requires email, first_name and last_name";
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         std::string DocEngine::GenerateDocId() {
@@ -317,6 +404,9 @@ namespace nexora {
             }
 
             txn_db_.reset(raw_db);
+            if (!EnsureInternalCollections()) {
+                throw std::runtime_error("[NexoraDB] Failed to initialize internal collections");
+            }
 
             NX_LOG("DocEngine opened at: " << db_path_);
         }
@@ -341,6 +431,8 @@ namespace nexora {
 
             if (collection_name.empty())
                 return DBResult::Err("Collection name cannot be empty");
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
 
             std::string meta_key = MakeMetaKey(keys::kMetaCol, collection_name);
             std::string existing;
@@ -364,6 +456,8 @@ namespace nexora {
         }
 
         DBResult DocEngine::DropCollection(const std::string& collection_name) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -407,6 +501,8 @@ namespace nexora {
 
         DBResult DocEngine::SetSchemaValidation(const std::string&      collection_name,
                                                 const SchemaDefinition& schema) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
             rocksdb::Status s = txn_db_->Put(write_options_,
@@ -417,6 +513,7 @@ namespace nexora {
         }
 
         bool DocEngine::CollectionExists(const std::string& collection_name) const {
+            if (IsReservedCollectionName(collection_name)) return false;
             std::string val;
             return txn_db_->Get(read_options_,
                                 MakeMetaKey(keys::kMetaCol, collection_name), &val).ok();
@@ -428,6 +525,8 @@ namespace nexora {
 
         DBResult DocEngine::CreateIndex(const std::string&     collection_name,
                                         const IndexDefinition& index_def) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
             if (index_def.index_name.empty() || index_def.fields.empty())
@@ -472,6 +571,8 @@ namespace nexora {
 
         DBResult DocEngine::DropIndex(const std::string& collection_name,
                                       const std::string& index_name) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             std::string meta_key = MakeMetaKey(keys::kMetaIdx, collection_name, index_name);
             std::string ser;
             rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &ser);
@@ -501,6 +602,9 @@ namespace nexora {
 
         DBResult DocEngine::AddForeignKey(const std::string&          collection_name,
                                           const ForeignKeyDefinition& fk_def) {
+            if (IsReservedCollectionName(collection_name) ||
+                IsReservedCollectionName(fk_def.ref_collection))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
             if (!CollectionExists(fk_def.ref_collection))
@@ -520,6 +624,8 @@ namespace nexora {
 
         DBResult DocEngine::DropForeignKey(const std::string& collection_name,
                                            const std::string& fk_name) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             std::string meta_key = MakeMetaKey(keys::kMetaFk, collection_name, fk_name);
             std::string ex;
             rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &ex);
@@ -615,6 +721,8 @@ namespace nexora {
 
         DBResult DocEngine::InsertOne(const std::string& collection_name,
                                       const std::string& bson_document) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -659,6 +767,8 @@ namespace nexora {
 
         DBResult DocEngine::InsertMany(const std::string&              collection_name,
                                        const std::vector<std::string>& bson_documents) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
             if (bson_documents.empty())
@@ -725,6 +835,10 @@ namespace nexora {
 
         DBResult DocEngine::FindById(const std::string& collection_name,
                                      const std::string& doc_id) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
+            if (!CollectionExists(collection_name))
+                return DBResult::Err("Collection '" + collection_name + "' does not exist");
             std::string bson;
             rocksdb::Status s = txn_db_->Get(read_options_,
                                              MakeDocKey(collection_name, doc_id),
@@ -740,6 +854,8 @@ namespace nexora {
                                      const nexora::query::Condition& condition,
                                      uint32_t                        limit,
                                      uint32_t                        skip) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -778,6 +894,8 @@ namespace nexora {
         DBResult DocEngine::UpdateById(const std::string&               collection_name,
                                        const std::string&               doc_id,
                                        const nexora::query::UpdateSpec& update_spec) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             auto read_result = FindById(collection_name, doc_id);
             if (!read_result.success) return read_result;
 
@@ -805,6 +923,8 @@ namespace nexora {
         DBResult DocEngine::UpdateMany(const std::string&               collection_name,
                                        const nexora::query::Condition&  condition,
                                        const nexora::query::UpdateSpec& update_spec) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -835,6 +955,8 @@ namespace nexora {
 
         DBResult DocEngine::DeleteById(const std::string& collection_name,
                                        const std::string& doc_id) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             std::string doc_key = MakeDocKey(collection_name, doc_id);
             std::string bson;
             rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &bson);
@@ -860,6 +982,8 @@ namespace nexora {
 
         DBResult DocEngine::DeleteMany(const std::string&              collection_name,
                                        const nexora::query::Condition& condition) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -895,6 +1019,10 @@ namespace nexora {
         void DocEngine::IterateCollection(const std::string&      collection_name,
                                           const DocumentCallback& callback,
                                           uint32_t                batch_size) const {
+            if (IsReservedCollectionName(collection_name)) {
+                NX_LOG("IterateCollection: reserved collection name");
+                return;
+            }
             if (!CollectionExists(collection_name)) {
                 NX_LOG("IterateCollection: '" << collection_name << "' not found");
                 return;
@@ -923,6 +1051,7 @@ namespace nexora {
         }
 
         int64_t DocEngine::GetCollectionSize(const std::string& collection_name) const {
+            if (IsReservedCollectionName(collection_name)) return -1;
             std::string seq_key = std::string(keys::kSeq) + collection_name;
             std::string val;
             rocksdb::Status s = txn_db_->Get(read_options_, seq_key, &val);
@@ -935,6 +1064,7 @@ namespace nexora {
                                     const std::string& id_prefix,
                                     uint32_t           max_count) const {
             std::vector<std::pair<std::string, std::string>> results;
+            if (IsReservedCollectionName(collection_name)) return results;
             std::string scan_prefix = std::string(keys::kData) + collection_name + ":";
             std::string seek_key    = scan_prefix + id_prefix;
 
@@ -963,6 +1093,12 @@ namespace nexora {
                                          const nexora::query::Condition& condition,
                                          uint32_t                        limit) {
             JoinResult result;
+
+            if (IsReservedCollectionName(from_collection) ||
+                IsReservedCollectionName(to_collection)) {
+                result.error_msg = "reserved collection name";
+                return result;
+            }
 
             if (!CollectionExists(from_collection)) {
                 result.error_msg = "Collection '" + from_collection + "' does not exist";
@@ -1057,6 +1193,8 @@ namespace nexora {
                                         const std::string& collection_name,
                                         const std::string& bson_document) {
             if (!tx_handle.IsValid()) return DBResult::Err("Invalid transaction");
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -1066,6 +1204,15 @@ namespace nexora {
             rocksdb::Status s = tx_handle.Get()->Put(
                     MakeDocKey(collection_name, doc_id), bson_document);
             ROCKS_CHECK(s, "InsertOneTx");
+
+            std::string seq_key = std::string(keys::kSeq) + collection_name;
+            std::string seq_val;
+            s = tx_handle.Get()->Get(read_options_, seq_key, &seq_val);
+            if (!s.ok() && !s.IsNotFound()) ROCKS_CHECK(s, "InsertOneTx seq read");
+            int64_t cnt = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
+            s = tx_handle.Get()->Put(seq_key, std::to_string(cnt));
+            ROCKS_CHECK(s, "InsertOneTx seq write");
+
             return DBResult::Ok(doc_id);
         }
 
@@ -1074,6 +1221,8 @@ namespace nexora {
                                          const std::string&               doc_id,
                                          const nexora::query::UpdateSpec& update_spec) {
             if (!tx_handle.IsValid()) return DBResult::Err("Invalid transaction");
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
 
             std::string doc_key = MakeDocKey(collection_name, doc_id);
             std::string bson;
@@ -1091,6 +1240,8 @@ namespace nexora {
                                          const std::string& collection_name,
                                          const std::string& doc_id) {
             if (!tx_handle.IsValid()) return DBResult::Err("Invalid transaction");
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
 
             std::string doc_key = MakeDocKey(collection_name, doc_id);
             std::string bson;
@@ -1100,6 +1251,17 @@ namespace nexora {
 
             s = tx_handle.Get()->Delete(doc_key);
             ROCKS_CHECK(s, "DeleteByIdTx delete");
+
+            std::string seq_key = std::string(keys::kSeq) + collection_name;
+            std::string seq_val;
+            s = tx_handle.Get()->Get(read_options_, seq_key, &seq_val);
+            if (!s.ok() && !s.IsNotFound()) ROCKS_CHECK(s, "DeleteByIdTx seq read");
+            if (!seq_val.empty()) {
+                int64_t cnt = std::max(0LL, std::stoll(seq_val) - 1);
+                s = tx_handle.Get()->Put(seq_key, std::to_string(cnt));
+                ROCKS_CHECK(s, "DeleteByIdTx seq write");
+            }
+
             return DBResult::Ok("1");
         }
 
@@ -1107,6 +1269,8 @@ namespace nexora {
                                        const std::string& collection_name,
                                        const std::string& doc_id) {
             if (!tx_handle.IsValid()) return DBResult::Err("Invalid transaction");
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
 
             std::string doc_key = MakeDocKey(collection_name, doc_id);
             std::string bson;
@@ -1122,6 +1286,8 @@ namespace nexora {
 
         DBResult DocEngine::Count(const std::string&              collection_name,
                                   const nexora::query::Condition& condition) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -1144,6 +1310,8 @@ namespace nexora {
 
         DBResult DocEngine::Exists(const std::string&              collection_name,
                                    const nexora::query::Condition& condition) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
@@ -1159,11 +1327,106 @@ namespace nexora {
         }
 
 // ══════════════════════════════════════════════════════════════
-// §17  دسترسی به پیکربندی
+// §17  Internal database users
+// ══════════════════════════════════════════════════════════════
+
+        DBResult DocEngine::CreateInternalUser(const std::string& user_json) {
+            if (!EnsureInternalCollections())
+                return DBResult::Err("failed to initialize internal collections");
+
+            std::string username;
+            std::string err;
+            if (!ValidateInternalUserDocument(user_json, username, err))
+                return DBResult::Err(err);
+
+            const std::string role = ExtractField(user_json, "role");
+            if (username == "root" && role != "admin")
+                return DBResult::Err("root user must be admin");
+
+            const std::string doc_key = MakeDocKey(keys::kInternalUsers, username);
+            std::string existing;
+            rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &existing);
+            if (s.ok()) return DBResult::Err("internal user already exists");
+            if (!s.IsNotFound())
+                return DBResult::Err("[RocksDB] CreateInternalUser read: " + s.ToString());
+
+            s = txn_db_->Put(write_options_, doc_key, user_json);
+            ROCKS_CHECK(s, "CreateInternalUser");
+
+            const std::string seq_key = std::string(keys::kSeq) + keys::kInternalUsers;
+            std::string seq_val;
+            txn_db_->Get(read_options_, seq_key, &seq_val);
+            int64_t cnt = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
+            txn_db_->Put(write_options_, seq_key, std::to_string(cnt));
+
+            return DBResult::Ok(username);
+        }
+
+        DBResult DocEngine::GetInternalUser(const std::string& username) {
+            if (username.empty()) return DBResult::Err("username is required");
+
+            std::string user_json;
+            rocksdb::Status s = txn_db_->Get(read_options_,
+                                             MakeDocKey(keys::kInternalUsers, username),
+                                             &user_json);
+            if (s.IsNotFound()) return DBResult::Err("internal user not found");
+            ROCKS_CHECK(s, "GetInternalUser");
+            return DBResult::Ok(user_json);
+        }
+
+        DBResult DocEngine::UpdateInternalUser(const std::string& username,
+                                               const std::string& user_json) {
+            if (username.empty()) return DBResult::Err("username is required");
+
+            std::string parsed_username;
+            std::string err;
+            if (!ValidateInternalUserDocument(user_json, parsed_username, err))
+                return DBResult::Err(err);
+            if (parsed_username != username)
+                return DBResult::Err("username cannot be changed");
+
+            const std::string role = ExtractField(user_json, "role");
+            if (username == "root" && role != "admin")
+                return DBResult::Err("root user must be admin");
+
+            const std::string doc_key = MakeDocKey(keys::kInternalUsers, username);
+            std::string existing;
+            rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &existing);
+            if (s.IsNotFound()) return DBResult::Err("internal user not found");
+            ROCKS_CHECK(s, "UpdateInternalUser read");
+
+            s = txn_db_->Put(write_options_, doc_key, user_json);
+            ROCKS_CHECK(s, "UpdateInternalUser write");
+            return DBResult::Ok("1");
+        }
+
+        DBResult DocEngine::DeleteInternalUser(const std::string& username) {
+            if (username.empty()) return DBResult::Err("username is required");
+            if (username == "root") return DBResult::Err("cannot delete root user");
+
+            const std::string doc_key = MakeDocKey(keys::kInternalUsers, username);
+            std::string existing;
+            rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &existing);
+            if (s.IsNotFound()) return DBResult::Err("internal user not found");
+            ROCKS_CHECK(s, "DeleteInternalUser read");
+
+            nexora::query::UpdateSpec spec;
+            spec.Set("status", "deleted");
+            spec.TouchDate("updated_at");
+            const std::string deleted_json = ApplyUpdate(existing, spec);
+
+            s = txn_db_->Put(write_options_, doc_key, deleted_json);
+            ROCKS_CHECK(s, "DeleteInternalUser write");
+            return DBResult::Ok("1");
+        }
+
+// ══════════════════════════════════════════════════════════════
+// §18  دسترسی به پیکربندی
 // ══════════════════════════════════════════════════════════════
 
         std::optional<SchemaDefinition>
         DocEngine::GetSchema(const std::string& collection_name) const {
+            if (IsReservedCollectionName(collection_name)) return std::nullopt;
             std::string val;
             rocksdb::Status s = txn_db_->Get(read_options_,
                                              MakeMetaKey(keys::kMetaCol, collection_name),
@@ -1175,6 +1438,7 @@ namespace nexora {
         std::vector<ForeignKeyDefinition>
         DocEngine::GetForeignKeys(const std::string& collection_name) const {
             std::vector<ForeignKeyDefinition> result;
+            if (IsReservedCollectionName(collection_name)) return result;
             std::string prefix = std::string(keys::kMetaFk) + collection_name + ":";
             rocksdb::ReadOptions ro;
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
@@ -1188,6 +1452,7 @@ namespace nexora {
         std::vector<IndexDefinition>
         DocEngine::GetIndexes(const std::string& collection_name) const {
             std::vector<IndexDefinition> result;
+            if (IsReservedCollectionName(collection_name)) return result;
             std::string prefix = std::string(keys::kMetaIdx) + collection_name + ":";
             rocksdb::ReadOptions ro;
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
@@ -1203,9 +1468,51 @@ namespace nexora {
             std::string prefix = keys::kMetaCol;
             rocksdb::ReadOptions ro;
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next())
-                result.push_back(it->key().ToString().substr(prefix.size()));
+            for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
+                std::string collection = it->key().ToString().substr(prefix.size());
+                if (!IsReservedCollectionName(collection)) result.push_back(std::move(collection));
+            }
             return result;
+        }
+
+        uint64_t DocEngine::GetRamUsageBytes() const {
+#if defined(__linux__)
+            std::ifstream statm("/proc/self/statm");
+            uint64_t total_pages = 0;
+            uint64_t resident_pages = 0;
+            if (!(statm >> total_pages >> resident_pages)) return 0;
+
+            long page_size = sysconf(_SC_PAGESIZE);
+            if (page_size <= 0) return 0;
+            return resident_pages * static_cast<uint64_t>(page_size);
+#else
+            return 0;
+#endif
+        }
+
+        uint64_t DocEngine::GetDiskUsageBytes() const {
+            namespace fs = std::filesystem;
+
+            std::error_code ec;
+            if (!fs::exists(db_path_, ec)) return 0;
+
+            uint64_t total = 0;
+            fs::recursive_directory_iterator it(
+                    db_path_, fs::directory_options::skip_permission_denied, ec);
+            fs::recursive_directory_iterator end;
+
+            for (; it != end; it.increment(ec)) {
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
+                if (!it->is_regular_file(ec)) continue;
+
+                auto size = it->file_size(ec);
+                if (!ec) total += static_cast<uint64_t>(size);
+                ec.clear();
+            }
+            return total;
         }
 
     } // namespace core

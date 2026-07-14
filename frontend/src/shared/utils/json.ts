@@ -10,6 +10,6 @@ export function safeParseJson<T = JsonValue>(value: string): T | null {
   }
 }
 
-export function stringifyJson(value: JsonValue) {
+export function stringifyJson(value: unknown) {
   return JSON.stringify(value, null, 2)
 }

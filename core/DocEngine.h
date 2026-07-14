@@ -792,9 +792,48 @@ namespace nexora {
              */
             std::vector<std::string> ListCollections() const;
 
+            /**
+             * @brief مقدار RAM فعلی مصرف‌شده توسط process دیتابیس، بر حسب byte.
+             *
+             * @note در build لینوکسی از RSS پردازش خوانده می‌شود.
+             */
+            uint64_t GetRamUsageBytes() const;
+
+            /**
+             * @brief فضای دیسک اشغال‌شده توسط دایرکتوری RocksDB، بر حسب byte.
+             */
+            uint64_t GetDiskUsageBytes() const;
+
+            // ──────────────────────────────────────────────────────────
+            // 6.15  Internal database users (system collection)
+            // ──────────────────────────────────────────────────────────
+
+            /**
+             * @brief ساخت کاربر داخلی دیتابیس در collection مخفی.
+             *
+             * @note فقط backend trusted مثل FastAPI باید این متد را صدا بزند.
+             */
+            DBResult CreateInternalUser(const std::string& user_json);
+
+            /**
+             * @brief دریافت کاربر داخلی دیتابیس بر اساس username.
+             */
+            DBResult GetInternalUser(const std::string& username);
+
+            /**
+             * @brief جایگزینی کامل سند کاربر داخلی بر اساس username.
+             */
+            DBResult UpdateInternalUser(const std::string& username,
+                                        const std::string& user_json);
+
+            /**
+             * @brief حذف منطقی کاربر داخلی با status="deleted".
+             */
+            DBResult DeleteInternalUser(const std::string& username);
+
         private:
             // ──────────────────────────────────────────────────────────
-            // 6.15  پیاده‌سازی‌های داخلی
+            // 6.16  پیاده‌سازی‌های داخلی
             // ──────────────────────────────────────────────────────────
 
             std::string db_path_;
@@ -821,6 +860,14 @@ namespace nexora {
                                             const std::string& field,
                                             const std::string& value,
                                             const std::string& doc_id);
+
+            static bool IsReservedCollectionName(const std::string& name);
+
+            bool EnsureInternalCollections();
+
+            bool ValidateInternalUserDocument(const std::string& user_json,
+                                              std::string&       username_out,
+                                              std::string&       error_out) const;
 
             bool ValidateDocument(const std::string&      bson_document,
                                   const SchemaDefinition& schema,
