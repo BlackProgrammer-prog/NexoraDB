@@ -114,6 +114,18 @@ def _rows_from_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _rows_from_single_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+    algorithm_result = result.get("result")
+    if result.get("algo") and isinstance(algorithm_result, dict):
+        row = {
+            "algorithm": result["algo"],
+            "success": result.get("success"),
+            "elapsed_ms": result.get("elapsed_ms", 0.0),
+            **algorithm_result,
+        }
+        if result.get("job_id"):
+            row["job_id"] = result["job_id"]
+        return [_row_from_value(row)]
+
     for key in ("documents", "collections", "graphs", "foreign_keys", "indexes", "jobs", "nodes"):
         value = result.get(key)
         if isinstance(value, list):
