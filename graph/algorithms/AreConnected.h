@@ -25,7 +25,8 @@ namespace nexora::graph::algorithms {
                                 BfsQueue&        queue_active,
                                 VisitedMap&      visited_active,
                                 const VisitedMap& visited_other,
-                                size_t           level_size);
+                                size_t           level_size,
+                                TypeId           edge_type);
 
 
         static std::string buildJson(bool               connected,
