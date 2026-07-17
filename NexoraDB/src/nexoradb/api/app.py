@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 
 from nexoradb_admin.config import AdminApiSettings
 from nexoradb_admin.native import create_doc_engine, create_graph_manager, load_native_module
@@ -29,6 +29,11 @@ def create_api_router(
         app: AppTokenClaims = Depends(require_app_token),
     ) -> QueryExecuteResponse:
         require_scope(app, "query:execute")
+        if app.managed and not engine_provider().is_internal_app_token_active(app.token_id):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"message": "application token has been revoked"},
+            )
         return execute_query(
             engine=engine_provider(),
             graph_manager=graph_manager_provider(),
