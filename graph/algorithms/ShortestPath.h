@@ -25,6 +25,7 @@ namespace nexora::graph::algorithms {
                                 ParentMap &p_active,
                                 const ParentMap &p_other,
                                 size_t level_size,
+                                TypeId edge_type,
                                 DenseId &meet_out);
 
         static std::vector <DenseId> rebuildLeft(DenseId meet,
