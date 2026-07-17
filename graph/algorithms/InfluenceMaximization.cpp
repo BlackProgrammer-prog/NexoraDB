@@ -1,4 +1,5 @@
 #include "InfluenceMaximization.h"
+#include "BuiltinAlgorithms.h"
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
@@ -21,14 +22,20 @@ namespace nexora::graph::algorithms {
 
         if (!params.empty() && !params[0].empty()) {
             try   { K = static_cast<size_t>(std::stoul(params[0])); }
-            catch (...) { return AlgoResult{false, "param[0] must be positive integer (K)"}; }
+            catch (...) { return AlgoResult{false, "param[0] must be positive integer (K)", "", 0.0}; }
         }
         if (params.size() >= 2 && !params[1].empty()) {
             try   { R = static_cast<size_t>(std::stoul(params[1])); }
-            catch (...) { return AlgoResult{false, "param[1] must be positive integer (R)"}; }
+            catch (...) { return AlgoResult{false, "param[1] must be positive integer (R)", "", 0.0}; }
         }
-        if (K == 0) return AlgoResult{false, "K must be >= 1"};
-        if (R == 0) return AlgoResult{false, "R must be >= 1"};
+        if (params.size() >= 3 && !params[2].empty()) {
+            try   { p = std::stod(params[2]); }
+            catch (...) { return AlgoResult{false, "param[2] must be a number (p)", "", 0.0}; }
+        }
+        if (K == 0) return AlgoResult{false, "K must be >= 1", "", 0.0};
+        if (R == 0) return AlgoResult{false, "R must be >= 1", "", 0.0};
+        if (p < 0.0 || p > 1.0)
+            return AlgoResult{false, "p must be between 0 and 1", "", 0.0};
 
         std::vector<DenseId> all_nodes;
         all_nodes.reserve(snapshot.nodeCount());
@@ -44,6 +51,22 @@ namespace nexora::graph::algorithms {
 
         K = std::min(K, N);
         AdjList adj = buildAdjList(snapshot);
+        // Bound the expensive Monte-Carlo greedy search to high-degree
+        // candidates. Evaluating every node is O(K*N*R*(V+E)) and is too slow
+        // for medium graphs, while high-degree nodes contain the useful seed
+        // candidates for the independent-cascade model.
+        std::vector<DenseId> candidates = all_nodes;
+        std::sort(candidates.begin(), candidates.end(),
+                  [&](DenseId lhs, DenseId rhs) {
+                      const auto left = adj.find(lhs);
+                      const auto right = adj.find(rhs);
+                      const size_t left_degree = left == adj.end() ? 0 : left->second.size();
+                      const size_t right_degree = right == adj.end() ? 0 : right->second.size();
+                      if (left_degree != right_degree) return left_degree > right_degree;
+                      return lhs < rhs;
+                  });
+        const size_t candidate_limit = std::min(N, std::max<size_t>(100, K * 10));
+        candidates.resize(candidate_limit);
         std::mt19937 rng(42u);
         SeedSet               chosen;
         std::vector<DenseId>  order;
@@ -57,7 +80,7 @@ namespace nexora::graph::algorithms {
             DenseId best      = kInvalidDenseId;
             double  best_gain = -1.0;
 
-            for (DenseId c : all_nodes) {
+            for (DenseId c : candidates) {
                 if (chosen.count(c)) continue;
 
                 chosen.insert(c);
@@ -169,6 +192,15 @@ namespace nexora::graph::algorithms {
         }
         j << "]}";
         return j.str();
+    }
+
+    AlgoResult runInfluenceMaximization(GraphManager& manager,
+                                        const std::string& graph_name,
+                                        const std::vector<ExtId>& params)
+    {
+        InfluenceMaximization algo;
+        auto handle = manager.submitJob(graph_name, algo, params);
+        return handle.result();
     }
 
 }
