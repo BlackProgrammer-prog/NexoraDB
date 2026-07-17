@@ -5,6 +5,8 @@ import type {
   CreateGraphInput,
   CreateGraphNodeInput,
   Graph,
+  GraphNodeDocument,
+  GraphVisualizationData,
   UpdateGraphEdgeInput,
   UpdateGraphNodeInput,
 } from '../types/graph.types'
@@ -20,6 +22,14 @@ export const graphApi = {
 
   deleteGraph(graphId: string): Promise<void> {
     return httpClient.delete<void>(graphEndpoints.delete(graphId))
+  },
+
+  getVisualization(graphId: string): Promise<GraphVisualizationData> {
+    return httpClient.get<GraphVisualizationData>(graphEndpoints.visualization(graphId))
+  },
+
+  getNodeDocument(graphId: string, nodeId: string): Promise<GraphNodeDocument> {
+    return httpClient.get<GraphNodeDocument>(graphEndpoints.nodeDocument(graphId, nodeId))
   },
 
   createNode(graphId: string, input: CreateGraphNodeInput): Promise<Graph> {
