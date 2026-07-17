@@ -1,43 +1,93 @@
+"""
+NexoraDB Admin API client.
+مسیر: src/nexoradb/cli/api_client.py
+"""
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-
-class NexoraAdminClientError(RuntimeError):
-    pass
-
-
-class NexoraAdminAuthError(NexoraAdminClientError):
-    pass
+import urllib.request
+import urllib.error
 
 
-@dataclass(frozen=True)
+class NexoraAdminClientError(Exception):
+    """هر خطایی که از API برمی‌گردد."""
+
+
+@dataclass
 class AuthSession:
     access_token: str
     username: str
-    expires_in: int
 
 
 class AdminApiClient:
-    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+    """
+    HTTP client ساده برای Admin API.
+    از urllib استاندارد Python استفاده می‌کند تا نیازی به httpx/requests نباشد.
+    """
+
+    def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+
+    # ── internal ────────────────────────────────────────────────────────────
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        json_body: Any = None,
+    ) -> Any:
+        url = self.base_url + path
+        data: bytes | None = None
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        if json_body is not None:
+            data = json.dumps(json_body).encode()
+
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read()
+                if not raw:
+                    return {}
+                return json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            body = exc.read()
+            try:
+                detail = json.loads(body)
+                msg = detail.get("message") or detail.get("detail") or str(detail)
+            except Exception:
+                msg = body.decode(errors="replace") or f"HTTP {exc.code}"
+            raise NexoraAdminClientError(msg) from exc
+        except urllib.error.URLError as exc:
+            raise NexoraAdminClientError(f"Cannot reach {self.base_url}: {exc.reason}") from exc
+        except Exception as exc:
+            raise NexoraAdminClientError(str(exc)) from exc
+
+    # ── auth ────────────────────────────────────────────────────────────────
 
     def setup_state(self) -> dict[str, Any]:
+        """GET /auth/setup-state — بررسی می‌کند آیا root admin وجود دارد."""
         return self._request("GET", "/auth/setup-state")
 
     def login(self, username: str, password: str) -> AuthSession:
-        payload = self._request("POST", "/auth/login", {"username": username, "password": password})
-        user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
-        return AuthSession(
-            access_token=str(payload["accessToken"]),
-            username=str(user.get("username") or username),
-            expires_in=int(payload.get("expiresIn") or 0),
+        """POST /auth/login"""
+        resp = self._request(
+            "POST",
+            "/auth/login",
+            json_body={"username": username, "password": password},
         )
+        token = resp.get("accessToken") or resp.get("access_token") or resp.get("token")
+        if not token:
+            raise NexoraAdminClientError("No access token in login response.")
+        return AuthSession(access_token=token, username=username)
 
     def register(
         self,
@@ -46,85 +96,126 @@ class AdminApiClient:
         last_name: str,
         email: str,
         password: str,
-    ) -> None:
-        self._request(
+    ) -> dict[str, Any]:
+        """POST /auth/register — ساخت اولین root admin."""
+        return self._request(
             "POST",
             "/auth/register",
-            {
+            json_body={
                 "firstName": first_name,
                 "lastName": last_name,
                 "email": email,
                 "password": password,
-                "confirmPassword": password,
             },
         )
 
-    def execute_query(self, token: str, query: str) -> dict[str, Any]:
-        return self._request("POST", "/query/execute", {"query": query}, token=token)
+    # ── app tokens ──────────────────────────────────────────────────────────
+
+    def list_app_scopes(self, token: str) -> list[str]:
+        """GET /apps/scopes"""
+        resp = self._request("GET", "/apps/scopes", token=token)
+        return resp.get("scopes", [])
 
     def create_app_token(
         self,
         token: str,
         *,
         app_id: str,
-        app_name: str | None,
-        expires_in_seconds: int | None,
+        app_name: str | None = None,
+        expires_in_seconds: int | None = None,
         scopes: list[str],
     ) -> dict[str, Any]:
+        """POST /apps/tokens"""
         return self._request(
             "POST",
             "/apps/tokens",
-            {
+            token=token,
+            json_body={
                 "appId": app_id,
                 "appName": app_name,
-                "scopes": scopes,
                 "expiresInSeconds": expires_in_seconds,
+                "scopes": scopes,
             },
+        )
+
+    # ── query ───────────────────────────────────────────────────────────────
+
+    def execute_query(self, token: str, query: str) -> dict[str, Any]:
+        """POST /query/execute"""
+        resp = self._request(
+            "POST",
+            "/query/execute",
             token=token,
+            json_body={"query": query},
         )
+        # نرمال‌سازی خروجی برای DataTable
+        rows = resp.get("rows", [])
+        columns: list[str] = resp.get("columns", [])
+        if not columns and rows:
+            columns = list(rows[0].keys()) if isinstance(rows[0], dict) else []
+        return {
+            "columns": columns,
+            "rows": rows,
+            "executionTimeMs": resp.get("executionTimeMs", 0),
+            "raw": resp,
+        }
 
-    def list_app_scopes(self, token: str) -> list[str]:
-        payload = self._request("GET", "/apps/scopes", token=token)
-        scopes = payload.get("scopes")
-        return [str(scope) for scope in scopes] if isinstance(scopes, list) else []
+    # ── graphs ──────────────────────────────────────────────────────────────
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        body: dict[str, Any] | None = None,
-        *,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        data = None if body is None else json.dumps(body).encode("utf-8")
-        headers = {"Content-Type": "application/json", "User-Agent": "nexoradb-cli/0.1"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        request = urllib.request.Request(
-            f"{self.base_url}{path}",
-            data=data,
-            headers=headers,
-            method=method,
-        )
+    def list_graphs(self, token: str) -> list[str]:
+        """GET /graphs — لیست نام گراف‌های موجود."""
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as exc:
-            message = _read_error_message(exc)
-            if exc.code in {401, 403}:
-                raise NexoraAdminAuthError(message) from exc
-            raise NexoraAdminClientError(message) from exc
-        except urllib.error.URLError as exc:
-            raise NexoraAdminClientError(str(exc.reason)) from exc
+            resp = self._request("GET", "/graphs", token=token)
+            # API یک list[dict] برمی‌گرداند؛ هر dict دارای فیلد "name" است
+            if isinstance(resp, list):
+                return [g.get("name", g.get("id", str(g))) for g in resp if isinstance(g, dict)]
+            return []
+        except NexoraAdminClientError:
+            # اگر graph module فعال نبود، خطا نمی‌دهیم — فقط لیست خالی
+            return []
 
+    def run_graph_algorithm(
+        self,
+        token: str,
+        algo_id: str,
+        graph_name: str,
+        params: list[str],
+    ) -> dict[str, Any]:
+        """
+        اجرای یک الگوریتم روی گراف.
+        چون endpoint رسمی هنوز وجود ندارد، از query/execute استفاده می‌کنیم.
+        وقتی endpoint اضافه شد فقط این متد تغییر می‌کند.
+        """
+        # تلاش اول: endpoint اختصاصی (اگر بعداً اضافه شد)
+        try:
+            return self._request(
+                "POST",
+                "/graphs/algorithm",
+                token=token,
+                json_body={
+                    "graphName": graph_name,
+                    "algorithm": algo_id,
+                    "params": params,
+                },
+            )
+        except NexoraAdminClientError:
+            pass
 
-def _read_error_message(exc: urllib.error.HTTPError) -> str:
-    try:
-        payload = json.loads(exc.read().decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return f"Request failed with status {exc.code}"
-    if isinstance(payload, dict):
-        return str(payload.get("message") or payload.get("detail") or f"Request failed with status {exc.code}")
-    return f"Request failed with status {exc.code}"
+        # fallback: از NexoraQL query استفاده می‌کنیم
+        params_str = ", ".join(f'"{p}"' for p in params)
+        graph_clause = f'GRAPH "{graph_name}"' if graph_name else ""
+        query = f"RUN ALGORITHM {algo_id} {graph_clause} WITH PARAMS [{params_str}];"
+        try:
+            resp = self._request(
+                "POST",
+                "/query/execute",
+                token=token,
+                json_body={"query": query},
+            )
+            return {"result": resp, "elapsedMs": resp.get("executionTimeMs", 0)}
+        except NexoraAdminClientError as exc:
+            # اگر هر دو روش شکست خوردند، خطا را propagate می‌کنیم
+            raise NexoraAdminClientError(
+                f"Algorithm '{algo_id}' failed: {exc}\n"
+                "(endpoint /graphs/algorithm وجود ندارد و NexoraQL هم پشتیبانی نمی‌کند)"
+            ) from exc
