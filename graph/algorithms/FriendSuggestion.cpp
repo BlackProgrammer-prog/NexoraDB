@@ -1,4 +1,5 @@
 #include "FriendSuggestion.h"
+#include "BuiltinAlgorithms.h"
 #include <algorithm>
 #include <chrono>
 #include <sstream>
@@ -16,28 +17,38 @@ namespace nexora::graph::algorithms {
 
 
         if (params.empty())
-            return AlgoResult{false, "param[0] required: user_id"};
+            return AlgoResult{false, "param[0] required: user_id", "", 0.0};
 
         const ExtId& user_id = params[0];
 
 
         DenseId uid = graph.getDenseId(user_id);
         if (uid == kInvalidDenseId)
-            return AlgoResult{false, "User not found: " + user_id};
+            return AlgoResult{false, "User not found: " + user_id, "", 0.0};
 
 
         size_t limit = kDefaultLimit;
         if (params.size() >= 2 && !params[1].empty()) {
             try   { limit = static_cast<size_t>(std::stoul(params[1])); }
-            catch (...) { return AlgoResult{false, "param[1] must be a positive integer"}; }
+            catch (...) { return AlgoResult{false, "param[1] must be a positive integer", "", 0.0}; }
             if (limit == 0 || limit > kMaxLimit)
                 return AlgoResult{false,
-                                  "limit must be between 1 and " + std::to_string(kMaxLimit)};
+                                  "limit must be between 1 and " + std::to_string(kMaxLimit),
+                                  "", 0.0};
         }
+
+        TypeId edge_type = kInvalidTypeId;
+        if (params.size() >= 3 && !params[2].empty()) {
+            auto tid = graph.getEdgeTypeId(params[2]);
+            if (!tid)
+                return AlgoResult{false, "Unknown edge type: " + params[2], "", 0.0};
+            edge_type = *tid;
+        }
+
         FilterSet direct_friends;
         direct_friends.insert(uid);
-        gatherNeighbors(graph, uid, direct_friends);
-        ScoreMap scores = countMutual(graph, direct_friends, uid);
+        gatherNeighbors(graph, uid, edge_type, direct_friends);
+        ScoreMap scores = countMutual(graph, direct_friends, uid, edge_type);
         RankedVec ranked = rankAndTrim(scores, limit);
 
         double ms = std::chrono::duration<double, std::milli>(
@@ -47,10 +58,12 @@ namespace nexora::graph::algorithms {
     }
     void FriendSuggestion::gatherNeighbors(const LiveGraph& graph,
                                            DenseId          uid,
+                                           TypeId           edge_type,
                                            FilterSet&       filter_set)
     {
         auto insert = [&](const AdjEntry& e) -> bool {
-            filter_set.insert(e.neighbor);
+            if (edge_type == kInvalidTypeId || e.type_id == edge_type)
+                filter_set.insert(e.neighbor);
             return true;
         };
         graph.forEachOutEdge(uid, insert);
@@ -60,7 +73,8 @@ namespace nexora::graph::algorithms {
     FriendSuggestion::ScoreMap
     FriendSuggestion::countMutual(const LiveGraph& graph,
                                   const FilterSet& direct_friends,
-                                  DenseId          uid)
+                                  DenseId          uid,
+                                  TypeId           edge_type)
     {
         ScoreMap scores;
 
@@ -68,7 +82,8 @@ namespace nexora::graph::algorithms {
             if (fid == uid) continue;
 
             auto visit = [&](const AdjEntry& e) -> bool {
-                if (!direct_friends.count(e.neighbor))
+                if ((edge_type == kInvalidTypeId || e.type_id == edge_type) &&
+                    !direct_friends.count(e.neighbor))
                     scores[e.neighbor]++;
                 return true;
             };
@@ -110,6 +125,14 @@ namespace nexora::graph::algorithms {
         }
         j << "]}";
         return j.str();
+    }
+
+    AlgoResult runFriendSuggestion(GraphManager& manager,
+                                   const std::string& graph_name,
+                                   const std::vector<ExtId>& params)
+    {
+        FriendSuggestion algo;
+        return manager.runLock(graph_name, algo, params);
     }
 
 }
