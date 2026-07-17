@@ -148,6 +148,8 @@ class GraphDefinition:
         self.directed = True
         self.heterogeneous = True
         self.auto_build_on_startup = True
+        self.node_mappings: list[NodeMappingDef] = []
+        self.edge_mappings: list[EdgeMappingDef] = []
 
 
 class NodeMappingDef:
@@ -427,6 +429,9 @@ class InMemoryDocEngine:
         self.indexes[collection].pop(index_name, None)
         return DBResult(True)
 
+    def get_indexes(self, collection: str) -> list[IndexDefinition]:
+        return list(self.indexes[collection].values())
+
     def add_foreign_key(self, collection: str, fk_def: ForeignKeyDefinition) -> DBResult:
         self.foreign_keys[collection][fk_def.fk_name] = fk_def
         return DBResult(True)
@@ -576,11 +581,16 @@ class InMemoryGraphManager:
 
     def add_node_mapping(self, graph_name: str, mapping: NodeMappingDef) -> bool:
         self.node_maps[graph_name].append(mapping)
+        self.graph_defs[graph_name].node_mappings.append(mapping)
         return True
 
     def add_edge_mapping(self, graph_name: str, mapping: EdgeMappingDef) -> bool:
         self.edge_maps[graph_name].append(mapping)
+        self.graph_defs[graph_name].edge_mappings.append(mapping)
         return True
+
+    def get_definition(self, graph_name: str) -> GraphDefinition | None:
+        return self.graph_defs.get(graph_name)
 
     def drop_graph(self, graph_name: str) -> bool:
         self.graph_defs.pop(graph_name, None)
@@ -801,6 +811,26 @@ class NexoraQLScenarioTests(unittest.TestCase):
     def execute(self, query: str) -> list[dict]:
         return self.executor.execute_text(query)
 
+    def test_batch_insert_preserves_nested_json_escapes(self):
+        self.execute("CREATE COLLECTION escaped_users;")
+        documents = [
+            {"_id": "u1", "bio": "first\nsecond"},
+            {"_id": "u2", "bio": "O'Connor"},
+        ]
+        values = []
+        for document in documents:
+            encoded = json.dumps(document, separators=(",", ":"))
+            literal = "'" + encoded.replace("\\", "\\\\").replace("'", "\\'") + "'"
+            values.append(f"({literal})")
+
+        [result] = self.execute(
+            "INSERT INTO escaped_users BATCH VALUES " + ",".join(values) + ";"
+        )
+
+        self.assertTrue(result["success"])
+        stored = list(self.engine.collections["escaped_users"].values())
+        self.assertEqual(stored, documents)
+
     def test_full_database_language_flow(self):
         # Query DDL: create a schema-backed collection.
         [create_users] = self.execute("""
@@ -912,6 +942,8 @@ class NexoraQLScenarioTests(unittest.TestCase):
         self.assertTrue(idx_author["success"])
         self.assertIn("idx_users_username", self.engine.indexes["users"])
         self.assertEqual(self.engine.indexes["users"]["idx_users_username"].type, FakeIndexType.Unique)
+        [shown_indexes] = self.execute("SHOW INDEXES ON users;")
+        self.assertEqual(shown_indexes["indexes"][0]["name"], "idx_users_username")
 
         # Query DQL: lookup join across collections.
         [joined_posts] = self.execute("""
@@ -973,6 +1005,14 @@ class NexoraQLScenarioTests(unittest.TestCase):
         # Query GQL: get a graph node document through the mapping registry.
         [node] = self.execute("GET NODE User('u1');")
         self.assertEqual(node["document"]["username"], "ali")
+
+        # The admin API creates a fresh Executor for every request. GET NODE
+        # must therefore recover persisted mappings from GraphManager.
+        fresh_executor = Executor(self.engine, self.gm)
+        fresh_node = fresh_executor.execute_text(
+            "USE GRAPH social; GET NODE User('u1');"
+        )[-1]
+        self.assertEqual(fresh_node["document"]["username"], "ali")
 
         # Query GAL: run the implemented lock algorithm MutualFriends.
         [mutual] = self.execute("""
