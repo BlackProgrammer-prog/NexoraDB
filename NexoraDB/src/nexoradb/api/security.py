@@ -33,11 +33,13 @@ AVAILABLE_APP_SCOPES: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class AppTokenClaims:
+    token_id: str
     app_id: str
     app_name: str
     issued_at: int
     expires_at: int | None
     scopes: tuple[str, ...]
+    managed: bool
 
 
 class CreateAppTokenRequest(BaseModel):
@@ -57,11 +59,13 @@ class CreateAppTokenRequest(BaseModel):
 
 
 class CreateAppTokenResponse(BaseModel):
+    tokenId: str
     appId: str
     appName: str
     token: str
     tokenType: str = "bearer"
     expiresAt: int | None
+    createdAt: int
     scopes: list[str]
 
 
@@ -91,6 +95,7 @@ def create_app_token(
         "jti": secrets.token_urlsafe(16),
         "scopes": normalized_scopes,
         "typ": "app",
+        "managed": True,
     }
     signing_input = f"{_json_b64(header)}.{_json_b64(payload)}"
     signature = hmac.new(
@@ -100,10 +105,12 @@ def create_app_token(
     ).digest()
     token = f"nxapp_{signing_input}.{_b64url_encode(signature)}"
     return CreateAppTokenResponse(
+        tokenId=payload["jti"],
         appId=app_id,
         appName=payload["app_name"],
         token=token,
         expiresAt=expires_at,
+        createdAt=issued_at,
         scopes=normalized_scopes,
     )
 
@@ -171,11 +178,13 @@ def decode_app_token(token: str, secret: str) -> AppTokenClaims:
 
     scopes = payload.get("scopes")
     return AppTokenClaims(
+        token_id=str(payload.get("jti") or ""),
         app_id=app_id,
         app_name=str(payload.get("app_name") or app_id),
         issued_at=int(payload.get("iat") or 0),
         expires_at=int(expires_at) if expires_at is not None else None,
         scopes=tuple(str(scope) for scope in scopes) if isinstance(scopes, list) else (),
+        managed=payload.get("managed") is True,
     )
 
 
