@@ -9,7 +9,9 @@ Lark به‌طور خودکار children را به متد pass می‌کند.
 
 from __future__ import annotations
 
-from lark import Transformer, Token
+import ast
+
+from lark import Token, Transformer
 
 from . import ast_nodes as N
 
@@ -20,16 +22,13 @@ def _tok(x) -> str:
 
 
 def _unquote(s: str) -> str:
-    """حذف کوتیشن و unescape ساده."""
+    """Parse a quoted literal without corrupting nested JSON escapes."""
     if len(s) >= 2 and s[0] in "'\"" and s[-1] == s[0]:
-        inner = s[1:-1]
-        # unescape \' \" \\ \n \t
-        return (inner
-                .replace("\\'", "'")
-                .replace('\\"', '"')
-                .replace("\\n", "\n")
-                .replace("\\t", "\t")
-                .replace("\\\\", "\\"))
+        try:
+            value = ast.literal_eval(s)
+        except (SyntaxError, ValueError):
+            return s[1:-1]
+        return value if isinstance(value, str) else str(value)
     return s
 
 
