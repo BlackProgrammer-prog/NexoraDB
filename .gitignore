@@ -15,3 +15,5 @@ nexoradb.cpython-310-x86_64-linux-gnu.so
 /NexoraDB/src/nexoradb/cli/__pycache__
 /nexoradb-data
 /NexoraDB/src/nexoradb/commands/__pycache__
+/tests/__pycache__
+/NexoraDB/examples/__pycache__

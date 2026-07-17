@@ -5,6 +5,12 @@ import { stringifyJson } from '../../../shared/utils/json'
 import type { QueryResult } from '../types/query.types'
 import { QueryExecutionStats } from './QueryExecutionStats'
 
+const GraphVisualization = lazy(() =>
+  import('../../graphs/components/GraphVisualization').then((module) => ({
+    default: module.GraphVisualization,
+  })),
+)
+
 interface QueryResultPanelProps {
   error: Error | null
   isIdle: boolean
@@ -34,6 +40,8 @@ export function QueryResultPanel({
       />
     )
   }
+
+  const graphId = graphIdFromQueryResult(result.raw)
 
   return (
     <div className="space-y-4">
@@ -74,6 +82,28 @@ export function QueryResultPanel({
           {stringifyJson(result.raw)}
         </pre>
       </div>
+      {graphId ? (
+        <Suspense fallback={<div className="text-sm text-slate-500">Loading graph viewer…</div>}>
+          <GraphVisualization graphId={graphId} refreshKey={result.executionTimeMs} />
+        </Suspense>
+      ) : null}
     </div>
   )
 }
+
+function graphIdFromQueryResult(raw: unknown) {
+  if (!raw || typeof raw !== 'object' || !("statements" in raw)) return null
+  const statements = (raw as { statements?: unknown }).statements
+  if (!Array.isArray(statements)) return null
+  const graphStatement = statements.find(
+    (statement): statement is { algo: string; graph: string } =>
+      Boolean(
+        statement &&
+          typeof statement === 'object' &&
+          typeof (statement as { algo?: unknown }).algo === 'string' &&
+          typeof (statement as { graph?: unknown }).graph === 'string',
+      ),
+  )
+  return graphStatement?.graph ?? null
+}
+import { lazy, Suspense } from 'react'

@@ -31,6 +31,14 @@ interface GraphAlgorithmPanelProps {
 
 const ALGORITHMS: AlgorithmAction[] = [
   {
+    name: 'BetweennessCentrality',
+    kind: 'JOB',
+    description: 'Rank the bridge nodes that connect different parts of the graph.',
+    requirement: 'none',
+    buildQuery: ({ graphId }) =>
+      `RUN JOB BetweennessCentrality ON ${graphId} RETURNS TOP 20;`,
+  },
+  {
     name: 'AllDistances',
     kind: 'JOB',
     description: 'BFS distances from the first node.',
@@ -68,10 +76,18 @@ const ALGORITHMS: AlgorithmAction[] = [
     kind: 'LOCK',
     description: 'Suggest friends for the first node.',
     requirement: 'oneNode',
-    buildQuery: ({ graphId, sourceNodeId }) =>
+    buildQuery: ({ edgeType, graphId, sourceNodeId }) =>
       `RUN LOCK FriendSuggestion ON ${graphId} WITH user=${quoteValue(
         sourceNodeId,
-      )}, depth=2 LIMIT 20;`,
+      )}${edgeTypeParam(edgeType)} LIMIT 20;`,
+  },
+  {
+    name: 'InfluenceMaximization',
+    kind: 'JOB',
+    description: 'Choose seed nodes that maximize information spread.',
+    requirement: 'none',
+    buildQuery: ({ graphId }) =>
+      `RUN JOB InfluenceMaximization ON ${graphId} WITH k=5, simulations=20, probability=0.1;`,
   },
   {
     name: 'GetFriends',
@@ -131,7 +147,7 @@ const ALGORITHMS: AlgorithmAction[] = [
     buildQuery: ({ edgeType, graphId, sourceNodeId, targetNodeId }) =>
       `RUN LOCK ShortestPath ON ${graphId} WITH from=${quoteValue(
         sourceNodeId,
-      )}, to=${quoteValue(targetNodeId)}${edgeTypeParam(edgeType)}, max_depth=6;`,
+      )}, to=${quoteValue(targetNodeId)}${edgeTypeParam(edgeType)};`,
   },
 ]
 

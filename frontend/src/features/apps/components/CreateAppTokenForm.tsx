@@ -3,7 +3,6 @@ import { Button } from '../../../shared/components/ui/Button'
 import { ErrorState } from '../../../shared/components/ui/ErrorState'
 import { Input } from '../../../shared/components/ui/Input'
 import { LoadingState } from '../../../shared/components/ui/LoadingState'
-import { stringifyJson } from '../../../shared/utils/json'
 import { appTokenApi } from '../services/appTokenApi'
 import { AppScopeSelector } from './AppScopeSelector'
 import {
@@ -12,7 +11,11 @@ import {
   type AppTokenResponse,
 } from '../types/appToken.types'
 
-export function CreateAppTokenForm() {
+interface CreateAppTokenFormProps {
+  onCreated?: () => void
+}
+
+export function CreateAppTokenForm({ onCreated }: CreateAppTokenFormProps) {
   const [appId, setAppId] = useState('')
   const [appName, setAppName] = useState('')
   const [expiresInSeconds, setExpiresInSeconds] = useState('')
@@ -74,6 +77,7 @@ export function CreateAppTokenForm() {
         expiresInSeconds: expiresInSeconds ? Number(expiresInSeconds) : undefined,
       })
       setCreatedToken(token)
+      onCreated?.()
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : 'Could not create app token')
     } finally {
@@ -142,8 +146,11 @@ export function CreateAppTokenForm() {
             Copy this token now. It will not be shown again.
           </p>
           <pre className="overflow-auto rounded-md bg-slate-950 p-4 text-xs text-green-100">
-            {stringifyJson(createdToken)}
+            {createdToken.token}
           </pre>
+          <Button onClick={() => navigator.clipboard.writeText(createdToken.token)}>
+            Copy token
+          </Button>
         </div>
       ) : null}
     </div>

@@ -20,6 +20,7 @@ from nexoradb.parser.semantic import (  # noqa: E402
     Validator,
     algo_params_to_positional,
 )
+from nexoradb_admin.query_runner import QueryExecuteRequest, execute_query  # noqa: E402
 
 
 class FakeAlgoResult:
@@ -45,6 +46,18 @@ class FakeGraphManager:
     def run_mutual_friends(self, graph: str, params: list[str]) -> FakeAlgoResult:
         return self._record("run_mutual_friends", graph, params)
 
+    def run_get_friends(self, graph: str, params: list[str]) -> FakeAlgoResult:
+        return self._record("run_get_friends", graph, params)
+
+    def run_are_connected(self, graph: str, params: list[str]) -> FakeAlgoResult:
+        return self._record("run_are_connected", graph, params)
+
+    def run_shortest_path(self, graph: str, params: list[str]) -> FakeAlgoResult:
+        return self._record("run_shortest_path", graph, params)
+
+    def run_friend_suggestion(self, graph: str, params: list[str]) -> FakeAlgoResult:
+        return self._record("run_friend_suggestion", graph, params)
+
     def run_most_connected(self, graph: str, params: list[str]) -> FakeAlgoResult:
         return self._record("run_most_connected", graph, params)
 
@@ -59,6 +72,12 @@ class FakeGraphManager:
 
     def run_all_distances(self, graph: str, params: list[str]) -> FakeAlgoResult:
         return self._record("run_all_distances", graph, params)
+
+    def run_betweenness_centrality(self, graph: str, params: list[str]) -> FakeAlgoResult:
+        return self._record("run_betweenness_centrality", graph, params)
+
+    def run_influence_maximization(self, graph: str, params: list[str]) -> FakeAlgoResult:
+        return self._record("run_influence_maximization", graph, params)
 
 
 class ParserAlgorithmTests(unittest.TestCase):
@@ -85,6 +104,34 @@ class ParserAlgorithmTests(unittest.TestCase):
                 {"mode": "full"},
             ),
             (
+                "RUN LOCK GetFriends ON social "
+                "WITH user='u1', edge_type='FOLLOWS' LIMIT 20;",
+                N.RunLock,
+                "GetFriends",
+                {"user": "u1", "edge_type": "FOLLOWS"},
+            ),
+            (
+                "RUN LOCK AreConnected ON social "
+                "WITH user1='u1', user2='u2', edge_type='FOLLOWS';",
+                N.RunLock,
+                "AreConnected",
+                {"user1": "u1", "user2": "u2", "edge_type": "FOLLOWS"},
+            ),
+            (
+                "RUN LOCK ShortestPath ON social "
+                "WITH from='u1', to='u3', edge_type='FOLLOWS';",
+                N.RunLock,
+                "ShortestPath",
+                {"from": "u1", "to": "u3", "edge_type": "FOLLOWS"},
+            ),
+            (
+                "RUN LOCK FriendSuggestion ON social "
+                "WITH user='u1', edge_type='FOLLOWS' LIMIT 10;",
+                N.RunLock,
+                "FriendSuggestion",
+                {"user": "u1", "edge_type": "FOLLOWS"},
+            ),
+            (
                 "RUN JOB ConnectedComponents ON social WITH node_type='User';",
                 N.RunJob,
                 "ConnectedComponents",
@@ -109,6 +156,19 @@ class ParserAlgorithmTests(unittest.TestCase):
                 N.RunJob,
                 "AllDistances",
                 {"source": "u1", "all": True, "max_hops": 2, "node_type": "User"},
+            ),
+            (
+                "RUN JOB BetweennessCentrality ON social RETURNS TOP 5;",
+                N.RunJob,
+                "BetweennessCentrality",
+                {},
+            ),
+            (
+                "RUN JOB InfluenceMaximization ON social "
+                "WITH k=3, simulations=25, probability=0.2;",
+                N.RunJob,
+                "InfluenceMaximization",
+                {"k": 3, "simulations": 25, "probability": 0.2},
             ),
         ]
 
@@ -141,6 +201,31 @@ class ParserAlgorithmTests(unittest.TestCase):
             ["full"],
         )
         self.assertEqual(
+            algo_params_to_positional(
+                "GetFriends", {"user": "u1", "edge_type": "FOLLOWS"}, limit=20
+            ),
+            ["u1", "20", "FOLLOWS"],
+        )
+        self.assertEqual(
+            algo_params_to_positional(
+                "AreConnected",
+                {"user1": "u1", "user2": "u2", "edge_type": "FOLLOWS"},
+            ),
+            ["u1", "u2", "FOLLOWS"],
+        )
+        self.assertEqual(
+            algo_params_to_positional(
+                "ShortestPath", {"from": "u1", "to": "u3", "edge_type": "FOLLOWS"}
+            ),
+            ["u1", "u3", "FOLLOWS"],
+        )
+        self.assertEqual(
+            algo_params_to_positional(
+                "FriendSuggestion", {"user": "u1", "edge_type": "FOLLOWS"}, limit=10
+            ),
+            ["u1", "10", "FOLLOWS"],
+        )
+        self.assertEqual(
             algo_params_to_positional("ConnectedComponents", {"node_type": "User"}),
             ["User"],
         )
@@ -162,6 +247,17 @@ class ParserAlgorithmTests(unittest.TestCase):
                 {"source": "u1", "all": True, "max_hops": 2, "node_type": "User"},
             ),
             ["u1", "all", "2", "User"],
+        )
+        self.assertEqual(
+            algo_params_to_positional("BetweennessCentrality", {}, top=5),
+            ["5"],
+        )
+        self.assertEqual(
+            algo_params_to_positional(
+                "InfluenceMaximization",
+                {"k": 3, "simulations": 25, "probability": 0.2},
+            ),
+            ["3", "25", "0.2"],
         )
 
     def test_validator_rejects_wrong_run_mode(self):
@@ -189,6 +285,76 @@ class ParserAlgorithmTests(unittest.TestCase):
         )
         self.assertEqual(result["result"]["method"], "run_most_connected")
 
+    def test_executor_dispatches_new_lock_algorithms(self):
+        cases = [
+            (
+                "RUN LOCK GetFriends ON social WITH user='u1', "
+                "edge_type='FOLLOWS' LIMIT 20;",
+                "run_get_friends",
+                ["u1", "20", "FOLLOWS"],
+            ),
+            (
+                "RUN LOCK AreConnected ON social WITH user1='u1', "
+                "user2='u2', edge_type='FOLLOWS';",
+                "run_are_connected",
+                ["u1", "u2", "FOLLOWS"],
+            ),
+            (
+                "RUN LOCK ShortestPath ON social WITH from='u1', "
+                "to='u3', edge_type='FOLLOWS';",
+                "run_shortest_path",
+                ["u1", "u3", "FOLLOWS"],
+            ),
+            (
+                "RUN LOCK FriendSuggestion ON social WITH user='u1', "
+                "edge_type='FOLLOWS' LIMIT 10;",
+                "run_friend_suggestion",
+                ["u1", "10", "FOLLOWS"],
+            ),
+        ]
+
+        for query, method, params in cases:
+            with self.subTest(method=method):
+                gm = FakeGraphManager()
+                result = Executor(engine=None, graph_manager=gm).execute(parse_one(query))
+                self.assertTrue(result["success"])
+                self.assertEqual(gm.calls, [(method, "social", params)])
+
+    def test_admin_query_backend_executes_new_algorithms(self):
+        gm = FakeGraphManager()
+
+        lock_response = execute_query(
+            engine=None,
+            graph_manager=gm,
+            payload=QueryExecuteRequest(
+                query=(
+                    "RUN LOCK GetFriends ON social WITH user='u1', "
+                    "edge_type='FOLLOWS' LIMIT 20;"
+                )
+            ),
+        )
+        job_response = execute_query(
+            engine=None,
+            graph_manager=gm,
+            payload=QueryExecuteRequest(
+                query="RUN JOB BetweennessCentrality ON social RETURNS TOP 5;"
+            ),
+        )
+
+        lock_statement = lock_response.raw["statements"][0]
+        job_statement = job_response.raw["statements"][0]
+        self.assertTrue(lock_statement["success"])
+        self.assertEqual(lock_statement["result"]["method"], "run_get_friends")
+        self.assertIn("algorithm", lock_response.columns)
+        self.assertEqual(lock_response.rows[0]["algorithm"], "GetFriends")
+        self.assertTrue(job_statement["success"])
+        self.assertEqual(job_statement["status"], "done")
+        self.assertEqual(
+            job_statement["result"]["method"], "run_betweenness_centrality"
+        )
+        self.assertIn("job_id", job_response.columns)
+        self.assertEqual(job_response.rows[0]["algorithm"], "BetweennessCentrality")
+
     def test_executor_dispatches_job_algorithms_to_current_pybind_methods(self):
         gm = FakeGraphManager()
         executor = Executor(engine=None, graph_manager=gm)
@@ -207,6 +373,32 @@ class ParserAlgorithmTests(unittest.TestCase):
         )
         self.assertTrue(result["success"])
         self.assertEqual(result["result"]["method"], "run_all_distances")
+
+    def test_executor_dispatches_new_job_algorithms(self):
+        cases = [
+            (
+                "RUN JOB BetweennessCentrality ON social RETURNS TOP 5;",
+                "run_betweenness_centrality",
+                ["5"],
+            ),
+            (
+                "RUN JOB InfluenceMaximization ON social "
+                "WITH k=3, simulations=25, probability=0.2;",
+                "run_influence_maximization",
+                ["3", "25", "0.2"],
+            ),
+        ]
+
+        for query, method, params in cases:
+            with self.subTest(method=method):
+                gm = FakeGraphManager()
+                executor = Executor(engine=None, graph_manager=gm)
+                submitted = executor.execute(parse_one(query))
+                result = executor.execute(N.JobResult(job_id=submitted["job_id"]))
+                self.assertTrue(submitted["success"])
+                self.assertEqual(submitted["status"], "done")
+                self.assertEqual(gm.calls, [(method, "social", params)])
+                self.assertTrue(result["success"])
 
 
 if __name__ == "__main__":

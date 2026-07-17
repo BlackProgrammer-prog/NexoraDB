@@ -1,9 +1,11 @@
 #include "BetweennessCentrality.h"
+#include "BuiltinAlgorithms.h"
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <numeric>
 #include <sstream>
+#include <unordered_set>
 namespace nexora::graph::algorithms {
 
     BetweennessCentrality::BfsState::BfsState(size_t N, size_t s_idx)
@@ -25,8 +27,8 @@ namespace nexora::graph::algorithms {
         size_t top_k = SIZE_MAX;
         if (!params.empty() && !params[0].empty()) {
             try   { top_k = static_cast<size_t>(std::stoul(params[0])); }
-            catch (...) { return AlgoResult{false, "param[0] must be a positive integer (top_k)"}; }
-            if (top_k == 0) return AlgoResult{false, "top_k must be >= 1"};
+            catch (...) { return AlgoResult{false, "param[0] must be a positive integer (top_k)", "", 0.0}; }
+            if (top_k == 0) return AlgoResult{false, "top_k must be >= 1", "", 0.0};
         }
 
         std::vector<DenseId> nodes;
@@ -95,10 +97,19 @@ namespace nexora::graph::algorithms {
                 return true;
             };
 
+            std::unordered_set<DenseId> unique_neighbors;
             snapshot.forEachNeighbor(nodes[v], Direction::Out,
-                                     [&](DenseId n, TypeId) -> bool { return expand(n); });
+                                     [&](DenseId n, TypeId) -> bool {
+                                         unique_neighbors.insert(n);
+                                         return true;
+                                     });
             snapshot.forEachNeighbor(nodes[v], Direction::In,
-                                     [&](DenseId n, TypeId) -> bool { return expand(n); });
+                                     [&](DenseId n, TypeId) -> bool {
+                                         unique_neighbors.insert(n);
+                                         return true;
+                                     });
+            for (DenseId n : unique_neighbors)
+                expand(n);
         }
     }
     void BetweennessCentrality::backwardPass(size_t     s_idx,
@@ -150,6 +161,15 @@ std::string BetweennessCentrality::buildJson(
     }
     j << "]}";
     return j.str();
+}
+
+AlgoResult runBetweennessCentrality(GraphManager& manager,
+                                    const std::string& graph_name,
+                                    const std::vector<ExtId>& params)
+{
+    BetweennessCentrality algo;
+    auto handle = manager.submitJob(graph_name, algo, params);
+    return handle.result();
 }
 
 }

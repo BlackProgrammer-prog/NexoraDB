@@ -79,6 +79,7 @@ namespace nexora {
             constexpr char kSeq[]     = "seq:";       ///< seq:{col} — شمارنده اسناد
             constexpr char kReservedPrefix[] = "__nexora_";
             constexpr char kInternalUsers[]  = "__nexora_internal_users";
+            constexpr char kInternalAppTokens[] = "__nexora_internal_app_tokens";
         } // namespace keys
 
 // ══════════════════════════════════════════════════════════════
@@ -158,22 +159,22 @@ namespace nexora {
         }
 
         bool DocEngine::EnsureInternalCollections() {
-            const std::string meta_key = MakeMetaKey(keys::kMetaCol, keys::kInternalUsers);
-            std::string existing;
-            rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &existing);
-            if (!s.ok() && !s.IsNotFound()) return false;
-
             rocksdb::WriteBatch batch;
-            if (s.IsNotFound()) {
-                batch.Put(meta_key, SerializeSchema(SchemaDefinition{}));
-            }
+            for (const std::string& collection : {
+                     std::string(keys::kInternalUsers),
+                     std::string(keys::kInternalAppTokens)}) {
+                const std::string meta_key = MakeMetaKey(keys::kMetaCol, collection);
+                std::string existing;
+                rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &existing);
+                if (!s.ok() && !s.IsNotFound()) return false;
+                if (s.IsNotFound())
+                    batch.Put(meta_key, SerializeSchema(SchemaDefinition{}));
 
-            const std::string seq_key = std::string(keys::kSeq) + keys::kInternalUsers;
-            std::string seq_val;
-            s = txn_db_->Get(read_options_, seq_key, &seq_val);
-            if (!s.ok() && !s.IsNotFound()) return false;
-            if (s.IsNotFound()) {
-                batch.Put(seq_key, "0");
+                const std::string seq_key = std::string(keys::kSeq) + collection;
+                std::string seq_val;
+                s = txn_db_->Get(read_options_, seq_key, &seq_val);
+                if (!s.ok() && !s.IsNotFound()) return false;
+                if (s.IsNotFound()) batch.Put(seq_key, "0");
             }
 
             if (batch.Count() == 0) return true;
@@ -1421,7 +1422,78 @@ namespace nexora {
         }
 
 // ══════════════════════════════════════════════════════════════
-// §18  دسترسی به پیکربندی
+// §18  Internal application tokens
+// ══════════════════════════════════════════════════════════════
+
+        DBResult DocEngine::CreateInternalAppToken(const std::string& token_id,
+                                                   const std::string& token_json) {
+            if (token_id.empty()) return DBResult::Err("token id is required");
+            if (token_json.empty()) return DBResult::Err("token document is required");
+            if (!EnsureInternalCollections())
+                return DBResult::Err("failed to initialize internal collections");
+
+            const std::string key = MakeDocKey(keys::kInternalAppTokens, token_id);
+            std::string existing;
+            rocksdb::Status s = txn_db_->Get(read_options_, key, &existing);
+            if (s.ok()) return DBResult::Err("application token already exists");
+            if (!s.IsNotFound())
+                return DBResult::Err("[RocksDB] CreateInternalAppToken read: " + s.ToString());
+
+            rocksdb::WriteBatch batch;
+            batch.Put(key, token_json);
+            const std::string seq_key = std::string(keys::kSeq) + keys::kInternalAppTokens;
+            std::string seq_val;
+            txn_db_->Get(read_options_, seq_key, &seq_val);
+            const int64_t count = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
+            batch.Put(seq_key, std::to_string(count));
+            s = txn_db_->Write(write_options_, &batch);
+            ROCKS_CHECK(s, "CreateInternalAppToken");
+            return DBResult::Ok(token_id);
+        }
+
+        DBResult DocEngine::ListInternalAppTokens() const {
+            const std::string prefix = std::string(keys::kData) +
+                                       keys::kInternalAppTokens + ":";
+            auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                    txn_db_->NewIterator(read_options_));
+            std::string json = "[";
+            bool first = true;
+            for (iterator->Seek(prefix);
+                 iterator->Valid() && iterator->key().starts_with(prefix);
+                 iterator->Next()) {
+                if (!first) json += ',';
+                first = false;
+                json += iterator->value().ToString();
+            }
+            if (!iterator->status().ok())
+                return DBResult::Err("[RocksDB] ListInternalAppTokens: " +
+                                     iterator->status().ToString());
+            json += ']';
+            return DBResult::Ok(json);
+        }
+
+        DBResult DocEngine::DeleteInternalAppToken(const std::string& token_id) {
+            if (token_id.empty()) return DBResult::Err("token id is required");
+            const std::string key = MakeDocKey(keys::kInternalAppTokens, token_id);
+            std::string existing;
+            rocksdb::Status s = txn_db_->Get(read_options_, key, &existing);
+            if (s.IsNotFound()) return DBResult::Err("application token not found");
+            ROCKS_CHECK(s, "DeleteInternalAppToken read");
+            s = txn_db_->Delete(write_options_, key);
+            ROCKS_CHECK(s, "DeleteInternalAppToken write");
+            return DBResult::Ok("1");
+        }
+
+        bool DocEngine::IsInternalAppTokenActive(const std::string& token_id) const {
+            if (token_id.empty()) return false;
+            std::string value;
+            return txn_db_->Get(read_options_,
+                                MakeDocKey(keys::kInternalAppTokens, token_id),
+                                &value).ok();
+        }
+
+// ══════════════════════════════════════════════════════════════
+// §19  دسترسی به پیکربندی
 // ══════════════════════════════════════════════════════════════
 
         std::optional<SchemaDefinition>

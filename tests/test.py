@@ -520,6 +520,100 @@ dist_by_id = {item["id"]: item["distance"] for item in ad_data["distances"]}
 assert dist_by_id["u2"] == 1, ad_data
 assert dist_by_id["u3"] == 1, ad_data
 
+gf = gm.run_get_friends("social", ["u1", "10", "FOLLOWS"])
+print(f"  GetFriends: success={gf.success} json={gf.result_json} "
+      f"time={gf.elapsed_ms:.3f}ms")
+assert gf.success, gf.error_msg
+gf_data = json.loads(gf.result_json)
+assert gf_data["user_id"] == "u1", gf_data
+assert gf_data["friend_count"] == 2, gf_data
+assert set(gf_data["friends"]) == {"u2", "u3"}, gf_data
+
+ac = gm.run_are_connected("social", ["u1", "u3", "FOLLOWS"])
+print(f"  AreConnected: success={ac.success} json={ac.result_json} "
+      f"time={ac.elapsed_ms:.3f}ms")
+assert ac.success, ac.error_msg
+ac_data = json.loads(ac.result_json)
+assert ac_data["connected"] is True, ac_data
+assert ac_data["hops"] == 1, ac_data
+
+sp = gm.run_shortest_path("social", ["u3", "u1", "FOLLOWS"])
+print(f"  ShortestPath: success={sp.success} json={sp.result_json} "
+      f"time={sp.elapsed_ms:.3f}ms")
+assert sp.success, sp.error_msg
+sp_data = json.loads(sp.result_json)
+assert sp_data["found"] is True, sp_data
+assert sp_data["hops"] == 1, sp_data
+assert sp_data["path"] == ["u3", "u1"], sp_data
+
+fs = gm.run_friend_suggestion("social", ["u1", "10", "FOLLOWS"])
+print(f"  FriendSuggestion: success={fs.success} json={fs.result_json} "
+      f"time={fs.elapsed_ms:.3f}ms")
+assert fs.success, fs.error_msg
+fs_data = json.loads(fs.result_json)
+assert fs_data["user_id"] == "u1", fs_data
+assert fs_data["suggestion_count"] == 0, fs_data
+assert fs_data["suggestions"] == [], fs_data
+
+bc = gm.run_betweenness_centrality("social", ["3"])
+print(f"  BetweennessCentrality: success={bc.success} json={bc.result_json} "
+      f"time={bc.elapsed_ms:.3f}ms")
+assert bc.success, bc.error_msg
+bc_data = json.loads(bc.result_json)
+assert bc_data["total_nodes"] == stats.active_nodes, bc_data
+assert bc_data["showing"] == 3, bc_data
+assert len(bc_data["nodes"]) == 3, bc_data
+assert [item["rank"] for item in bc_data["nodes"]] == [1, 2, 3], bc_data
+
+im = gm.run_influence_maximization("social", ["2", "5", "0"])
+print(f"  InfluenceMaximization: success={im.success} json={im.result_json} "
+      f"time={im.elapsed_ms:.3f}ms")
+assert im.success, im.error_msg
+im_data = json.loads(im.result_json)
+assert im_data["k_seeds"] == 2, im_data
+assert im_data["simulations"] == 5, im_data
+assert im_data["propagation_prob"] == 0, im_data
+assert im_data["estimated_reach"] == 2, im_data
+assert len(im_data["seeds"]) == 2, im_data
+
+# ── NexoraQL + Admin backend → parser → pybind → C++ ─────────
+ADMIN_SRC = os.path.join(ROOT, "NexoraDB", "src")
+if ADMIN_SRC not in sys.path:
+    sys.path.insert(0, ADMIN_SRC)
+
+from nexoradb_admin.query_runner import QueryExecuteRequest, execute_query
+
+admin_lock = execute_query(
+    engine=engine,
+    graph_manager=gm,
+    payload=QueryExecuteRequest(
+        query=(
+            "RUN LOCK GetFriends ON social WITH user='u1', "
+            "edge_type='FOLLOWS' LIMIT 10;"
+        )
+    ),
+)
+admin_lock_stmt = admin_lock.raw["statements"][0]
+assert admin_lock_stmt["success"], admin_lock_stmt
+assert set(admin_lock_stmt["result"]["friends"]) == {"u2", "u3"}, admin_lock_stmt
+
+admin_job = execute_query(
+    engine=engine,
+    graph_manager=gm,
+    payload=QueryExecuteRequest(
+        query=(
+            "RUN JOB InfluenceMaximization ON social "
+            "WITH k=2, simulations=5, probability=0;"
+        )
+    ),
+)
+admin_job_stmt = admin_job.raw["statements"][0]
+assert admin_job_stmt["success"], admin_job_stmt
+assert admin_job_stmt["status"] == "done", admin_job_stmt
+assert admin_job_stmt["result"]["k_seeds"] == 2, admin_job_stmt
+assert admin_job_stmt["result"]["estimated_reach"] == 2, admin_job_stmt
+print("  Admin query backend: new LOCK/JOB algorithms passed")
+
 # ── GraphMode.Static باید همان built-in algorithms را پشتیبانی کند ───────
 sep("15.2 Built-in Algorithms — GraphMode.Static")
 

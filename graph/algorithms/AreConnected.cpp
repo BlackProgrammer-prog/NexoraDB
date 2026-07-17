@@ -1,4 +1,5 @@
 #include "AreConnected.h"
+#include "BuiltinAlgorithms.h"
 #include <sstream>
 
 
@@ -15,16 +16,26 @@ namespace nexora::graph::algorithms {
 
 
         if (params.size() < 2)
-            return AlgoResult{false, "Need 2 user IDs: [user1_id, user2_id]"};
+            return AlgoResult{false, "Need 2 user IDs: [user1_id, user2_id]", "", 0.0};
 
 
         DenseId src = graph.getDenseId(params[0]);
         DenseId dst = graph.getDenseId(params[1]);
 
         if (src == kInvalidDenseId)
-            return AlgoResult{false, "User not found: " + params[0]};
+            return AlgoResult{false, "User not found: " + params[0], "", 0.0};
         if (dst == kInvalidDenseId)
-            return AlgoResult{false, "User not found: " + params[1]};
+            return AlgoResult{false, "User not found: " + params[1], "", 0.0};
+
+        TypeId edge_type = kInvalidTypeId;
+        std::string edge_type_name;
+        if (params.size() >= 3 && !params[2].empty()) {
+            auto tid = graph.getEdgeTypeId(params[2]);
+            if (!tid)
+                return AlgoResult{false, "Unknown edge type: " + params[2], "", 0.0};
+            edge_type = *tid;
+            edge_type_name = params[2];
+        }
 
 
         if (src == dst)
@@ -32,8 +43,8 @@ namespace nexora::graph::algorithms {
                               elapsedMs(t0)};
 
 
-        if (graph.hasEdge(params[0], params[1], "") ||
-            graph.hasEdge(params[1], params[0], ""))
+        if (graph.hasEdge(params[0], params[1], edge_type_name) ||
+            graph.hasEdge(params[1], params[0], edge_type_name))
             return AlgoResult{true, "", buildJson(true, 1, params[0], params[1]),
                               elapsedMs(t0)};
 
@@ -53,7 +64,7 @@ namespace nexora::graph::algorithms {
             VisitedMap&  v_a = expand_fwd ? visited_fwd: visited_bwd;
             const VisitedMap& v_o = expand_fwd ? visited_bwd: visited_fwd;
 
-            if (expandLevel(graph, q_a, v_a, v_o, q_a.size()))
+            if (expandLevel(graph, q_a, v_a, v_o, q_a.size(), edge_type))
                 return AlgoResult{true, "", buildJson(true, depth, params[0], params[1]),
                                   elapsedMs(t0)};
         }
@@ -66,7 +77,8 @@ namespace nexora::graph::algorithms {
                                    BfsQueue&         q_a,
                                    VisitedMap&       v_a,
                                    const VisitedMap& v_o,
-                                   size_t            level_size)
+                                   size_t            level_size,
+                                   TypeId            edge_type)
     {
         for (size_t qi = 0; qi < level_size; ++qi) {
             DenseId cur = q_a.front();
@@ -84,11 +96,13 @@ namespace nexora::graph::algorithms {
             };
 
             graph.forEachOutEdge(cur, [&](const AdjEntry& e) -> bool {
+                if (edge_type != kInvalidTypeId && e.type_id != edge_type) return true;
                 return check(e.neighbor);
             });
             if (hit) return true;
 
             graph.forEachInEdge(cur, [&](const AdjEntry& e) -> bool {
+                if (edge_type != kInvalidTypeId && e.type_id != edge_type) return true;
                 return check(e.neighbor);
             });
             if (hit) return true;
@@ -113,6 +127,14 @@ namespace nexora::graph::algorithms {
     {
         return std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
+    }
+
+    AlgoResult runAreConnected(GraphManager& manager,
+                               const std::string& graph_name,
+                               const std::vector<ExtId>& params)
+    {
+        AreConnected algo;
+        return manager.runLock(graph_name, algo, params);
     }
 
 }

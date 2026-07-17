@@ -4,9 +4,13 @@ import type {
   AppScopesResponse,
   AppTokenResponse,
   CreateAppTokenInput,
+  StoredAppToken,
 } from '../types/appToken.types'
 
 export const appTokenApi = {
+  listTokens(): Promise<StoredAppToken[]> {
+    return httpClient.get<StoredAppToken[]>(appTokenEndpoints.list)
+  },
   listScopes(): Promise<AppScopesResponse> {
     return httpClient.get<AppScopesResponse>(appTokenEndpoints.scopes)
   },
@@ -16,5 +20,9 @@ export const appTokenApi = {
       appTokenEndpoints.create,
       input,
     )
+  },
+
+  deleteToken(tokenId: string): Promise<null> {
+    return httpClient.delete<null>(appTokenEndpoints.remove(tokenId))
   },
 }

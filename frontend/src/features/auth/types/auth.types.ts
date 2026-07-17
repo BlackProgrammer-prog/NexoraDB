@@ -9,6 +9,7 @@ export interface AdminUser {
   createdAt: number
   updatedAt: number
   lastLoginAt: number | null
+  displayName: string
 }
 
 export interface LoginInput {

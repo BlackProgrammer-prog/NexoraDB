@@ -37,17 +37,19 @@ ALGO_SPECS: dict[str, dict] = {
     # ── LockAlgorithm ──
     "MutualFriends":    {"kind": "lock", "order": ["user1", "user2", "edge_type"]},
     "AreConnected":     {"kind": "lock", "order": ["user1", "user2", "edge_type"]},
-    "ShortestPath":     {"kind": "lock", "order": ["from", "to", "edge_type", "max_depth"]},
-    "FriendSuggestion": {"kind": "lock", "order": ["user", "depth", "limit"]},
+    "ShortestPath":     {"kind": "lock", "order": ["from", "to", "edge_type"]},
+    "FriendSuggestion": {"kind": "lock", "order": ["user", "limit", "edge_type"]},
     "MostConnected":    {"kind": "lock", "order": ["limit", "metric", "node_type"]},
     "NetworkStats":     {"kind": "lock", "order": ["mode"]},
-    "GetFriends":       {"kind": "lock", "order": ["user", "edge_type", "limit"]},
+    "GetFriends":       {"kind": "lock", "order": ["user", "limit", "edge_type"]},
     "Neighborhood":     {"kind": "lock", "order": ["node", "depth", "limit"]},
     # ── JobAlgorithm ──
     "ConnectedComponents": {"kind": "job", "order": ["node_type"]},
     "AllDistances":        {"kind": "job", "order": ["source", "all", "max_hops", "node_type"]},
     "CommunityDetection":  {"kind": "job", "order": ["max_iterations", "min_community_size", "members", "node_type"]},
     "PageRank":            {"kind": "job", "order": ["iterations", "damping", "top"]},
+    "BetweennessCentrality": {"kind": "job", "order": ["top"]},
+    "InfluenceMaximization": {"kind": "job", "order": ["k", "simulations", "probability"]},
 }
 
 # پارامترهای flag: مقدار True → رشته‌ای که C++ انتظار دارد
@@ -58,6 +60,10 @@ _FLAG_PARAMS: dict[str, dict[str, str]] = {
 
 _PYBIND_LOCK_DISPATCH: dict[str, str] = {
     "MutualFriends": "run_mutual_friends",
+    "GetFriends": "run_get_friends",
+    "AreConnected": "run_are_connected",
+    "ShortestPath": "run_shortest_path",
+    "FriendSuggestion": "run_friend_suggestion",
     "MostConnected": "run_most_connected",
     "NetworkStats": "run_network_stats",
 }
@@ -66,6 +72,8 @@ _PYBIND_JOB_DISPATCH: dict[str, str] = {
     "ConnectedComponents": "run_connected_components",
     "CommunityDetection": "run_community_detection",
     "AllDistances": "run_all_distances",
+    "BetweennessCentrality": "run_betweenness_centrality",
+    "InfluenceMaximization": "run_influence_maximization",
 }
 
 
@@ -530,8 +538,15 @@ class Executor:
         return self._res(self.engine.drop_index(s.collection, s.index_name))
 
     def _x_ShowIndexes(self, s: N.ShowIndexes) -> dict:
-        raise NexoraQLUnsupportedError(
-            "SHOW INDEXES: get_indexes not exposed in pybind MVP")
+        indexes = self.engine.get_indexes(s.collection)
+        return {"success": True, "indexes": [
+            {
+                "name": index.index_name,
+                "fields": list(index.fields),
+                "type": getattr(index.type, "name", str(index.type).rsplit(".", 1)[-1]),
+            }
+            for index in indexes
+        ]}
 
     def _x_AddForeignKey(self, s: N.AddForeignKey) -> dict:
         nx = _nx()
@@ -925,9 +940,15 @@ class Executor:
         # از node mapping registry: node_type → (collection, key)
         mapping = self._node_maps.get(s.graph, {}).get(s.node_type)
         if mapping is None:
+            definition = self._require_gm().get_definition(s.graph)
+            if definition is not None:
+                for node_mapping in definition.node_mappings:
+                    if node_mapping.node_type == s.node_type:
+                        mapping = (node_mapping.collection, node_mapping.key_path)
+                        break
+        if mapping is None:
             raise NexoraQLSemanticError(
-                f"Node type '{s.node_type}' not mapped in graph '{s.graph}' "
-                f"(run MAP NODE first, in this session)")
+                f"Node type '{s.node_type}' not mapped in graph '{s.graph}'")
         collection, _key = mapping
         r = self.engine.find_by_id(collection, s.node_id)
         if not r.success:
@@ -955,6 +976,7 @@ class Executor:
             r = getattr(gm, method_name)(s.graph, params)
             return {"success": getattr(r, "success", False),
                     "algo": s.algo,
+                    "graph": s.graph,
                     "elapsed_ms": getattr(r, "elapsed_ms", 0.0),
                     "result": _try_json(getattr(r, "result_json", "")),
                     "error": getattr(r, "error_msg", "")}
@@ -998,7 +1020,10 @@ class Executor:
             return {"success": getattr(r, "success", False),
                     "job_id": job_id,
                     "algo": s.algo,
+                    "graph": s.graph,
                     "status": "done",
+                    "elapsed_ms": getattr(r, "elapsed_ms", 0.0),
+                    "result": _try_json(getattr(r, "result_json", "")),
                     "error": getattr(r, "error_msg", "")}
 
         # مسیر ۲: binding generic آینده

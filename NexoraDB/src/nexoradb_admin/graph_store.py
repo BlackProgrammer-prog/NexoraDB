@@ -20,6 +20,10 @@ class GraphManagerLike(Protocol):
 
     def get_stats(self, graph_name: str) -> Any: ...
 
+    def create_snapshot(self, graph_name: str) -> Any: ...
+
+    def get_definition(self, graph_name: str) -> Any: ...
+
 
 class CreateGraphRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
@@ -47,7 +51,7 @@ def _slug(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_]+", "_", value.strip()).strip("_")
     if not normalized:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail={"message": "graph name must contain at least one letter or number"},
         )
     return normalized
@@ -331,6 +335,154 @@ def delete_edge(
     graph["updatedAt"] = _now_iso()
     metadata_store.save(graphs)
     return _make_graph_response(graph_id, graph, _safe_stats(graph_manager, graph_id))
+
+
+def get_graph_visualization(
+    *,
+    graph_manager: GraphManagerLike,
+    metadata_store: GraphMetadataStore,
+    graph_id: str,
+    max_nodes: int = 1_000,
+) -> dict[str, Any]:
+    graphs, metadata = _get_metadata_or_404(metadata_store, graph_id)
+    del graphs
+    snapshot = graph_manager.create_snapshot(graph_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail={"message": f"Graph '{graph_id}' is not ready"})
+
+    node_count = int(snapshot.node_count())
+    if node_count > max_nodes:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": f"Graph visualization supports at most {max_nodes} nodes",
+                "nodeCount": node_count,
+                "maxNodes": max_nodes,
+            },
+        )
+
+    collections = _node_type_collections(graph_manager, graph_id)
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
+    def add_node(dense_id: int, type_id: int) -> bool:
+        node_type = str(snapshot.node_type_name(type_id))
+        external_id = str(snapshot.ext_id(dense_id))
+        nodes.append(
+            {
+                "id": external_id,
+                "label": external_id,
+                "type": node_type,
+                "collection": collections.get(node_type),
+            }
+        )
+        return True
+
+    def add_edge(edge_id: int, source: int, target: int, type_id: int) -> bool:
+        edges.append(
+            {
+                "id": str(edge_id),
+                "source": str(snapshot.ext_id(source)),
+                "target": str(snapshot.ext_id(target)),
+                "label": str(snapshot.edge_type_name(type_id)),
+            }
+        )
+        return True
+
+    snapshot.for_each_node(add_node)
+    snapshot.for_each_edge(add_edge)
+
+    if not nodes and metadata.get("nodes"):
+        metadata_nodes = metadata.get("nodes", [])
+        if len(metadata_nodes) > max_nodes:
+            raise HTTPException(
+                status_code=422,
+                detail={"message": f"Graph visualization supports at most {max_nodes} nodes"},
+            )
+        nodes = [
+            {
+                "id": str(node.get("id", "")),
+                "label": str(node.get("label") or node.get("id") or ""),
+                "type": node.get("type"),
+                "collection": node.get("data", {}).get("collectionName"),
+            }
+            for node in metadata_nodes
+        ]
+        edges = [
+            {
+                "id": str(edge.get("id", "")),
+                "source": str(edge.get("source", "")),
+                "target": str(edge.get("target", "")),
+                "label": edge.get("label"),
+            }
+            for edge in metadata.get("edges", [])
+        ]
+
+    return {
+        "graphId": graph_id,
+        "nodeCount": len(nodes),
+        "edgeCount": len(edges),
+        "maxNodes": max_nodes,
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def get_graph_node_document(
+    *,
+    engine: Any,
+    graph_manager: GraphManagerLike,
+    metadata_store: GraphMetadataStore,
+    graph_id: str,
+    node_id: str,
+) -> dict[str, Any]:
+    _, metadata = _get_metadata_or_404(metadata_store, graph_id)
+    snapshot = graph_manager.create_snapshot(graph_id)
+    collections = _node_type_collections(graph_manager, graph_id)
+
+    if snapshot is not None:
+        dense_id = int(snapshot.dense_id(node_id))
+        if dense_id != (1 << 64) - 1 and snapshot.has_node(dense_id):
+            node_type = str(snapshot.node_type_name(snapshot.node_type(dense_id)))
+            collection = collections.get(node_type)
+            if collection:
+                result = engine.find_by_id(collection, node_id)
+                if result.success:
+                    return {
+                        "nodeId": node_id,
+                        "nodeType": node_type,
+                        "collection": collection,
+                        "document": json.loads(result.data),
+                    }
+
+    for node in metadata.get("nodes", []):
+        if str(node.get("id")) == node_id:
+            return {
+                "nodeId": node_id,
+                "nodeType": node.get("type"),
+                "collection": node.get("data", {}).get("collectionName"),
+                "document": node.get("data", {}),
+            }
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"message": f"Document for node '{node_id}' was not found"},
+    )
+
+
+def _node_type_collections(
+    graph_manager: GraphManagerLike, graph_id: str
+) -> dict[str, str]:
+    try:
+        definition = graph_manager.get_definition(graph_id)
+    except Exception:
+        return {}
+    if definition is None:
+        return {}
+    return {
+        str(mapping.node_type): str(mapping.collection)
+        for mapping in definition.node_mappings
+    }
 
 
 def _safe_stats(graph_manager: GraphManagerLike, graph_id: str) -> Any | None:

@@ -12,12 +12,19 @@ export interface CreateAppTokenInput {
 }
 
 export interface AppTokenResponse {
+  tokenId: string
   appId: string
   appName: string
   token: string
   tokenType: 'bearer'
   expiresAt: number | null
+  createdAt: number
   scopes: string[]
+}
+
+export interface StoredAppToken extends AppTokenResponse {
+  id: string
+  status: 'active' | 'expired'
 }
 
 export interface AppScopesResponse {

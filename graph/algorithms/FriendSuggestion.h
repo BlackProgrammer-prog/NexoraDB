@@ -24,11 +24,13 @@ namespace nexora::graph::algorithms {
 
         static void gatherNeighbors(const LiveGraph& graph,
                                     DenseId          uid,
+                                    TypeId           edge_type,
                                     FilterSet&       filter_set);
 
         static ScoreMap countMutual(const LiveGraph& graph,
                                     const FilterSet& direct_friends,
-                                    DenseId          uid);
+                                    DenseId          uid,
+                                    TypeId           edge_type);
 
         static RankedVec rankAndTrim(const ScoreMap& scores, size_t limit);
 

@@ -57,6 +57,7 @@ class PublicUser(BaseModel):
     created_at: int = Field(alias="createdAt")
     updated_at: int = Field(alias="updatedAt")
     last_login_at: int | None = Field(default=None, alias="lastLoginAt")
+    display_name: str = Field(alias="displayName")
 
 
 class AuthResponse(BaseModel):

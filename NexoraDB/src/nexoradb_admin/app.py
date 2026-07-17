@@ -42,11 +42,12 @@ from .graph_store import (
     delete_edge,
     delete_graph,
     delete_node,
+    get_graph_node_document,
+    get_graph_visualization,
     list_graphs,
     update_edge,
     update_node,
 )
-from .monitoring import MonitoringSocketServer, MonitoringState
 from .models import (
     AdminRegisterRequest,
     AuthResponse,
@@ -55,15 +56,19 @@ from .models import (
     PublicUser,
     SetupStateResponse,
 )
+from .monitoring import MonitoringSocketServer, MonitoringState
 from .native import create_doc_engine, create_graph_manager, load_native_module
 from .query_runner import QueryExecuteRequest, QueryExecuteResponse, execute_query
 from .security import TokenError, decode_access_token
 from .service import (
     InternalUserEngine,
+    delete_app_token,
     get_current_public_user,
+    list_app_tokens,
     login_admin,
     register_root_admin,
     root_exists,
+    store_app_token,
 )
 
 
@@ -218,16 +223,50 @@ def create_app(
     @app.post("/apps/tokens", response_model=CreateAppTokenResponse)
     def create_application_token(
         payload: CreateAppTokenRequest,
-        _: dict[str, Any] = Depends(current_token_payload),
+        token_payload: dict[str, Any] = Depends(current_token_payload),
+        current_engine: InternalUserEngine = Depends(get_engine),
         current_settings: AdminApiSettings = Depends(get_settings),
     ) -> CreateAppTokenResponse:
-        return create_app_token(
+        issued = create_app_token(
             app_id=payload.appId,
             app_name=payload.appName,
             scopes=payload.scopes,
             secret=current_settings.api_token_secret,
             expires_in_seconds=payload.expiresInSeconds,
         )
+        store_app_token(
+            current_engine,
+            str(token_payload["sub"]),
+            token_id=issued.tokenId,
+            app_id=issued.appId,
+            app_name=issued.appName,
+            token=issued.token,
+            scopes=issued.scopes,
+            expires_at=issued.expiresAt,
+            created_at=issued.createdAt,
+            secret=current_settings.api_token_secret,
+        )
+        return issued
+
+    @app.get("/apps/tokens")
+    def application_tokens(
+        token_payload: dict[str, Any] = Depends(current_token_payload),
+        current_engine: InternalUserEngine = Depends(get_engine),
+        current_settings: AdminApiSettings = Depends(get_settings),
+    ) -> list[dict[str, Any]]:
+        return list_app_tokens(
+            current_engine,
+            str(token_payload["sub"]),
+            current_settings.api_token_secret,
+        )
+
+    @app.delete("/apps/tokens/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_application_token(
+        token_id: str,
+        token_payload: dict[str, Any] = Depends(current_token_payload),
+        current_engine: InternalUserEngine = Depends(get_engine),
+    ) -> None:
+        delete_app_token(current_engine, str(token_payload["sub"]), token_id)
 
     @app.get("/apps/scopes")
     def application_token_scopes(
@@ -379,6 +418,36 @@ def create_app(
             metadata_store=metadata_store,
             graph_id=graph_id,
             payload=payload,
+        )
+
+    @app.get("/graphs/{graph_id}/visualization")
+    def graph_visualization_route(
+        graph_id: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return get_graph_visualization(
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+        )
+
+    @app.get("/graphs/{graph_id}/nodes/{node_id}/document")
+    def graph_node_document_route(
+        graph_id: str,
+        node_id: str,
+        _: dict[str, Any] = Depends(current_token_payload),
+        current_engine: Any = Depends(get_engine),
+        graph_manager: Any = Depends(get_graph_manager),
+        metadata_store: GraphMetadataStore = Depends(get_graph_metadata_store),
+    ) -> dict[str, Any]:
+        return get_graph_node_document(
+            engine=current_engine,
+            graph_manager=graph_manager,
+            metadata_store=metadata_store,
+            graph_id=graph_id,
+            node_id=node_id,
         )
 
     @app.put("/graphs/{graph_id}/nodes/{node_id}")
