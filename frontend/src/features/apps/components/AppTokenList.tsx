@@ -81,7 +81,40 @@ export function AppTokenList({ refreshKey }: AppTokenListProps) {
   return (
     <div className="space-y-4">
       {error ? <ErrorState message={error} /> : null}
-      <div className="overflow-x-auto">
+      <div className="grid gap-3 md:hidden">
+        {tokens.map((token) => (
+          <article className="min-w-0 rounded-lg border border-slate-200 bg-white p-4" key={token.id}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate font-medium text-slate-900">{token.appName}</p>
+                <p className="truncate text-xs text-slate-500">{token.appId}</p>
+              </div>
+              <Badge className={token.status === 'expired' ? 'bg-red-50 text-red-700 ring-red-100' : undefined}>
+                {token.status}
+              </Badge>
+            </div>
+            <p className="mt-3 overflow-hidden text-ellipsis whitespace-nowrap rounded bg-slate-50 px-2 py-2 font-mono text-xs text-slate-600">
+              {maskToken(token.token)}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {token.scopes.map((scope) => <Badge key={scope}>{scope}</Badge>)}
+            </div>
+            <dl className="mt-3 grid grid-cols-[4.5rem_1fr] gap-y-1 text-xs">
+              <dt className="text-slate-500">Created</dt><dd className="text-slate-700">{formatDate(token.createdAt)}</dd>
+              <dt className="text-slate-500">Expires</dt><dd className="text-slate-700">{formatDate(token.expiresAt)}</dd>
+            </dl>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <Button onClick={() => copyToken(token)} variant="secondary">
+                {copiedId === token.id ? 'Copied' : 'Copy token'}
+              </Button>
+              <Button className="text-red-700" disabled={deletingId === token.id} onClick={() => deleteToken(token)} variant="ghost">
+                {deletingId === token.id ? 'Revoking…' : 'Revoke'}
+              </Button>
+            </div>
+          </article>
+        ))}
+      </div>
+      <div className="hidden overflow-x-auto md:block">
         <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
             <tr>

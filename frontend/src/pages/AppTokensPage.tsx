@@ -9,18 +9,18 @@ export function AppTokensPage() {
   const [refreshKey, setRefreshKey] = useState(0)
 
   return (
-    <div className="space-y-8">
+    <div className="min-w-0 space-y-5 sm:space-y-8">
       <PageHeader
         description="Issue scoped bearer tokens for external applications and control what each app can access."
         title="Application tokens"
       />
       <Section title="Create token">
-        <Card>
+        <Card className="min-w-0 overflow-hidden">
           <CreateAppTokenForm onCreated={() => setRefreshKey((value) => value + 1)} />
         </Card>
       </Section>
       <Section title="Issued tokens">
-        <Card>
+        <Card className="min-w-0 overflow-hidden">
           <AppTokenList refreshKey={refreshKey} />
         </Card>
       </Section>
