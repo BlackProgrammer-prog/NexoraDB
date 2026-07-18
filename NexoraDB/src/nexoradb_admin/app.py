@@ -183,6 +183,9 @@ def create_app(
             address=client_host,
             user=user,
             kind="api-driver" if app_id else "http",
+            # A completed HTTP request is traffic, not an active connection.
+            # Driver sessions and Socket.IO connections are tracked separately.
+            track_connection=bool(app_id),
         )
         return response
 
