@@ -32,6 +32,7 @@ class MonitoringMetrics:
     active_connections: list[ConnectionInfo] = field(default_factory=list)
     ram_usage_bytes: int = 0
     disk_usage_bytes: int = 0
+    collection_count: int = 0
 
 
 class MonitoringClient:
@@ -110,11 +111,10 @@ class MonitoringClient:
         def on_metrics(data: dict[str, Any]) -> None:
             self.on_metrics(self._parse_metrics(data))
 
-        socket_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
         sio.connect(
-            socket_url,
+            self.base_url,
             auth={"token": self.token},
-            socketio_path="/socket.io",
+            socketio_path="socket.io",
             transports=["websocket", "polling"],
             wait_timeout=10,
         )
@@ -171,6 +171,7 @@ class MonitoringClient:
             database_healthy=bool(data.get("databaseHealthy", False)),
             requests_per_second=int(data.get("requestsPerSecond", 0)),
             active_connections=conns,
-            ram_usage_bytes=int(data.get("ramUsageBytes", 0)),
-            disk_usage_bytes=int(data.get("diskUsageBytes", 0)),
+            ram_usage_bytes=int(data.get("ramUsedBytes", data.get("ramUsageBytes", 0))),
+            disk_usage_bytes=int(data.get("ssdUsedBytes", data.get("diskUsageBytes", 0))),
+            collection_count=int(data.get("collectionCount", 0)),
         )
