@@ -48,6 +48,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "argon2-cffi>=23.1.0",
     "python-socketio>=5.11.0",
+    "websocket-client>=1.8.0",
     "textual>=0.86.0"
 ]
 
@@ -59,6 +60,7 @@ api = [
     "pydantic>=2.7.0",
     "argon2-cffi>=23.1.0",
     "python-socketio>=5.11.0",
+    "websocket-client>=1.8.0",
     "textual>=0.86.0"
 ]
 
@@ -83,6 +85,7 @@ all = [
     "pydantic>=2.7.0",
     "argon2-cffi>=23.1.0",
     "python-socketio>=5.11.0",
+    "websocket-client>=1.8.0",
     "textual>=0.86.0",
 ]
 
