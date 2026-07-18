@@ -5,8 +5,9 @@ import json
 import threading
 from typing import Any
 
+from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -104,7 +105,7 @@ class LoginScreen(Screen[AuthSession]):
     #auth-card {
         width: auto;
         max-width: 95%;
-        min-width: 50;
+        min-width: 30;
         height: auto;
         border: tall $accent;
         padding: 1 2;
@@ -287,12 +288,19 @@ class MainScreen(Screen[None]):
     /* ── Monitor ───────────────────────────────────────────────────────── */
     .metric {
         width: 1fr;
-        min-height: 4;
-        max-height: 4;
+        height: 5;
+        min-height: 5;
+        max-height: 5;
+        padding: 0 1;
+        content-align: center middle;
     }
 
-    #metrics-row {
-        height: 4;
+    #metrics-grid {
+        grid-size: 6;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr 1fr;
+        grid-rows: 5;
+        grid-gutter: 1;
+        height: auto;
         margin-bottom: 1;
     }
 
@@ -303,6 +311,10 @@ class MainScreen(Screen[None]):
     }
 
     #connections-table {
+        height: 12;
+    }
+
+    #monitor-scroll {
         height: 1fr;
     }
 
@@ -374,12 +386,16 @@ class MainScreen(Screen[None]):
     }
 
     #token-output {
-        height: 1fr;
+        height: 10;
         border: round $primary;
     }
 
+    #tokens-scroll {
+        height: 1fr;
+    }
+
     /* ── Admin Dashboard ───────────────────────────────────────────────── */
-    #admin-scroll {
+    #algorithms-scroll {
         height: 1fr;
     }
 
@@ -413,22 +429,18 @@ class MainScreen(Screen[None]):
         max-width: 40;
     }
 
-    #algo-grid-section {
+    #algo-grid {
+        grid-size: 4;
+        grid-columns: 1fr 1fr 1fr 1fr;
+        grid-rows: 5;
+        grid-gutter: 1;
         height: auto;
-        margin-bottom: 1;
-    }
-
-    /* سه ردیف ۴ تایی — grid با Container های افقی */
-    .algo-row {
-        height: 5;
         margin-bottom: 1;
     }
 
     /* دکمه‌های LockAlgorithm */
     .algo-btn-lock {
-        width: 1fr;
-        margin-right: 1;
-        min-width: 18;
+        width: 100%;
         background: $panel;
         border: tall $success;
         color: $success;
@@ -441,9 +453,7 @@ class MainScreen(Screen[None]):
 
     /* دکمه‌های JobAlgorithm */
     .algo-btn-job {
-        width: 1fr;
-        margin-right: 1;
-        min-width: 18;
+        width: 100%;
         background: $panel;
         border: tall $warning;
         color: $warning;
@@ -456,9 +466,7 @@ class MainScreen(Screen[None]):
 
     /* دکمه‌های Bonus */
     .algo-btn-bonus {
-        width: 1fr;
-        margin-right: 1;
-        min-width: 18;
+        width: 100%;
         background: $panel;
         border: tall $accent;
         color: $accent;
@@ -492,13 +500,97 @@ class MainScreen(Screen[None]):
         padding: 0 1;
         color: $text-muted;
     }
+
+    .medium #graph-selector-row {
+            height: auto;
+            layout: vertical;
+            align: left top;
+    }
+
+    .medium #graph-select-label, .medium #graph-param-label {
+            min-width: 0;
+            width: 100%;
+            padding: 0 1;
+    }
+
+    .medium #graph-select, .medium #graph-param-input {
+            width: 100%;
+            max-width: 100%;
+            margin: 0 0 1 0;
+    }
+
+    .medium #algo-grid {
+            grid-size: 2;
+            grid-columns: 1fr 1fr;
+    }
+
+    .medium #algo-legend {
+            height: auto;
+            layout: vertical;
+    }
+
+    .medium #query-results {
+            layout: vertical;
+    }
+
+    .medium #query-table, .medium #query-output {
+            width: 100%;
+            height: 1fr;
+            margin: 0;
+    }
+
+    .medium #metrics-grid {
+            grid-size: 3;
+            grid-columns: 1fr 1fr 1fr;
+    }
+
+    .narrow #shell {
+            padding: 0;
+    }
+
+    .narrow #title-bar {
+            display: none;
+    }
+
+    .narrow #metrics-grid {
+            grid-size: 1;
+            grid-columns: 1fr;
+    }
+
+    .narrow .metric {
+            width: 100%;
+            height: 5;
+            min-height: 5;
+            max-height: 5;
+            padding: 0 1;
+    }
+
+    .narrow #query-actions, .narrow #scope-presets {
+            height: auto;
+            layout: vertical;
+    }
+
+    .narrow #query-actions Button, .narrow #scope-presets Button {
+            width: 100%;
+            max-width: 100%;
+            margin: 0 0 1 0;
+    }
+
+    .narrow #algo-grid {
+            grid-size: 1;
+            grid-columns: 1fr;
+    }
+
+    .narrow #algo-output {
+            height: 9;
+    }
     """
 
     BINDINGS = [
         ("f1", "show_tab('monitor-tab')",  "Monitor"),
         ("f2", "show_tab('query-tab')",    "Query"),
         ("f3", "show_tab('tokens-tab')",   "Tokens"),
-        ("f4", "show_tab('admin-tab')",    "Admin"),
+        ("f4", "show_tab('algorithms-tab')", "Graph algorithms"),
         ("r",  "refresh_metrics",          "Refresh"),
         ("ctrl+enter", "run_or_create",    "Run/Create"),
         ("ctrl+k",     "clear_active_output", "Clear"),
@@ -534,18 +626,21 @@ class MainScreen(Screen[None]):
                     yield from self._query_layout()
                 with TabPane("App tokens (f3)", id="tokens-tab"):
                     yield from self._tokens_layout()
-                with TabPane("Admin (f4)", id="admin-tab"):
-                    yield from self._admin_layout()
+                with TabPane("Graph algorithms (f4)", id="algorithms-tab"):
+                    yield from self._algorithms_layout()
         yield Footer()
 
     # ── Monitor layout ────────────────────────────────────────────────────
 
     def _monitor_layout(self) -> ComposeResult:
-        with Vertical():
-            with Horizontal(id="metrics-row"):
+        with ScrollableContainer(id="monitor-scroll"):
+            with Grid(id="metrics-grid"):
                 yield Static("Database\nwaiting", id="database-health", classes="card metric")
                 yield Static("Traffic\n0 req/s",  id="rps-value",       classes="card metric")
                 yield Static("Active apps\n0",    id="active-apps",     classes="card metric")
+                yield Static("RAM\nwaiting",      id="ram-value",       classes="card metric")
+                yield Static("SSD\nwaiting",      id="ssd-value",       classes="card metric")
+                yield Static("Collections\nwaiting", id="collection-value", classes="card metric")
             yield Static("Traffic (last 60s)", classes="title")
             yield Sparkline([], id="rps-chart", classes="card")
             yield Static("Active connections (last 10s)", classes="title")
@@ -569,7 +664,7 @@ class MainScreen(Screen[None]):
     # ── Tokens layout ─────────────────────────────────────────────────────
 
     def _tokens_layout(self) -> ComposeResult:
-        with Vertical():
+        with ScrollableContainer(id="tokens-scroll"):
             yield Static("Create a token for an external application", classes="title")
             with Vertical(id="token-form"):
                 yield Input(placeholder="app id, e.g. billing-service", id="app-id")
@@ -589,8 +684,8 @@ class MainScreen(Screen[None]):
 
     # ── Admin Dashboard layout ────────────────────────────────────────────
 
-    def _admin_layout(self) -> ComposeResult:
-        with ScrollableContainer(id="admin-scroll"):
+    def _algorithms_layout(self) -> ComposeResult:
+        with ScrollableContainer(id="algorithms-scroll"):
             # ── انتخاب گراف و پارامتر ────────────────────────────────────
             yield Static("Graph Algorithm Dashboard", classes="title")
             with Horizontal(id="graph-selector-row"):
@@ -612,33 +707,15 @@ class MainScreen(Screen[None]):
                 yield Label("■ JobAlgorithm (background)")
                 yield Label("■ Bonus")
 
-            # ── ۱۲ دکمه در ۳ ردیف ۴ تایی ─────────────────────────────
+            # Grid automatically becomes 4, 2, or 1 columns by terminal width.
             yield Static("Algorithms", classes="title")
-            with Vertical(id="algo-grid-section"):
-                # ردیف ۱: GetFriends | AreConnected | ShortestPath | FriendSuggestion
-                with Horizontal(classes="algo-row"):
-                    for label, algo_id, kind in GRAPH_ALGORITHMS[:4]:
-                        yield Button(
-                            label,
-                            id=f"algo-{algo_id}",
-                            classes=f"algo-btn-{kind}",
-                        )
-                # ردیف ۲: MostConnected | MutualFriends | NetworkStats | Components
-                with Horizontal(classes="algo-row"):
-                    for label, algo_id, kind in GRAPH_ALGORITHMS[4:8]:
-                        yield Button(
-                            label,
-                            id=f"algo-{algo_id}",
-                            classes=f"algo-btn-{kind}",
-                        )
-                # ردیف ۳: AllDistances | Betweenness | Community | InfluenceMax
-                with Horizontal(classes="algo-row"):
-                    for label, algo_id, kind in GRAPH_ALGORITHMS[8:12]:
-                        yield Button(
-                            label,
-                            id=f"algo-{algo_id}",
-                            classes=f"algo-btn-{kind}",
-                        )
+            with Grid(id="algo-grid"):
+                for label, algo_id, kind in GRAPH_ALGORITHMS:
+                    yield Button(
+                        label,
+                        id=f"algo-{algo_id}",
+                        classes=f"algo-btn-{kind}",
+                    )
 
             # ── خروجی الگوریتم ─────────────────────────────────────────
             yield Static("Output", classes="title")
@@ -648,6 +725,7 @@ class MainScreen(Screen[None]):
     # ── on_mount ──────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
+        self._apply_responsive_classes(self.size.width)
         for scope in DEFAULT_APP_SCOPES:
             self._scope_widgets[scope] = self.query_one(
                 f"#scope-{scope.replace(':', '-')}", Checkbox,
@@ -655,6 +733,13 @@ class MainScreen(Screen[None]):
         self._start_monitoring()
         self.run_worker(self._load_app_scopes,   thread=True)
         self.run_worker(self._load_graph_list,   thread=True)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_responsive_classes(event.size.width)
+
+    def _apply_responsive_classes(self, width: int) -> None:
+        self.set_class(width < 100, "medium")
+        self.set_class(width < 65, "narrow")
 
     def on_unmount(self) -> None:
         if self.monitor:
@@ -732,7 +817,7 @@ class MainScreen(Screen[None]):
             self.query_one("#query-table", DataTable).clear(columns=True)
         elif active == "tokens-tab":
             self.query_one("#token-output", RichLog).clear()
-        elif active == "admin-tab":
+        elif active == "algorithms-tab":
             self.query_one("#algo-output", RichLog).clear()
             self.query_one("#algo-status", Static).update("")
 
@@ -952,6 +1037,15 @@ class MainScreen(Screen[None]):
         self.query_one("#active-apps", Static).update(
             f"Active apps\n{len(metrics.active_connections)} in 10s"
         )
+        self.query_one("#ram-value", Static).update(
+            f"RAM\n{_format_bytes(metrics.ram_usage_bytes)}"
+        )
+        self.query_one("#ssd-value", Static).update(
+            f"SSD\n{_format_bytes(metrics.disk_usage_bytes)}"
+        )
+        self.query_one("#collection-value", Static).update(
+            f"Collections\n{metrics.collection_count} active"
+        )
         self.query_one("#rps-chart", Sparkline).data = self.rps_samples
 
         table = self.query_one("#connections-table", DataTable)
@@ -961,6 +1055,15 @@ class MainScreen(Screen[None]):
 
     def _set_monitor_status(self, status: str) -> None:
         self.query_one("#database-health", Static).update(f"Monitor\n{status}")
+
+
+def _format_bytes(value: int) -> str:
+    amount = float(max(0, value))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    return "0 B"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
