@@ -25,6 +25,8 @@ class MonitoringEngine(Protocol):
 
     def get_disk_usage_bytes(self) -> int: ...
 
+    def list_collections(self) -> list[str]: ...
+
 
 @dataclass
 class ConnectionRecord:
@@ -48,17 +50,19 @@ class MonitoringState:
         address: str | None,
         user: str | None = None,
         kind: str = "http",
+        track_connection: bool = True,
     ) -> None:
         now = time.monotonic()
         async with self._lock:
             self._request_timestamps.append(now)
-            self._connections[client_id] = ConnectionRecord(
-                id=client_id,
-                address=address,
-                user=user,
-                kind=kind,
-                last_seen=now,
-            )
+            if track_connection:
+                self._connections[client_id] = ConnectionRecord(
+                    id=client_id,
+                    address=address,
+                    user=user,
+                    kind=kind,
+                    last_seen=now,
+                )
             self._prune_locked(now)
 
     async def touch_connection(
@@ -146,14 +150,29 @@ class MonitoringSocketServer:
         database_metrics_available = False
         ram_used_bytes = 0
         ssd_used_bytes = 0
+        collection_count = 0
         try:
             engine = self.engine_provider()
-            database_engine_healthy = bool(engine.is_healthy())
-            ram_used_bytes = int(engine.get_ram_usage_bytes())
-            ssd_used_bytes = int(engine.get_disk_usage_bytes())
             database_metrics_available = True
         except Exception:
+            engine = None
+
+        try:
+            database_engine_healthy = bool(engine and engine.is_healthy())
+        except Exception:
             database_engine_healthy = False
+        try:
+            ram_used_bytes = int(engine.get_ram_usage_bytes()) if engine else 0
+        except Exception:
+            ram_used_bytes = 0
+        try:
+            ssd_used_bytes = int(engine.get_disk_usage_bytes()) if engine else 0
+        except Exception:
+            ssd_used_bytes = 0
+        try:
+            collection_count = len(engine.list_collections()) if engine else 0
+        except Exception:
+            collection_count = 0
 
         disk_path = self._existing_disk_usage_path()
         disk_usage = shutil.disk_usage(disk_path)
@@ -162,11 +181,13 @@ class MonitoringSocketServer:
             "databaseEngineHealthy": database_engine_healthy,
             "ramUsedBytes": ram_used_bytes,
             "ssdUsedBytes": ssd_used_bytes,
+            "collectionCount": collection_count,
             "ssdTotalBytes": disk_usage.total,
             "metricSources": {
                 "databaseHealthy": "nexoradb.so:is_healthy",
                 "ramUsedBytes": "nexoradb.so:get_ram_usage_bytes",
                 "ssdUsedBytes": "nexoradb.so:get_disk_usage_bytes",
+                "collectionCount": "nexoradb.so:list_collections",
                 "ssdTotalBytes": "host:disk_usage",
             },
             "requestsPerSecond": requests_per_second,
