@@ -168,7 +168,7 @@ class AdminApiClient:
             resp = self._request("GET", "/graphs", token=token)
             # API یک list[dict] برمی‌گرداند؛ هر dict دارای فیلد "name" است
             if isinstance(resp, list):
-                return [g.get("name", g.get("id", str(g))) for g in resp if isinstance(g, dict)]
+                return [g.get("id", g.get("name", str(g))) for g in resp if isinstance(g, dict)]
             return []
         except NexoraAdminClientError:
             # اگر graph module فعال نبود، خطا نمی‌دهیم — فقط لیست خالی
@@ -181,30 +181,49 @@ class AdminApiClient:
         graph_name: str,
         params: list[str],
     ) -> dict[str, Any]:
-        """
-        اجرای یک الگوریتم روی گراف.
-        چون endpoint رسمی هنوز وجود ندارد، از query/execute استفاده می‌کنیم.
-        وقتی endpoint اضافه شد فقط این متد تغییر می‌کند.
-        """
-        # تلاش اول: endpoint اختصاصی (اگر بعداً اضافه شد)
-        try:
-            return self._request(
-                "POST",
-                "/graphs/algorithm",
-                token=token,
-                json_body={
-                    "graphName": graph_name,
-                    "algorithm": algo_id,
-                    "params": params,
-                },
-            )
-        except NexoraAdminClientError:
-            pass
+        """Run one of the dashboard algorithms through the real NexoraQL endpoint."""
+        if not graph_name:
+            raise NexoraAdminClientError("Select a graph before running an algorithm.")
 
-        # fallback: از NexoraQL query استفاده می‌کنیم
-        params_str = ", ".join(f'"{p}"' for p in params)
-        graph_clause = f'GRAPH "{graph_name}"' if graph_name else ""
-        query = f"RUN ALGORITHM {algo_id} {graph_clause} WITH PARAMS [{params_str}];"
+        quote = lambda value: "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        p1 = quote(params[0]) if params else None
+        p2 = quote(params[1]) if len(params) > 1 else None
+        two_nodes = {
+            "AreConnected": ("user1", "user2"),
+            "MutualFriends": ("user1", "user2"),
+            "ShortestPath": ("from", "to"),
+        }
+        one_node = {
+            "GetFriends": "user",
+            "FriendSuggestion": "user",
+            "AllDistances": "source",
+        }
+        job_algorithms = {
+            "ConnectedComponents", "AllDistances", "BetweennessCentrality",
+            "CommunityDetection", "InfluenceMaximization",
+        }
+        kind = "JOB" if algo_id in job_algorithms else "LOCK"
+        with_parts: list[str] = []
+        if algo_id in two_nodes:
+            if not p1 or not p2:
+                raise NexoraAdminClientError(f"{algo_id} needs two node ids in Params.")
+            first, second = two_nodes[algo_id]
+            with_parts.extend((f"{first}={p1}", f"{second}={p2}"))
+        elif algo_id in one_node:
+            if not p1:
+                raise NexoraAdminClientError(f"{algo_id} needs one node id in Params.")
+            with_parts.append(f"{one_node[algo_id]}={p1}")
+
+        if algo_id == "AllDistances":
+            with_parts.extend(("all=true", "max_hops=4"))
+        elif algo_id == "CommunityDetection":
+            with_parts.extend(("max_iterations=10", "min_community_size=2", "members=true"))
+        elif algo_id == "InfluenceMaximization":
+            with_parts.extend(("k=5", "simulations=20", "probability=0.1"))
+
+        with_clause = f" WITH {', '.join(with_parts)}" if with_parts else ""
+        limit_clause = " LIMIT 20" if algo_id in {"GetFriends", "FriendSuggestion", "MostConnected"} else ""
+        query = f"RUN {kind} {algo_id} ON {graph_name}{with_clause}{limit_clause};"
         try:
             resp = self._request(
                 "POST",
@@ -212,10 +231,8 @@ class AdminApiClient:
                 token=token,
                 json_body={"query": query},
             )
-            return {"result": resp, "elapsedMs": resp.get("executionTimeMs", 0)}
+            return {"result": resp, "query": query, "elapsedMs": resp.get("executionTimeMs", 0)}
         except NexoraAdminClientError as exc:
-            # اگر هر دو روش شکست خوردند، خطا را propagate می‌کنیم
             raise NexoraAdminClientError(
-                f"Algorithm '{algo_id}' failed: {exc}\n"
-                "(endpoint /graphs/algorithm وجود ندارد و NexoraQL هم پشتیبانی نمی‌کند)"
+                f"Algorithm '{algo_id}' failed: {exc}\nQuery: {query}"
             ) from exc
