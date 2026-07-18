@@ -297,8 +297,8 @@ def test_created_app_tokens_are_persisted_and_listed() -> None:
     assert client.get("/apps/tokens", headers=headers).json() == []
 
 
-def test_monitoring_metrics_include_recent_active_connections(tmp_path) -> None:
-    engine = FakeInternalUserEngine()
+def test_monitoring_metrics_exclude_completed_http_requests(tmp_path) -> None:
+    engine = FakeGraphManager()
     settings = AdminApiSettings(auth_secret="x" * 48, db_path=tmp_path / "db")
     state = MonitoringState()
     server = MonitoringSocketServer(
@@ -312,6 +312,7 @@ def test_monitoring_metrics_include_recent_active_connections(tmp_path) -> None:
             client_id="http:root",
             address="127.0.0.1",
             user="root",
+            track_connection=False,
         )
         return await server.collect_metrics()
 
@@ -325,8 +326,7 @@ def test_monitoring_metrics_include_recent_active_connections(tmp_path) -> None:
     assert metrics["metricSources"]["databaseHealthy"] == "nexoradb.so:is_healthy"
     assert metrics["metricSources"]["ramUsedBytes"] == "nexoradb.so:get_ram_usage_bytes"
     assert metrics["metricSources"]["ssdUsedBytes"] == "nexoradb.so:get_disk_usage_bytes"
-    assert metrics["activeConnections"][0]["id"] == "http:root"
-    assert metrics["activeConnections"][0]["activeWithinSeconds"] == 10.0
+    assert metrics["activeConnections"] == []
 
 
 def test_collection_and_document_crud_routes_require_admin_token() -> None:
