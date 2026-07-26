@@ -364,3 +364,34 @@ gm.startup();
 auto build = gm.buildGraph("social");
 // build.nodes_built, build.edges_built, build.elapsed_ms
 ```
+
+---
+
+## 🔤 NexoraQL — The Query Language
+
+NexoraQL is case-insensitive, statements end with `;`, comments use `--` or `/* */`.
+
+### Collections (DDL)
+
+```sql
+CREATE COLLECTION users (
+    username STRING REQUIRED UNIQUE,
+    email    STRING REQUIRED,
+    age      INT32
+) STRICT;
+
+CREATE COLLECTION posts;                 -- schemaless
+DROP COLLECTION old_data;
+SHOW COLLECTIONS;
+DESCRIBE COLLECTION users;
+```
+
+### Indexes & Foreign Keys
+
+```sql
+CREATE UNIQUE INDEX idx_email ON users (email);
+CREATE INDEX idx_author ON posts (author_id);
+
+ADD FOREIGN KEY fk_author ON posts (author_id) REFERENCES users (_id);
+SHOW FOREIGN KEYS ON posts;
+```
