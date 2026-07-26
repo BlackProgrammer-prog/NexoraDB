@@ -395,3 +395,40 @@ CREATE INDEX idx_author ON posts (author_id);
 ADD FOREIGN KEY fk_author ON posts (author_id) REFERENCES users (_id);
 SHOW FOREIGN KEYS ON posts;
 ```
+
+### Documents (DML)
+
+```sql
+INSERT INTO users VALUES ('{"_id":"u1","username":"alice","age":28}');
+
+INSERT INTO posts BATCH VALUES
+    ('{"_id":"p1","title":"Hello","author_id":"u1","likes":0}'),
+    ('{"_id":"p2","title":"World","author_id":"u1","likes":5}');
+
+SELECT * FROM users WHERE age >= 18 AND age <= 65 LIMIT 20 SKIP 40;
+SELECT username, email FROM users WHERE status IN ('active','verified');
+SELECT * FROM posts LOOKUP JOIN users ON posts.author_id = users._id;
+
+COUNT  FROM posts WHERE likes > 0;
+EXISTS IN users WHERE username = 'alice';
+
+UPDATE posts
+    SET title = 'Updated', updated_at = NOW()
+    INCREMENT likes BY 1
+    PUSH tags = 'trending'
+    WHERE _id = 'p1';
+
+UPDATE MANY users SET active = true WHERE age >= 18;
+
+DELETE FROM posts WHERE likes = 0;
+DELETE FROM logs  WHERE true;            -- explicit full delete
+```
+
+### Transactions
+
+```sql
+BEGIN TRANSACTION;
+INSERT INTO orders   VALUES ('{"_id":"o1","total":99.5}');
+INSERT INTO payments VALUES ('{"_id":"pay1","order_id":"o1"}');
+COMMIT;      -- or ROLLBACK;
+```
