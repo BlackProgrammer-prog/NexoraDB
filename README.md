@@ -155,3 +155,27 @@ curl -X POST http://localhost:8000/api/v1/query \
 | `graphs:write` | Modify graph structure (nodes, edges) |
 | `monitoring:read` | Read system metrics and health status |
 | `admin:apps` | Create and manage application tokens |
+
+### API Endpoints
+
+| Method | Endpoint | Description | Required Scope |
+|--------|----------|-------------|----------------|
+| POST | `/api/v1/query` | Execute NexoraQL query | `query:execute` |
+| POST | `/api/v1/documents/{collection}` | Insert one document | `documents:write` |
+| GET | `/api/v1/documents/{collection}/{id}` | Find document by ID | `documents:read` |
+| PATCH | `/api/v1/documents/{collection}/{id}` | Update document by ID | `documents:write` |
+| DELETE | `/api/v1/documents/{collection}/{id}` | Delete document by ID | `documents:write` |
+| POST | `/api/v1/collections` | Create a collection | `collections:write` |
+| GET | `/api/v1/collections` | List all collections | `collections:read` |
+| DELETE | `/api/v1/collections/{collection}` | Drop a collection | `collections:write` |
+| POST | `/api/v1/graph/{name}/node` | Add a node to a graph | `graphs:write` |
+| GET | `/api/v1/graph/{name}/node/{id}/neighbors` | Get node neighbors | `graphs:read` |
+| GET | `/api/v1/graph/{name}/stats` | Get graph statistics | `graphs:read` |
+| POST | `/api/v1/algorithms/lock` | Run lightweight LockAlgorithm | `graphs:read` |
+| POST | `/api/v1/algorithms/job` | Run heavy JobAlgorithm (async) | `graphs:read` |
+| GET | `/api/v1/algorithms/job/{id}/status` | Check job status | `graphs:read` |
+| POST | `/api/v1/apps/tokens` | Create an app token | `admin:apps` |
+| GET | `/api/v1/system/health` | Health check | *none (public)* |
+| GET | `/api/v1/system/metrics` | System metrics | `monitoring:read` |
+
+For complete API reference, see [`docs/fastapi/api_reference.md`](docs/fastapi/api_reference.md).
