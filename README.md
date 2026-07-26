@@ -285,3 +285,43 @@ cp build/nexoradb.cpython-*.so .
 | `NEXORA_BUILD_PYTHON` | `ON` | Build pybind11 bindings |
 | `NEXORA_DEBUG_LOG` | `OFF` | Verbose engine logging |
 | `NEXORA_ENABLE_ASAN` | `OFF` | AddressSanitizer builds |
+
+---
+
+## 🚀 Quick Start
+
+### Option A — NexoraQL (recommended)
+
+```python
+from nexoraql import NexoraQLSession
+
+session = NexoraQLSession("/var/data/mydb", "./graph_data")
+
+results = session.execute('''
+    -- Documents
+    CREATE COLLECTION users;
+    CREATE COLLECTION follows;
+
+    INSERT INTO users VALUES ('{"_id":"u1","username":"alice","age":28}');
+    INSERT INTO users VALUES ('{"_id":"u2","username":"bob","age":31}');
+    INSERT INTO follows VALUES ('{"_id":"f1","from_id":"u1","to_id":"u2"}');
+
+    SELECT username, age FROM users WHERE age > 25 LIMIT 10;
+
+    -- Graph
+    CREATE LIVE GRAPH social HETEROGENEOUS DIRECTED;
+    USE GRAPH social;
+    MAP NODE User FROM users KEY _id PROPERTIES username, age;
+    MAP EDGE FOLLOWS FROM follows SOURCE from_id AS User TARGET to_id AS User;
+    BUILD GRAPH social;
+
+    TRAVERSE User('u1') OUT FOLLOWS DEPTH 2 LIMIT 50;
+    EDGE EXISTS User('u1') -[FOLLOWS]-> User('u2');
+    GRAPH STATS social;
+''')
+
+for r in results:
+    print(r)
+
+session.close()
+```
