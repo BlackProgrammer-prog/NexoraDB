@@ -432,3 +432,57 @@ INSERT INTO orders   VALUES ('{"_id":"o1","total":99.5}');
 INSERT INTO payments VALUES ('{"_id":"pay1","order_id":"o1"}');
 COMMIT;      -- or ROLLBACK;
 ```
+
+### Graph Definition & Build
+
+```sql
+CREATE LIVE GRAPH social HETEROGENEOUS DIRECTED;
+USE GRAPH social;
+
+-- Nodes: collection → node type
+MAP NODE User FROM users KEY _id PROPERTIES username, age;
+MAP NODE Post FROM posts KEY _id PROPERTIES title, likes;
+
+-- Edges, three flavors:
+MAP EDGE FOLLOWS  FROM follows SOURCE from_id   AS User TARGET to_id AS User;   -- edge collection
+MAP EDGE AUTHORED FROM posts   SOURCE author_id AS User TARGET _id   AS Post;   -- embedded FK
+MAP EDGE LIKES    FROM posts UNWIND liked_by AS liker_id
+                  SOURCE liker_id AS User TARGET _id AS Post;                    -- array UNWIND
+
+BUILD GRAPH social;
+GRAPH STATUS social;
+GRAPH STATS  social;
+GRAPH WAL STATUS social;
+COMPACT GRAPH social;
+SNAPSHOT GRAPH social INTO analytics_1;
+```
+
+### Traversal
+
+```sql
+TRAVERSE User('u1') OUT FOLLOWS DEPTH 1 LIMIT 50;   -- who u1 follows
+TRAVERSE User('u1') IN  FOLLOWS DEPTH 1 LIMIT 50;   -- u1's followers
+TRAVERSE User('u1') BOTH *      DEPTH 3 LIMIT 200;  -- 3-hop neighborhood, all edges
+
+GET NODE User('u1');
+EDGE EXISTS User('u1') -[FOLLOWS]-> User('u2');
+```
+
+### Algorithms
+
+```sql
+-- Fast, blocking (LiveGraph + shared lock)
+RUN LOCK MutualFriends  ON social WITH user1='u1', user2='u2';
+RUN LOCK MostConnected  ON social WITH metric='in', node_type='User' LIMIT 20;
+RUN LOCK NetworkStats   ON social WITH mode='full';
+
+-- Heavy, async (StaticGraph snapshot, background thread)
+RUN JOB ConnectedComponents ON social;
+RUN JOB CommunityDetection  ON social WITH max_iterations=10, members=true;
+RUN JOB AllDistances        ON social WITH source='u1', max_hops=4;
+RUN JOB AllDistances        ON social WITH all=true, max_hops=3;   -- all-pairs
+
+JOB STATUS 'job_1';
+JOB RESULT 'job_1';    -- blocks until done
+SHOW JOBS ON social;
+```
