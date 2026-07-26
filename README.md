@@ -179,3 +179,13 @@ curl -X POST http://localhost:8000/api/v1/query \
 | GET | `/api/v1/system/metrics` | System metrics | `monitoring:read` |
 
 For complete API reference, see [`docs/fastapi/api_reference.md`](docs/fastapi/api_reference.md).
+
+### Production Security
+
+| Setting | Requirement |
+|---------|-------------|
+| `API_TOKEN_SECRET` | Must be at least 32 characters |
+| `DEBUG` | Must be `False` |
+| `ENVIRONMENT` | Must be `production` |
+| OpenAPI docs | Disabled (`/docs` returns 404) |
+| CORS origins | Must be explicitly restricted |
