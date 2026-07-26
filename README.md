@@ -117,3 +117,25 @@ nexoradb server
 # Or with auto-reload for development
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Once running, explore the interactive API documentation at `http://localhost:8000/docs`.
+
+---
+
+### Authentication
+
+All API endpoints require a bearer token. Tokens are created via the admin API:
+
+```bash
+# Create an app token (requires admin:apps scope)
+curl -X POST http://localhost:8000/api/v1/apps/tokens \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"appId":"billing-service","scopes":["query:execute"]}'
+
+
+The response includes a token in the format nxapp_{header}.{payload}.{signature}. Use it in all subsequent requests:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/query \
+  -H "Authorization: Bearer nxapp_..." \
+  -H "Content-Type: application/json" \
+  -d '{"query":"SELECT * FROM users LIMIT 10;"}'
