@@ -266,3 +266,22 @@ This produces:
 |---|---|
 | `NexoraDB` | C++ test executable (full engine self-test) |
 | `nexoradb.cpython-3xx.so` | Python module |
+
+### 3. Install the Python side
+
+```bash
+# The ONLY Python dependency for NexoraQL:
+pip install lark
+
+# Make the compiled module importable (copy next to your scripts, or add to PYTHONPATH)
+cp build/nexoradb.cpython-*.so .
+```
+
+### Build options
+
+| Flag | Default | Effect |
+|---|---|---|
+| `NEXORA_BUILD_GRAPH` | `ON` | Build the graph engine |
+| `NEXORA_BUILD_PYTHON` | `ON` | Build pybind11 bindings |
+| `NEXORA_DEBUG_LOG` | `OFF` | Verbose engine logging |
+| `NEXORA_ENABLE_ASAN` | `OFF` | AddressSanitizer builds |
