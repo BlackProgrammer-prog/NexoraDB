@@ -349,3 +349,18 @@ gm.startup()
 friends = gm.neighbors("social", "u1", "out", "FOLLOWS", limit=50)
 snap = gm.create_snapshot("social")          # lock-free analytics copy
 coo  = snap.export_coo()                     # → PyTorch Geometric edge_index
+```
+
+### Option C — C++
+
+```cpp
+#include "core/DocEngine.h"
+#include "graph/GraphManager.h"
+
+nexora::core::DocEngine engine("/var/data/mydb");
+nexora::graph::GraphManager gm(&engine, "./graph_data");
+gm.startup();
+
+auto build = gm.buildGraph("social");
+// build.nodes_built, build.edges_built, build.elapsed_ms
+```
