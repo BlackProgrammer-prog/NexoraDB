@@ -223,3 +223,46 @@ For complete API reference, see [`docs/fastapi/api_reference.md`](docs/fastapi/a
 **Core design rule:** RocksDB is the *only* source of truth. The LiveGraph is a disposable in-memory projection — it can always be rebuilt from documents with `BUILD GRAPH`.
 
 **Dependency chain:** `nexora_query → nexora_core → nexora_graph → nexoradb.so / NexoraDB (test exe)`
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| C++ compiler | GCC 11+ / Clang 14+ / MSVC 2022 | C++20 required |
+| CMake | ≥ 3.22 | |
+| [vcpkg](https://github.com/microsoft/vcpkg) | latest | dependency manager |
+| Python | ≥ 3.10 | for bindings & NexoraQL |
+
+### 1. Clone & install C++ dependencies
+
+```bash
+git clone https://github.com/your-org/nexoradb.git
+cd nexoradb
+
+# vcpkg resolves rocksdb, fmt, and pybind11 from vcpkg.json
+export VCPKG_ROOT=/path/to/vcpkg
+```
+
+### 2. Build
+
+```bash
+mkdir build && cd build
+
+cmake .. \
+    -DNEXORA_BUILD_GRAPH=ON \
+    -DNEXORA_BUILD_PYTHON=ON \
+    -DCMAKE_BUILD_TYPE=Release
+
+make -j$(nproc)
+```
+
+This produces:
+
+| Artifact | Description |
+|---|---|
+| `NexoraDB` | C++ test executable (full engine self-test) |
+| `nexoradb.cpython-3xx.so` | Python module |
