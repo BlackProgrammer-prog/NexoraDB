@@ -103,3 +103,17 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 - **Admin dashboard** — React-based management UI (served via `nexoradb dashboard`)
 - **Scope-based authorization** — granular access control per endpoint
 - **Production-ready** — environment-aware settings with docs disabled in production
+
+## 🌐 REST API (FastAPI)
+
+NexoraDB includes a complete **REST API layer** built with FastAPI, enabling external applications to interact with the database over HTTP.
+
+### Quick API Start
+
+```bash
+# Start the API server
+nexoradb server
+
+# Or with auto-reload for development
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+Once running, explore the interactive API documentation at `http://localhost:8000/docs`.
