@@ -89,3 +89,17 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 - Covers DDL, DML, transactions, graph definition, traversal, and algorithm execution
 - Clean pipeline: **grammar → AST → semantic validation → execution** against the C++ core
 - Friendly errors with line/column context
+
+### 🐍 First-Class Python
+- Complete **pybind11** bindings (`nexoradb.so`) — GIL released during heavy C++ work
+- Pythonic wrapper (`NexoraDB` / `GraphDB`) with MongoDB-style filter dicts
+- One-line session: `NexoraQLSession(db_path, graph_dir).execute(sql)`
+
+---
+
+### 🌐 REST API (FastAPI)
+- **FastAPI REST API** — full HTTP interface for external applications
+- **App token authentication** — HMAC-SHA256 signed tokens with 9 fine-grained scopes
+- **Admin dashboard** — React-based management UI (served via `nexoradb dashboard`)
+- **Scope-based authorization** — granular access control per endpoint
+- **Production-ready** — environment-aware settings with docs disabled in production
