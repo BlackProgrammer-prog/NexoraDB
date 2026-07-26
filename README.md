@@ -139,3 +139,19 @@ curl -X POST http://localhost:8000/api/v1/query \
   -H "Authorization: Bearer nxapp_..." \
   -H "Content-Type: application/json" \
   -d '{"query":"SELECT * FROM users LIMIT 10;"}'
+
+---
+
+### Available Scopes
+
+| Scope | Description |
+|-------|-------------|
+| `query:execute` | Execute NexoraQL queries |
+| `documents:read` | Read documents from collections |
+| `documents:write` | Insert, update, and delete documents |
+| `collections:read` | List collections and check existence |
+| `collections:write` | Create, drop, and modify collections |
+| `graphs:read` | Read graph data and statistics |
+| `graphs:write` | Modify graph structure (nodes, edges) |
+| `monitoring:read` | Read system metrics and health status |
+| `admin:apps` | Create and manage application tokens |
