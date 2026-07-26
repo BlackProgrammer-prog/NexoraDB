@@ -70,3 +70,12 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 - **ACID transactions** — via RocksDB `TransactionDB` (begin / commit / rollback)
 - **Lookup joins** — MongoDB-style `$lookup` left joins
 - **Auto UUID v4** document IDs when `_id` is omitted
+
+### 🕸️ Graph Engine (`GraphManager`)
+- **Declarative mapping** — map collections to node types and edges (three styles: edge collections, embedded foreign keys, `UNWIND` over arrays)
+- **LiveGraph** — RAM adjacency structure with **sorted chunked adjacency lists**, updated incrementally on every document insert/update/delete
+- **StaticGraph snapshots** — immutable, lock-free copies for long-running analytics; OLTP traffic never blocks
+- **Write-Ahead Log (WAL)** — crash-safe graph state with replay on startup
+- **Heterogeneous graphs** — multiple node types and edge types in one graph
+- **ML export** — `exportCOO()` / `exportCSR()` for PyTorch Geometric, DGL, and GPU pipelines
+- **Cached degrees** — `out_degree` / `in_degree` are O(1) reads, never counted on the fly
