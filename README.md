@@ -325,3 +325,27 @@ for r in results:
 
 session.close()
 ```
+
+### Option B — Direct Python API
+
+```python
+import nexoradb
+
+# ── Document store ──
+db = nexoradb.DocEngine("/var/data/mydb")
+
+db.create_collection("users")
+r = db.insert_one("users", '{"_id":"u1","username":"alice","age":28}')
+
+cond = nexoradb.Condition.leaf("age", nexoradb.Op.GT, "18",
+                               nexoradb.ValueType.Int64)
+result = db.find_many("users", cond, limit=10)
+print(result.data)   # '[{"_id":"u1",...}]'
+
+# ── Graph ──
+gm = nexoradb.GraphManager(db, "./graph_data")
+gm.startup()
+
+friends = gm.neighbors("social", "u1", "out", "FOLLOWS", limit=50)
+snap = gm.create_snapshot("social")          # lock-free analytics copy
+coo  = snap.export_coo()                     # → PyTorch Geometric edge_index
