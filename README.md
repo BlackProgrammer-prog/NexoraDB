@@ -55,3 +55,12 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 | Graph freshness | Batch ETL (minutes/hours stale) | **Live** — updates on every insert |
 | Analytics blocking OLTP | Read replicas, complex setups | Lock-free **snapshots** for heavy jobs |
 | ML/GNN export | Custom exporters | Native **COO / CSR** export for PyTorch Geometric |
+
+---
+
+## ✨ Features
+
+### 📄 Document Engine (`DocEngine`)
+- **Full CRUD** — `InsertOne/Many`, `FindById` (O(1)), `FindMany` with rich conditions, `UpdateById/Many`, `DeleteById/Many`
+- **Query conditions** — `EQ, NEQ, GT, GTE, LT, LTE, IN, NIN, EXISTS, REGEX, STARTS, CONTAINS` with `AND / OR / NOR / NOT` composition
+- **Update operators** — `$set, $inc, $unset, $push, $pull, $addToSet, $currentDate` and more
