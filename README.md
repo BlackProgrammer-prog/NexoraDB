@@ -189,3 +189,37 @@ For complete API reference, see [`docs/fastapi/api_reference.md`](docs/fastapi/a
 | `ENVIRONMENT` | Must be `production` |
 | OpenAPI docs | Disabled (`/docs` returns 404) |
 | CORS origins | Must be explicitly restricted |
+
+---
+
+## 🏗 Architecture
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                     Applications / Dashboard                  │
+│                  (FastAPI · React · CLI · Notebooks)          │
+├───────────────────────────────────────────────────────────────┤
+│  NexoraQL  (Python · Lark)                                    │
+│  grammar → parser → AST → semantic validator → executor       │
+├───────────────────────────────────────────────────────────────┤
+│  nexoradb.so  (pybind11 bindings)                             │
+├───────────────────────────────┬───────────────────────────────┤
+│         GraphManager          │           DocEngine           │
+│  ┌─────────────────────────┐  │   CRUD · Index · FK · Tx      │
+│  │ LiveGraph (RAM)         │  │   Schema · LookupJoin         │
+│  │  sorted adjacency       │◄─┤   IterateCollection           │
+│  ├─────────────────────────┤  ├───────────────────────────────┤
+│  │ StaticGraph (snapshots) │  │          QueryLayer           │
+│  ├─────────────────────────┤  │  Condition · UpdateSpec       │
+│  │ GraphWAL (.nexl)        │  │  Evaluator (Match / Apply)    │
+│  │ GraphStorage (.nex)     │  │                               │
+│  └─────────────────────────┘  │                               │
+├───────────────────────────────┴───────────────────────────────┤
+│                          RocksDB                              │
+│              ★ the single source of truth ★                   │
+└───────────────────────────────────────────────────────────────┘
+```
+
+**Core design rule:** RocksDB is the *only* source of truth. The LiveGraph is a disposable in-memory projection — it can always be rebuilt from documents with `BUILD GRAPH`.
+
+**Dependency chain:** `nexora_query → nexora_core → nexora_graph → nexoradb.so / NexoraDB (test exe)`
