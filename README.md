@@ -64,3 +64,9 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 - **Full CRUD** — `InsertOne/Many`, `FindById` (O(1)), `FindMany` with rich conditions, `UpdateById/Many`, `DeleteById/Many`
 - **Query conditions** — `EQ, NEQ, GT, GTE, LT, LTE, IN, NIN, EXISTS, REGEX, STARTS, CONTAINS` with `AND / OR / NOR / NOT` composition
 - **Update operators** — `$set, $inc, $unset, $push, $pull, $addToSet, $currentDate` and more
+- **Schema validation** (optional, per collection) with `REQUIRED` / `UNIQUE` field flags
+- **Secondary indexes** — single-field, compound, unique
+- **Foreign keys** — referential integrity enforced on insert
+- **ACID transactions** — via RocksDB `TransactionDB` (begin / commit / rollback)
+- **Lookup joins** — MongoDB-style `$lookup` left joins
+- **Auto UUID v4** document IDs when `_id` is omitted
