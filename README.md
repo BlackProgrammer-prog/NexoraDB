@@ -486,3 +486,44 @@ JOB STATUS 'job_1';
 JOB RESULT 'job_1';    -- blocks until done
 SHOW JOBS ON social;
 ```
+
+---
+
+## 🧮 Graph Algorithms
+
+Twelve algorithms ship with the engine, split into two execution tiers:
+
+### 🔒 Lock Algorithms — instant answers on the live graph
+
+| Algorithm | What it answers | Method | Complexity |
+|---|---|---|---|
+| `MutualFriends` | Common connections of two users | Two-pointer on sorted adjacency | O(deg₁ + deg₂) |
+| `AreConnected` | Is there any path between A and B? | Bidirectional BFS | O(b^(d/2)) |
+| `ShortestPath` | Hop-optimal path A → B | Bidirectional BFS + parents | O(b^(d/2)) |
+| `FriendSuggestion` | "People you may know" | Friends-of-friends + Jaccard | O(deg × avg_deg) |
+| `MostConnected` | Top-K influencers by degree | Cached-degree partial sort | O(V·log K) |
+| `NetworkStats` | Live graph health snapshot | Atomic counters + single pass | O(1) … O(V+E) |
+| `GetFriends` | Direct neighbors of a node | Adjacency read | O(limit) |
+| `Neighborhood` | K-hop ego network | Bounded BFS | O(b^d) |
+
+### ⚙️ Job Algorithms — heavy analytics on lock-free snapshots
+
+| Algorithm | What it answers | Method | Complexity |
+|---|---|---|---|
+| `ConnectedComponents` | Islands in the network | Union-Find (DSU, path compression) | O(E·α(V)) |
+| `AllDistances` | SSSP from one node — or **all-pairs**, sorted nearest→farthest | BFS (unweighted, so no Dijkstra needed) | O(V+E) / O(V·(V+E)) |
+| `CommunityDetection` | Natural groups + **full member lists** per community | Label Propagation (LPA) | O(iter·(V+E)) |
+| `PageRank` | Global influence ranking | Power iteration | O(iter·(V+E)) |
+
+**Writing your own** is three steps — inherit `LockAlgorithm` or `JobAlgorithm`, implement `run()`, add the `.cpp` to `graph/CMakeLists.txt`. See [`graph/algorithms/ALGORITHM_TEAM_GUIDE.md`](graph/algorithms/ALGORITHM_TEAM_GUIDE.md) for the complete developer guide with API tables and templates.
+
+```cpp
+// C++ — run synchronously with a read lock
+MutualFriends algo;
+auto r = gm.runLock("social", algo, {"u1", "u2"});
+
+// C++ — submit async job on a snapshot
+ConnectedComponents cc;
+auto handle = gm.submitJob("social", cc, {});
+auto result = handle.result();   // blocks until finished
+```
