@@ -639,3 +639,71 @@ nexoradb/
 | **Right algorithm for the data** | Unweighted graph ⇒ BFS over Dijkstra; large networks ⇒ LPA over Louvain |
 | **Crash safety** | Graph WAL with replay-on-startup; RocksDB WAL for documents |
 | **GIL-aware bindings** | Python GIL released during C++ work, re-acquired before touching Python objects |
+
+---
+
+## 🧪 Testing
+
+```bash
+# C++ self-test (documents + graph, 18 sections)
+./build/NexoraDB
+
+# Python binding self-test (20 sections — CRUD, tx, joins, graph, snapshots)
+python3 test.py
+```
+
+---
+
+## 🗺 Roadmap
+
+- [ ] String-dispatch `run_lock` / `submit_job` via a C++ `AlgorithmRegistry` (call any algorithm from Python by name)
+- [ ] `MULTIPLY` / `SET MIN` / `SET MAX` update operators in the Python bindings
+- [ ] Server-side `SORT BY` and projections in `DocEngine`
+- [ ] Scheduled `REFRESH GRAPH ... EVERY n HOURS`
+- [ ] Multi-join `LOOKUP JOIN` chains
+- [ ] Replication & horizontal sharding
+- [ ] Web-based NexoraQL playground in the dashboard
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome!
+
+1. **Fork** the repository and create a feature branch
+2. New graph algorithm? Read [`ALGORITHM_TEAM_GUIDE.md`](graph/algorithms/ALGORITHM_TEAM_GUIDE.md) first — it has the full API, templates, and a delivery checklist
+3. Keep `main.cpp` and `test.py` green
+4. Open a pull request with a clear description
+
+### Adding a New API Endpoint
+
+1. Add the endpoint in `app/api/v1/endpoints/`
+2. Add Pydantic models in `app/api/v1/models/`
+3. Register the router in `app/main.py`
+4. Add unit tests in `tests/test_endpoints/`
+5. Document in `docs/fastapi/api_reference.md`
+6. Update `README.md` endpoint table if needed
+
+### Modifying Authentication
+
+1. Update scopes in `app/api/v1/models/security.py`
+2. Update `require_scope` calls in endpoints
+3. Update `AVAILABLE_APP_SCOPES` tuple
+4. Test with `tests/test_models/test_security.py`
+
+
+---
+
+## 📄 License
+
+Released under the **MIT License** — see [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+**NexoraDB** — *documents and graphs, finally speaking the same language.*
+
+⭐ If this project helps you, a star means a lot!
+
+</div>
