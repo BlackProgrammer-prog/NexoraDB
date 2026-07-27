@@ -572,3 +572,70 @@ nexoradb cli
 nexoraql> SELECT * FROM users WHERE age > 18 LIMIT 5;
 nexoraql> RUN LOCK NetworkStats ON social WITH mode='basic';
 ```
+
+---
+
+## 📁 Project Structure
+
+```
+nexoradb/
+├── CMakeLists.txt              # root build (graph + python options)
+├── vcpkg.json                  # rocksdb · fmt · pybind11
+├── main.cpp                    # C++ engine self-test
+├── test.py                     # Python binding self-test (19+ sections)
+│
+├── core/                       # DocEngine — document store on RocksDB
+├── query/                      # QueryLayer — Condition / UpdateSpec / Evaluator
+│
+├── graph/                      # Graph engine
+│   ├── GraphManager.*          #   orchestrator (build, snapshots, runLock/submitJob)
+│   ├── LiveGraph.*             #   RAM projection, sorted adjacency
+│   ├── StaticGraph.*           #   immutable snapshots, COO/CSR export
+│   ├── GraphWAL.* GraphStorage.* GraphIdStore.*
+│   └── algorithms/             #   12 algorithms + team guide
+│       ├── AlgorithmBase.h     #   LockAlgorithm / JobAlgorithm / JobHandle
+│       ├── MutualFriends.cpp · MostConnected.cpp · NetworkStats.cpp
+│       ├── ConnectedComponents.cpp · AllDistances.cpp · CommunityDetection.cpp
+│       └── ALGORITHM_TEAM_GUIDE.md
+│
+├── bindings/
+│   └── nexoradb_bind.cpp       # pybind11 → nexoradb.so
+│
+├── nexoradb_python/            # Pythonic wrapper (NexoraDB / GraphDB, dict filters)
+│
+└── nexoraql/                   # ★ the query language
+    ├── grammar/nexoraql.lark   #   Lark grammar (Earley)
+    ├── parser.py               #   text → AST
+    ├── ast_nodes.py            #   statement dataclasses
+    ├── transformer.py          #   Lark tree → AST
+    ├── semantic.py             #   validation + executor → nexoradb.so
+    └── errors.py               #   Parse / Semantic / Execution errors
+    │
+├── app/                        # FastAPI backend
+│   ├── api/v1/
+│   │   ├── endpoints/          # 7 endpoint modules (query, documents, collections, graph, algorithms, apps, system)
+│   │   └── models/             # Pydantic models (query, update, security, schema, graph, response)
+│   ├── core/                   # config, dependencies, exceptions, native C++ bridge
+│   └── services/               # engine_provider (singleton pattern)
+│
+├── docs/fastapi/               # API documentation (architecture, security, api_reference)
+│
+├── tests/                      # Unit and integration tests
+│   ├── test_models/            # Pydantic model tests
+│   ├── test_endpoints/         # API endpoint tests
+│   └── test_integration/       # End-to-end integration tests
+```
+
+---
+
+## ⚡ Design Principles
+
+| Principle | Implementation |
+|---|---|
+| **One source of truth** | RocksDB holds everything; the graph is a rebuildable projection |
+| **Reads never fight analytics** | Heavy jobs run on immutable `StaticGraph` snapshots — zero locks on OLTP |
+| **Degrees are free** | `out_degree` / `in_degree` cached in 32-byte `NodeRecord`s — O(1), never counted |
+| **Sorted adjacency** | Enables two-pointer set intersection (`MutualFriends` in O(deg₁+deg₂)) |
+| **Right algorithm for the data** | Unweighted graph ⇒ BFS over Dijkstra; large networks ⇒ LPA over Louvain |
+| **Crash safety** | Graph WAL with replay-on-startup; RocksDB WAL for documents |
+| **GIL-aware bindings** | Python GIL released during C++ work, re-acquired before touching Python objects |
