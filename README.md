@@ -527,3 +527,48 @@ ConnectedComponents cc;
 auto handle = gm.submitJob("social", cc, {});
 auto result = handle.result();   // blocks until finished
 ```
+
+---
+
+## 💻 CLI & Terminal Commands
+
+### Unified command
+
+```bash
+nexoradb run          # start the database engine
+nexoradb server       # start the FastAPI backend
+nexoradb dashboard    # start the React admin dashboard
+nexoradb cli          # interactive NexoraQL shell
+nexoradb dev          # backend + dashboard together (dev mode)
+```
+
+### Individual entry points
+
+```bash
+nexoradb-server
+nexoradb-dashboard
+nexoradb-cli
+```
+
+### Typical developer workflow
+
+**1.** Start backend and React dashboard together:
+
+```bash
+nexoradb dev
+```
+
+**2.** Or run them separately:
+
+```bash
+nexoradb run
+nexoradb dashboard
+```
+
+Then open the interactive shell in another terminal:
+
+```bash
+nexoradb cli
+nexoraql> SELECT * FROM users WHERE age > 18 LIMIT 5;
+nexoraql> RUN LOCK NetworkStats ON social WITH mode='basic';
+```
