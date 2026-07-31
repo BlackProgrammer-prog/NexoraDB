@@ -1,0 +1,71 @@
+name: Publish NexoraDB to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Ubuntu wheel
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up CPython 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade build setuptools wheel twine auditwheel
+
+      - name: Build platform wheel
+        working-directory: NexoraDB
+        run: python -m build --wheel
+
+      - name: Apply the verified manylinux tag
+        working-directory: NexoraDB
+        run: >-
+          python -m wheel tags
+          --remove
+          --platform-tag manylinux_2_35_x86_64
+          dist/nexoradb-*-cp310-cp310-linux_x86_64.whl
+
+      - name: Validate distributions
+        working-directory: NexoraDB
+        run: |
+          python -m twine check dist/*
+          python -m auditwheel show dist/*manylinux_2_35_x86_64.whl
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: NexoraDB/dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Publish wheel to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nexoradb/
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
