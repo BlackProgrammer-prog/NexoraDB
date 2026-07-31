@@ -1403,7 +1403,7 @@ PYBIND11_MODULE(nexoradb, m) {
     // §10  Version info
     // ──────────────────────────────────────────────────────────
 
-    m.attr("__version__")    = "1.0.0";
+    m.attr("__version__")    = "0.1.0";
     m.attr("GRAPH_ENABLED")  =
 #ifdef NEXORA_BUILD_GRAPH
             true;
