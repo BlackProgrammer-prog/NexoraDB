@@ -120,7 +120,7 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 │  └─────────────────────────┘  │                               │
 ├───────────────────────────────┴───────────────────────────────┤
 │                          RocksDB                              │
-│              ★ the single source of truth ★                   │
+│              ★ the single source of truth ★                  │
 └───────────────────────────────────────────────────────────────┘
 ```
 
