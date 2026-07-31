@@ -15,6 +15,9 @@ def _candidate_native_paths(settings: AdminApiSettings) -> list[Path]:
     if settings.native_module_path is not None:
         candidates.append(settings.native_module_path)
 
+    package_native_dir = Path(__file__).resolve().parent.parent / "nexoradb" / "native"
+    candidates.extend(package_native_dir.glob("nexoradb*.so"))
+
     cwd = Path.cwd()
     candidates.extend(cwd.glob("nexoradb*.so"))
     for parent in cwd.parents:
