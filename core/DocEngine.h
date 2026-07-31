@@ -831,9 +831,19 @@ namespace nexora {
              */
             DBResult DeleteInternalUser(const std::string& username);
 
+            // ──────────────────────────────────────────────────────────
+            // 6.16  Internal application tokens (system collection)
+            // ──────────────────────────────────────────────────────────
+
+            DBResult CreateInternalAppToken(const std::string& token_id,
+                                            const std::string& token_json);
+            DBResult ListInternalAppTokens() const;
+            DBResult DeleteInternalAppToken(const std::string& token_id);
+            bool IsInternalAppTokenActive(const std::string& token_id) const;
+
         private:
             // ──────────────────────────────────────────────────────────
-            // 6.16  پیاده‌سازی‌های داخلی
+            // 6.17  پیاده‌سازی‌های داخلی
             // ──────────────────────────────────────────────────────────
 
             std::string db_path_;

@@ -7,4 +7,8 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  build: {
+    outDir: '../NexoraDB/src/nexoradb/dashboard/static',
+    emptyOutDir: true,
+  },
 })

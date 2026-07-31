@@ -96,12 +96,8 @@ static const char* wal_op_to_string(WalOpType op) {
 PYBIND11_MODULE(nexoradb, m) {
     m.doc() = "NexoraDB — High-performance Document + Graph Database (C++ core)";
 
-    // ── bind_vector: اینها را اول تعریف می‌کنیم ──
-    // بدون این، append() روی کپی کار می‌کند نه روی object اصلی
-    py::bind_vector<std::vector<SchemaField>>(m, "SchemaFieldList");
-    py::bind_vector<std::vector<std::string>>(m, "StringList");
-
 #ifdef NEXORA_BUILD_GRAPH
+    // Graph mapping vectors are opaque and therefore need explicit bindings.
     py::bind_vector<std::vector<NodeMappingDef>>(m, "NodeMappingList");
     py::bind_vector<std::vector<EdgeMappingDef>>(m, "EdgeMappingList");
 #endif
@@ -478,6 +474,13 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("collection"), py::arg("index_name"),
                  "حذف Index")
 
+            .def("get_indexes",
+                 [](DocEngine& e, const std::string& col) {
+                     return e.GetIndexes(col);
+                 },
+                 py::arg("collection"),
+                 "لیست Index های یک Collection")
+
                     // ── Foreign Key ──
             .def("add_foreign_key", &DocEngine::AddForeignKey,
                  py::arg("collection"), py::arg("fk_def"),
@@ -649,6 +652,19 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("delete_internal_user", &DocEngine::DeleteInternalUser,
                  py::arg("username"),
                  "حذف منطقی کاربر داخلی دیتابیس با status='deleted'")
+
+            .def("create_internal_app_token", &DocEngine::CreateInternalAppToken,
+                 py::arg("token_id"), py::arg("token_json"),
+                 "ذخیره امن metadata توکن برنامه در system collection")
+
+            .def("list_internal_app_tokens", &DocEngine::ListInternalAppTokens,
+                 "لیست توکن‌های برنامه از system collection")
+
+            .def("delete_internal_app_token", &DocEngine::DeleteInternalAppToken,
+                 py::arg("token_id"), "حذف و revoke توکن برنامه")
+
+            .def("is_internal_app_token_active", &DocEngine::IsInternalAppTokenActive,
+                 py::arg("token_id"), "بررسی فعال بودن توکن مدیریت‌شده")
 
             .def("get_schema",
                  [](DocEngine& e, const std::string& col) -> py::object {
@@ -1106,6 +1122,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("graph_name"), py::arg("mapping"))
             .def("drop_graph",      &GraphManager::dropGraph,      py::arg("graph_name"))
             .def("list_graphs",     &GraphManager::listGraphs)
+            .def("get_definition",  &GraphManager::getDefinition, py::arg("graph_name"))
             .def("is_ready",        &GraphManager::isReady,        py::arg("graph_name"))
 
                     // Build / Render
@@ -1234,6 +1251,60 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
                  "اجرای AllDistances به صورت JobAlgorithm")
 
+            .def("run_get_friends",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runGetFriends(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params"),
+                 "اجرای GetFriends به صورت LockAlgorithm")
+
+            .def("run_are_connected",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runAreConnected(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params"),
+                 "اجرای AreConnected به صورت LockAlgorithm")
+
+            .def("run_shortest_path",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runShortestPath(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params"),
+                 "اجرای ShortestPath به صورت LockAlgorithm")
+
+            .def("run_friend_suggestion",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runFriendSuggestion(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params"),
+                 "اجرای FriendSuggestion به صورت LockAlgorithm")
+
+            .def("run_betweenness_centrality",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runBetweennessCentrality(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 "اجرای BetweennessCentrality به صورت JobAlgorithm")
+
+            .def("run_influence_maximization",
+                 [](GraphManager& gm, const std::string& graph_name,
+                    const std::vector<std::string>& params) {
+                     py::gil_scoped_release rel;
+                     return algorithms::runInfluenceMaximization(gm, graph_name, params);
+                 },
+                 py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 "اجرای InfluenceMaximization به صورت JobAlgorithm")
+
                     // Snapshot برای الگوریتم سنگین
             .def("create_snapshot",
                  [](GraphManager& gm, const std::string& name,
@@ -1332,7 +1403,7 @@ PYBIND11_MODULE(nexoradb, m) {
     // §10  Version info
     // ──────────────────────────────────────────────────────────
 
-    m.attr("__version__")    = "1.0.0";
+    m.attr("__version__")    = "0.1.0";
     m.attr("GRAPH_ENABLED")  =
 #ifdef NEXORA_BUILD_GRAPH
             true;

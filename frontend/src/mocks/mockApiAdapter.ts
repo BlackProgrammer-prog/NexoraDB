@@ -190,7 +190,7 @@ export const mockApiAdapter = {
 
   async executeQuery(input: QueryRequest): Promise<QueryResult> {
     await wait()
-    const query = input.query.trim().replace(/\s+/g, ' ')
+    const query = input.query.trim().replace(/;+$/, '').trim().replace(/\s+/g, ' ')
     const normalizedQuery = query.toUpperCase()
 
     if (!query) {
@@ -247,9 +247,7 @@ export const mockApiAdapter = {
       return { columns: makeColumns(rows), executionTimeMs: 0, raw: graph, rows }
     }
 
-    throw new Error(
-      `Unknown mock query "${query}". Try SHOW COLLECTIONS, FIND users, SHOW GRAPHS, or FIND GRAPH social.`,
-    )
+    throw new Error(`Unknown mock query "${query}". Try SHOW COLLECTIONS or SHOW GRAPHS.`)
   },
 
   async listGraphs(): Promise<Graph[]> {

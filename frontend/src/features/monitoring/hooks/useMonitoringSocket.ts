@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { io } from 'socket.io-client'
 import type {
   ActiveConnection,
   ConnectionStatus,
@@ -8,6 +9,7 @@ import type {
 
 const maxSamples = 30
 const defaultMetrics: MonitoringMetrics = {
+  databaseHealthy: false,
   ramUsedBytes: 0,
   ssdUsedBytes: 0,
   requestsPerSecond: 0,
@@ -47,6 +49,8 @@ function normalizeActiveConnections(value: unknown): ActiveConnection[] {
       return {
         id: String(id),
         address: record.address ? String(record.address) : undefined,
+        activeWithinSeconds: asNumber(record.activeWithinSeconds),
+        kind: record.kind ? String(record.kind) : undefined,
         user: record.user ? String(record.user) : undefined,
       }
     })
@@ -62,6 +66,9 @@ function normalizeMetrics(payload: unknown): MonitoringMetrics {
   const ssd = asRecord(data.ssd)
 
   return {
+    databaseHealthy: Boolean(
+      data.databaseEngineHealthy ?? data.databaseHealthy ?? data.dbHealthy ?? data.healthy,
+    ),
     ramUsedBytes:
       pickNumber(data, ['ramUsedBytes', 'ramUsed', 'memoryUsedBytes'], pickNumber(ram, ['usedBytes', 'used'])) ??
       0,
@@ -82,7 +89,7 @@ function normalizeMetrics(payload: unknown): MonitoringMetrics {
     activeConnections: normalizeActiveConnections(
       data.activeConnections ?? data.connections ?? data.connectionCount,
     ),
-    receivedAt: Date.now(),
+    receivedAt: pickNumber(data, ['receivedAt'], Date.now()) ?? Date.now(),
   }
 }
 
@@ -97,80 +104,79 @@ function createSample(metrics: MonitoringMetrics): RequestsSample {
   }
 }
 
-export function useMonitoringSocket(url: string) {
-  const [status, setStatus] = useState<ConnectionStatus>('connected')
+export function useMonitoringSocket(url: string, accessToken: string | null) {
+  const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [error, setError] = useState<string>()
   const [metrics, setMetrics] = useState<MonitoringMetrics>(defaultMetrics)
   const [samples, setSamples] = useState<RequestsSample[]>([])
   const [retryKey, setRetryKey] = useState(0)
 
   const reconnect = useCallback(() => {
-    setStatus('connected')
+    setStatus('connecting')
     setError(undefined)
     setRetryKey((current) => current + 1)
   }, [])
 
   useEffect(() => {
-    setStatus('connected')
+    if (!accessToken) {
+      setStatus('disconnected')
+      setError('Sign in again to monitor database health.')
+      setMetrics(defaultMetrics)
+      setSamples([])
+      return undefined
+    }
+
+    setStatus('connecting')
     setError(undefined)
 
-    const updateFakeMetrics = () => {
-      const phase = Date.now() / 1000
-      const nextMetrics = normalizeMetrics({
-        ramUsedBytes: 3_200_000_000 + Math.round(Math.sin(phase) * 180_000_000),
-        ramTotalBytes: 8_000_000_000,
-        ssdUsedBytes: 128_000_000_000 + Math.round(Math.cos(phase / 2) * 3_000_000_000),
-        ssdTotalBytes: 512_000_000_000,
-        requestsPerSecond: Math.max(0, Math.round(24 + Math.sin(phase * 1.7) * 9)),
-        activeConnections: [
-          { id: 'mock-admin', user: 'admin', address: '127.0.0.1' },
-          { id: 'mock-dashboard', user: 'dashboard', address: 'local' },
-        ],
-      })
-
-      setMetrics(nextMetrics)
-      setSamples((current) => [...current, createSample(nextMetrics)].slice(-maxSamples))
-    }
-
-    updateFakeMetrics()
-    const intervalId = window.setInterval(updateFakeMetrics, 1000)
-
-    return () => {
-      window.clearInterval(intervalId)
-    }
-
-    /*
-    const socket = new WebSocket(url)
-
-    socket.addEventListener('open', () => {
-      setStatus('connected')
-      setError(undefined)
+    const socket = io(url, {
+      auth: { token: accessToken },
+      path: '/socket.io',
+      reconnection: false,
+      transports: ['websocket'],
     })
 
-    socket.addEventListener('message', (event) => {
+    function handleMetrics(payload: unknown) {
       try {
-        const nextMetrics = normalizeMetrics(JSON.parse(event.data))
+        const nextMetrics = normalizeMetrics(payload)
+        setError(undefined)
+        setStatus('connected')
         setMetrics(nextMetrics)
         setSamples((current) => [...current, createSample(nextMetrics)].slice(-maxSamples))
       } catch {
         setError('Received an invalid monitoring payload.')
       }
+    }
+
+    socket.on('connect', () => {
+      setStatus('connected')
+      setError(undefined)
+      socket.emit('metrics:refresh')
     })
 
-    socket.addEventListener('error', () => {
+    socket.on('metrics', handleMetrics)
+
+    socket.on('connect_error', () => {
       setStatus('disconnected')
-      setError('Could not connect to the monitoring WebSocket.')
+      setError('Could not connect to live monitoring.')
     })
 
-    socket.addEventListener('close', () => {
+    socket.on('disconnect', () => {
       setStatus('disconnected')
     })
+
+    const heartbeatId = window.setInterval(() => {
+      if (socket.connected) {
+        socket.emit('heartbeat')
+      }
+    }, 5000)
 
     return () => {
-      socket.close()
+      window.clearInterval(heartbeatId)
+      socket.disconnect()
     }
-    */
-  }, [retryKey, url])
+
+  }, [accessToken, retryKey, url])
 
   return useMemo(
     () => ({ error, metrics, reconnect, samples, status }),

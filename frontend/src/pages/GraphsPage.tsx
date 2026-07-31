@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { CreateGraphModal } from '../features/graphs/components/CreateGraphModal'
 import { DeleteGraphModal } from '../features/graphs/components/DeleteGraphModal'
 import { EdgeEditorModal } from '../features/graphs/components/EdgeEditorModal'
+import { GraphAlgorithmPanel } from '../features/graphs/components/GraphAlgorithmPanel'
 import { GraphEditor } from '../features/graphs/components/GraphEditor'
 import { GraphList } from '../features/graphs/components/GraphList'
 import { NodeEditorModal } from '../features/graphs/components/NodeEditorModal'
@@ -26,7 +27,7 @@ export function GraphsPage() {
   const [selectedGraphId, setSelectedGraphId] = useState<string | null>(null)
 
   const selectedGraph = useMemo(
-    () => graphs?.find((graph) => graph.id === selectedGraphId) ?? graphs?.[0] ?? null,
+    () => graphs?.find((graph) => graph.id === selectedGraphId) ?? null,
     [graphs, selectedGraphId],
   )
 
@@ -120,7 +121,7 @@ export function GraphsPage() {
     <div className="space-y-8">
       <PageHeader
         actions={<Button onClick={createGraphModal.open}>New graph</Button>}
-        description="Manage graph records, nodes, and edges through the mock API adapter."
+        description="Manage graph definitions through the NexoraDB graph engine and edit dashboard graph records."
         title="Graphs"
       />
       <Section title="Available graphs">
@@ -143,6 +144,12 @@ export function GraphsPage() {
           onEditEdge={openEdgeEditor}
           onEditNode={openNodeEditor}
         />
+      </Section>
+      <Section
+        description="Select a graph above, then run built-in graph algorithms through the NexoraQL parser."
+        title="Graph algorithms"
+      >
+        <GraphAlgorithmPanel graph={selectedGraph} />
       </Section>
       <CreateGraphModal
         isOpen={createGraphModal.isOpen}

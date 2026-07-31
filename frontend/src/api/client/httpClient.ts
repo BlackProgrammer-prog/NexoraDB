@@ -1,5 +1,6 @@
 import { API_BASE_URL } from './apiConfig'
 import { ApiError } from './apiError'
+import { readStoredToken } from '../../features/auth/services/authTokenStorage'
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
@@ -9,15 +10,51 @@ interface RequestOptions<TBody> {
   signal?: AbortSignal
 }
 
+function getErrorMessage(payload: unknown, statusCode: number) {
+  if (payload && typeof payload === 'object' && 'message' in payload) {
+    const message = (payload as { message?: unknown }).message
+
+    if (typeof message === 'string') {
+      return message
+    }
+  }
+
+  if (payload && typeof payload === 'object' && 'detail' in payload) {
+    const detail = (payload as { detail?: unknown }).detail
+
+    if (typeof detail === 'string') {
+      return detail
+    }
+
+    if (Array.isArray(detail)) {
+      const firstMessage = detail.find((item): item is { msg: string } => {
+        if (!item || typeof item !== 'object' || !('msg' in item)) {
+          return false
+        }
+
+        return typeof (item as { msg?: unknown }).msg === 'string'
+      })
+
+      if (firstMessage) {
+        return firstMessage.msg
+      }
+    }
+  }
+
+  return `Request failed with status ${statusCode}`
+}
+
 async function request<TResponse, TBody = unknown>(
   method: HttpMethod,
   path: string,
   options: RequestOptions<TBody> = {},
 ): Promise<TResponse> {
+  const accessToken = readStoredToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...options.headers,
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -32,12 +69,7 @@ async function request<TResponse, TBody = unknown>(
   const payload = isJson ? await response.json() : null
 
   if (!response.ok) {
-    const message =
-      payload && typeof payload.message === 'string'
-        ? payload.message
-        : `Request failed with status ${response.status}`
-
-    throw new ApiError(message, response.status)
+    throw new ApiError(getErrorMessage(payload, response.status), response.status)
   }
 
   return payload as TResponse

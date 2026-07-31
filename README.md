@@ -11,7 +11,6 @@
 [![RocksDB](https://img.shields.io/badge/Storage-RocksDB-orange.svg?style=flat)](https://rocksdb.org/)
 [![pybind11](https://img.shields.io/badge/Bindings-pybind11-green.svg?style=flat)](https://github.com/pybind/pybind11)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat)](#-license)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110.0-009688.svg?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
 
 [Features](#-features) •
 [Architecture](#-architecture) •
@@ -94,101 +93,6 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 - Complete **pybind11** bindings (`nexoradb.so`) — GIL released during heavy C++ work
 - Pythonic wrapper (`NexoraDB` / `GraphDB`) with MongoDB-style filter dicts
 - One-line session: `NexoraQLSession(db_path, graph_dir).execute(sql)`
-
----
-
-### 🌐 REST API (FastAPI)
-- **FastAPI REST API** — full HTTP interface for external applications
-- **App token authentication** — HMAC-SHA256 signed tokens with 9 fine-grained scopes
-- **Admin dashboard** — React-based management UI (served via `nexoradb dashboard`)
-- **Scope-based authorization** — granular access control per endpoint
-- **Production-ready** — environment-aware settings with docs disabled in production
-
-## 🌐 REST API (FastAPI)
-
-NexoraDB includes a complete **REST API layer** built with FastAPI, enabling external applications to interact with the database over HTTP.
-
-### Quick API Start
-
-```bash
-# Start the API server
-nexoradb server
-
-# Or with auto-reload for development
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-Once running, explore the interactive API documentation at `http://localhost:8000/docs`.
-
----
-
-### Authentication
-
-All API endpoints require a bearer token. Tokens are created via the admin API:
-
-```bash
-# Create an app token (requires admin:apps scope)
-curl -X POST http://localhost:8000/api/v1/apps/tokens \
-  -H "Authorization: Bearer <admin-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"appId":"billing-service","scopes":["query:execute"]}'
-
-
-The response includes a token in the format nxapp_{header}.{payload}.{signature}. Use it in all subsequent requests:
-
-```bash
-curl -X POST http://localhost:8000/api/v1/query \
-  -H "Authorization: Bearer nxapp_..." \
-  -H "Content-Type: application/json" \
-  -d '{"query":"SELECT * FROM users LIMIT 10;"}'
-
----
-
-### Available Scopes
-
-| Scope | Description |
-|-------|-------------|
-| `query:execute` | Execute NexoraQL queries |
-| `documents:read` | Read documents from collections |
-| `documents:write` | Insert, update, and delete documents |
-| `collections:read` | List collections and check existence |
-| `collections:write` | Create, drop, and modify collections |
-| `graphs:read` | Read graph data and statistics |
-| `graphs:write` | Modify graph structure (nodes, edges) |
-| `monitoring:read` | Read system metrics and health status |
-| `admin:apps` | Create and manage application tokens |
-
-### API Endpoints
-
-| Method | Endpoint | Description | Required Scope |
-|--------|----------|-------------|----------------|
-| POST | `/api/v1/query` | Execute NexoraQL query | `query:execute` |
-| POST | `/api/v1/documents/{collection}` | Insert one document | `documents:write` |
-| GET | `/api/v1/documents/{collection}/{id}` | Find document by ID | `documents:read` |
-| PATCH | `/api/v1/documents/{collection}/{id}` | Update document by ID | `documents:write` |
-| DELETE | `/api/v1/documents/{collection}/{id}` | Delete document by ID | `documents:write` |
-| POST | `/api/v1/collections` | Create a collection | `collections:write` |
-| GET | `/api/v1/collections` | List all collections | `collections:read` |
-| DELETE | `/api/v1/collections/{collection}` | Drop a collection | `collections:write` |
-| POST | `/api/v1/graph/{name}/node` | Add a node to a graph | `graphs:write` |
-| GET | `/api/v1/graph/{name}/node/{id}/neighbors` | Get node neighbors | `graphs:read` |
-| GET | `/api/v1/graph/{name}/stats` | Get graph statistics | `graphs:read` |
-| POST | `/api/v1/algorithms/lock` | Run lightweight LockAlgorithm | `graphs:read` |
-| POST | `/api/v1/algorithms/job` | Run heavy JobAlgorithm (async) | `graphs:read` |
-| GET | `/api/v1/algorithms/job/{id}/status` | Check job status | `graphs:read` |
-| POST | `/api/v1/apps/tokens` | Create an app token | `admin:apps` |
-| GET | `/api/v1/system/health` | Health check | *none (public)* |
-| GET | `/api/v1/system/metrics` | System metrics | `monitoring:read` |
-
-For complete API reference, see [`docs/fastapi/api_reference.md`](docs/fastapi/api_reference.md).
-
-### Production Security
-
-| Setting | Requirement |
-|---------|-------------|
-| `API_TOKEN_SECRET` | Must be at least 32 characters |
-| `DEBUG` | Must be `False` |
-| `ENVIRONMENT` | Must be `production` |
-| OpenAPI docs | Disabled (`/docs` returns 404) |
-| CORS origins | Must be explicitly restricted |
 
 ---
 
@@ -610,20 +514,6 @@ nexoradb/
     ├── transformer.py          #   Lark tree → AST
     ├── semantic.py             #   validation + executor → nexoradb.so
     └── errors.py               #   Parse / Semantic / Execution errors
-    │
-├── app/                        # FastAPI backend
-│   ├── api/v1/
-│   │   ├── endpoints/          # 7 endpoint modules (query, documents, collections, graph, algorithms, apps, system)
-│   │   └── models/             # Pydantic models (query, update, security, schema, graph, response)
-│   ├── core/                   # config, dependencies, exceptions, native C++ bridge
-│   └── services/               # engine_provider (singleton pattern)
-│
-├── docs/fastapi/               # API documentation (architecture, security, api_reference)
-│
-├── tests/                      # Unit and integration tests
-│   ├── test_models/            # Pydantic model tests
-│   ├── test_endpoints/         # API endpoint tests
-│   └── test_integration/       # End-to-end integration tests
 ```
 
 ---
@@ -674,23 +564,6 @@ Contributions are welcome!
 2. New graph algorithm? Read [`ALGORITHM_TEAM_GUIDE.md`](graph/algorithms/ALGORITHM_TEAM_GUIDE.md) first — it has the full API, templates, and a delivery checklist
 3. Keep `main.cpp` and `test.py` green
 4. Open a pull request with a clear description
-
-### Adding a New API Endpoint
-
-1. Add the endpoint in `app/api/v1/endpoints/`
-2. Add Pydantic models in `app/api/v1/models/`
-3. Register the router in `app/main.py`
-4. Add unit tests in `tests/test_endpoints/`
-5. Document in `docs/fastapi/api_reference.md`
-6. Update `README.md` endpoint table if needed
-
-### Modifying Authentication
-
-1. Update scopes in `app/api/v1/models/security.py`
-2. Update `require_scope` calls in endpoints
-3. Update `AVAILABLE_APP_SCOPES` tuple
-4. Test with `tests/test_models/test_security.py`
-
 
 ---
 

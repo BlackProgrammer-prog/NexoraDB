@@ -97,6 +97,18 @@ set(ALGO_USER_SOURCES
         algorithms/NetworkStats.cpp
         algorithms/CommunityDetection.cpp
         algorithms/AllDistances.cpp
+        algorithms/GetFriends.h
+        algorithms/GetFriends.cpp
+        algorithms/AreConnected.h
+        algorithms/AreConnected.cpp
+        algorithms/ShortestPath.h
+        algorithms/ShortestPath.cpp
+        algorithms/FriendSuggestion.h
+        algorithms/FriendSuggestion.cpp
+        algorithms/BetweennessCentrality.h
+        algorithms/BetweennessCentrality.cpp
+        algorithms/InfluenceMaximization.h
+        algorithms/InfluenceMaximization.cpp
 )
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/algorithms/AlgorithmBase.cpp")

@@ -5,3 +5,15 @@
 frontend/frontend@0.0.0
 frontend/vite
 nexoradb.cpython-310-x86_64-linux-gnu.so
+/NexoraDB/.venv
+/NexoraDB/src/nexoradb/parser/__pycache__
+/NexoraDB/src/nexoradb/__pycache__
+/NexoraDB/src/nexoradb.egg-info
+/NexoraDB/src/nexoradb_admin/__pycache__
+/NexoraDB/nexoradb-data
+/NexoraDB/src/nexoradb/api/__pycache__
+/NexoraDB/src/nexoradb/cli/__pycache__
+/nexoradb-data
+/NexoraDB/src/nexoradb/commands/__pycache__
+/tests/__pycache__
+/NexoraDB/examples/__pycache__
