@@ -11,8 +11,8 @@ name = "nexoradb"
 version = "0.1.0"
 description = "NexoraDB hybrid database engine with Python API"
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.11"
+license = "Apache-2.0"
 
 authors = [
     { name = "NexoraDB Team" }
@@ -28,12 +28,11 @@ keywords = [
 ]
 
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: C++",
     "Operating System :: POSIX :: Linux",
     "Topic :: Database",
@@ -117,7 +116,8 @@ include = ["nexoradb*", "nexoradb_admin*"]
 nexoradb = [
     "dashboard/static/**/*",
     "dashboard/templates/**/*",
-    "parser/grammar/*.lark"
+    "parser/grammar/*.lark",
+    "native/*.so"
 ]
 
 
