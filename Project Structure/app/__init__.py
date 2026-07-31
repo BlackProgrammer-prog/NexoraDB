@@ -1,1 +1,0 @@
-"""NexoraDB FastAPI Backend Application."""
