@@ -81,14 +81,18 @@ namespace nexora::graph::algorithms {
         for (DenseId fid : direct_friends) {
             if (fid == uid) continue;
 
+            FilterSet candidates;
             auto visit = [&](const AdjEntry& e) -> bool {
                 if ((edge_type == kInvalidTypeId || e.type_id == edge_type) &&
                     !direct_friends.count(e.neighbor))
-                    scores[e.neighbor]++;
+                    candidates.insert(e.neighbor);
                 return true;
             };
             graph.forEachOutEdge(fid, visit);
             graph.forEachInEdge(fid, visit);
+
+            for (DenseId candidate : candidates)
+                scores[candidate]++;
         }
         return scores;
     }
