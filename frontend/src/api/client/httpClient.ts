@@ -52,6 +52,7 @@ async function request<TResponse, TBody = unknown>(
   const accessToken = readStoredToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method,
+    cache: method === 'GET' ? 'no-store' : undefined,
     headers: {
       'Content-Type': 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
@@ -66,7 +67,8 @@ async function request<TResponse, TBody = unknown>(
     ?.toLowerCase()
     .includes('application/json')
 
-  const payload = isJson ? await response.json() : null
+  const hasNoContent = response.status === 204 || response.status === 205
+  const payload = hasNoContent ? null : isJson ? await response.json() : null
 
   if (!response.ok) {
     throw new ApiError(getErrorMessage(payload, response.status), response.status)
