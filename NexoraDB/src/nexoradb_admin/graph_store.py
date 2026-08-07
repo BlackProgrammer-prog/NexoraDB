@@ -96,14 +96,39 @@ def _make_graph_response(graph_id: str, metadata: dict[str, Any], stats: Any | N
     }
 
 
-def _get_metadata_or_404(store: GraphMetadataStore, graph_id: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+def _get_metadata_or_404(
+    store: GraphMetadataStore,
+    graph_manager: GraphManagerLike,
+    graph_id: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     graphs = store.load()
     metadata = graphs.get(graph_id)
     if metadata is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"message": f"Graph '{graph_id}' not found"},
-        )
+        # NexoraQL registers graphs directly in the native GraphManager. Such
+        # graphs do not have dashboard metadata until /graphs is requested.
+        # Synchronize it lazily so direct UI routes do not return a false 404.
+        try:
+            native_graph_exists = graph_id in set(graph_manager.list_graphs())
+        except Exception:
+            native_graph_exists = False
+
+        if not native_graph_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"message": f"Graph '{graph_id}' not found"},
+            )
+
+        timestamp = _now_iso()
+        metadata = {
+            "name": graph_id,
+            "description": None,
+            "nodes": [],
+            "edges": [],
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+        }
+        graphs[graph_id] = metadata
+        store.save(graphs)
     return graphs, metadata
 
 
@@ -210,7 +235,7 @@ def create_node(
     graph_id: str,
     payload: GraphNodeRequest,
 ) -> dict[str, Any]:
-    graphs, graph = _get_metadata_or_404(metadata_store, graph_id)
+    graphs, graph = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     node = {
         "id": f"node_{uuid.uuid4().hex}",
         "label": payload.label,
@@ -231,7 +256,7 @@ def update_node(
     node_id: str,
     payload: GraphNodeRequest,
 ) -> dict[str, Any]:
-    graphs, graph = _get_metadata_or_404(metadata_store, graph_id)
+    graphs, graph = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     nodes = graph.get("nodes", [])
     if not any(node.get("id") == node_id for node in nodes):
         raise HTTPException(status_code=404, detail={"message": f"Node '{node_id}' not found"})
@@ -258,7 +283,7 @@ def delete_node(
     graph_id: str,
     node_id: str,
 ) -> dict[str, Any]:
-    graphs, graph = _get_metadata_or_404(metadata_store, graph_id)
+    graphs, graph = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     graph["nodes"] = [node for node in graph.get("nodes", []) if node.get("id") != node_id]
     graph["edges"] = [
         edge
@@ -277,7 +302,7 @@ def create_edge(
     graph_id: str,
     payload: GraphEdgeRequest,
 ) -> dict[str, Any]:
-    graphs, graph = _get_metadata_or_404(metadata_store, graph_id)
+    graphs, graph = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     node_ids = {node.get("id") for node in graph.get("nodes", [])}
     if payload.source not in node_ids or payload.target not in node_ids:
         raise HTTPException(status_code=400, detail={"message": "edge source and target must exist"})
@@ -302,7 +327,7 @@ def update_edge(
     edge_id: str,
     payload: GraphEdgeRequest,
 ) -> dict[str, Any]:
-    graphs, graph = _get_metadata_or_404(metadata_store, graph_id)
+    graphs, graph = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     edges = graph.get("edges", [])
     if not any(edge.get("id") == edge_id for edge in edges):
         raise HTTPException(status_code=404, detail={"message": f"Edge '{edge_id}' not found"})
@@ -330,7 +355,7 @@ def delete_edge(
     graph_id: str,
     edge_id: str,
 ) -> dict[str, Any]:
-    graphs, graph = _get_metadata_or_404(metadata_store, graph_id)
+    graphs, graph = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     graph["edges"] = [edge for edge in graph.get("edges", []) if edge.get("id") != edge_id]
     graph["updatedAt"] = _now_iso()
     metadata_store.save(graphs)
@@ -344,7 +369,7 @@ def get_graph_visualization(
     graph_id: str,
     max_nodes: int = 1_000,
 ) -> dict[str, Any]:
-    graphs, metadata = _get_metadata_or_404(metadata_store, graph_id)
+    graphs, metadata = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     del graphs
     snapshot = graph_manager.create_snapshot(graph_id)
     if snapshot is None:
@@ -436,7 +461,7 @@ def get_graph_node_document(
     graph_id: str,
     node_id: str,
 ) -> dict[str, Any]:
-    _, metadata = _get_metadata_or_404(metadata_store, graph_id)
+    _, metadata = _get_metadata_or_404(metadata_store, graph_manager, graph_id)
     snapshot = graph_manager.create_snapshot(graph_id)
     collections = _node_type_collections(graph_manager, graph_id)
 
