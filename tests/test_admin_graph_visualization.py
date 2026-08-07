@@ -75,8 +75,12 @@ class FakeSnapshot:
 
 
 class FakeGraphManager:
-    def __init__(self, node_count: int = 2) -> None:
+    def __init__(self, node_count: int = 2, graph_names: list[str] | None = None) -> None:
         self.snapshot = FakeSnapshot(node_count)
+        self.graph_names = ["social"] if graph_names is None else graph_names
+
+    def list_graphs(self) -> list[str]:
+        return self.graph_names
 
     def create_snapshot(self, _: str) -> FakeSnapshot:
         return self.snapshot
@@ -117,6 +121,31 @@ def test_visualization_exports_snapshot_topology(tmp_path: Path) -> None:
         "collection": "users",
     }
     assert result["edges"][0]["label"] == "FOLLOWS"
+
+
+def test_visualization_lazily_registers_graph_created_by_query(tmp_path: Path) -> None:
+    store = GraphMetadataStore(tmp_path)
+
+    result = get_graph_visualization(
+        graph_manager=FakeGraphManager(),
+        metadata_store=store,
+        graph_id="social",
+    )
+
+    assert result["graphId"] == "social"
+    assert result["nodeCount"] == 2
+    assert store.load()["social"]["name"] == "social"
+
+
+def test_visualization_still_rejects_unknown_native_graph(tmp_path: Path) -> None:
+    with pytest.raises(HTTPException) as error:
+        get_graph_visualization(
+            graph_manager=FakeGraphManager(graph_names=[]),
+            metadata_store=GraphMetadataStore(tmp_path),
+            graph_id="missing",
+        )
+
+    assert error.value.status_code == 404
 
 
 def test_visualization_rejects_more_than_one_thousand_nodes(tmp_path: Path) -> None:
