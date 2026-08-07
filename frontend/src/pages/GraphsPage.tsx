@@ -5,6 +5,7 @@ import { EdgeEditorModal } from '../features/graphs/components/EdgeEditorModal'
 import { GraphAlgorithmPanel } from '../features/graphs/components/GraphAlgorithmPanel'
 import { GraphEditor } from '../features/graphs/components/GraphEditor'
 import { GraphList } from '../features/graphs/components/GraphList'
+import { GraphVisualization } from '../features/graphs/components/GraphVisualization'
 import { NodeEditorModal } from '../features/graphs/components/NodeEditorModal'
 import { useGraphs } from '../features/graphs/hooks/useGraphs'
 import { graphApi } from '../features/graphs/services/graphApi'
@@ -14,6 +15,10 @@ import { Section } from '../shared/components/layout/Section'
 import { Button } from '../shared/components/ui/Button'
 import { useDisclosure } from '../shared/hooks/useDisclosure'
 
+function getGraphDeletionKey(graph: Graph) {
+  return JSON.stringify([graph.id, graph.createdAt, graph.updatedAt])
+}
+
 export function GraphsPage() {
   const createGraphModal = useDisclosure()
   const deleteGraphModal = useDisclosure()
@@ -21,14 +26,19 @@ export function GraphsPage() {
   const edgeModal = useDisclosure()
   const { data: graphs, error, isLoading, refetch } = useGraphs()
   const [edgeToEdit, setEdgeToEdit] = useState<GraphEdge | null>(null)
+  const [deletedGraphKeys, setDeletedGraphKeys] = useState<string[]>([])
   const [graphToDelete, setGraphToDelete] = useState<Graph | null>(null)
   const [isDeletingGraph, setIsDeletingGraph] = useState(false)
   const [nodeToEdit, setNodeToEdit] = useState<GraphNode | null>(null)
   const [selectedGraphId, setSelectedGraphId] = useState<string | null>(null)
 
+  const visibleGraphs = useMemo(
+    () => graphs?.filter((graph) => !deletedGraphKeys.includes(getGraphDeletionKey(graph))) ?? null,
+    [deletedGraphKeys, graphs],
+  )
   const selectedGraph = useMemo(
-    () => graphs?.find((graph) => graph.id === selectedGraphId) ?? null,
-    [graphs, selectedGraphId],
+    () => visibleGraphs?.find((graph) => graph.id === selectedGraphId) ?? null,
+    [selectedGraphId, visibleGraphs],
   )
 
   async function refreshGraphs() {
@@ -45,9 +55,17 @@ export function GraphsPage() {
       return
     }
 
+    const deletedGraphId = graphToDelete.id
+    const deletedGraphKey = getGraphDeletionKey(graphToDelete)
     setIsDeletingGraph(true)
-    await graphApi.deleteGraph(graphToDelete.id)
-    setIsDeletingGraph(false)
+
+    try {
+      await graphApi.deleteGraph(deletedGraphId)
+    } finally {
+      setIsDeletingGraph(false)
+    }
+
+    setDeletedGraphKeys((current) => [...current, deletedGraphKey])
     setSelectedGraphId(null)
     setGraphToDelete(null)
     deleteGraphModal.close()
@@ -127,7 +145,7 @@ export function GraphsPage() {
       <Section title="Available graphs">
         <GraphList
           error={error}
-          graphs={graphs}
+          graphs={visibleGraphs}
           isLoading={isLoading}
           onDelete={openDeleteGraph}
           onSelect={(graph) => setSelectedGraphId(graph.id)}
@@ -145,6 +163,17 @@ export function GraphsPage() {
           onEditNode={openNodeEditor}
         />
       </Section>
+      {selectedGraph ? (
+        <Section
+          description="Live topology loaded from the NexoraDB graph snapshot."
+          title="Graph visualization"
+        >
+          <GraphVisualization
+            graphId={selectedGraph.id}
+            refreshKey={selectedGraph.stats?.version ?? 0}
+          />
+        </Section>
+      ) : null}
       <Section
         description="Select a graph above, then run built-in graph algorithms through the NexoraQL parser."
         title="Graph algorithms"
