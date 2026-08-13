@@ -12,6 +12,9 @@ interface GraphCardProps {
 }
 
 export function GraphCard({ graph, isSelected, onDelete, onSelect }: GraphCardProps) {
+  const nodeCount = graph.stats?.activeNodes ?? graph.nodes.length
+  const edgeCount = graph.stats?.activeEdges ?? graph.edges.length
+
   return (
     <Card className={isSelected ? 'border-green-300 bg-green-50/40' : undefined}>
       <div className="space-y-4">
@@ -22,7 +25,7 @@ export function GraphCard({ graph, isSelected, onDelete, onSelect }: GraphCardPr
               {graph.description || 'No description'}
             </p>
           </div>
-          <Badge>{graph.nodes.length} nodes</Badge>
+          <Badge>{nodeCount} nodes · {edgeCount} edges</Badge>
         </div>
         <p className="text-xs text-slate-500">Updated {formatDate(graph.updatedAt)}</p>
         <div className="flex gap-2">

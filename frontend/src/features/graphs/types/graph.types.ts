@@ -21,6 +21,11 @@ export interface Graph {
   edges: GraphEdge[]
   createdAt: string
   updatedAt: string
+  stats?: {
+    activeNodes: number
+    activeEdges: number
+    version: number
+  }
 }
 
 export interface CreateGraphInput {

@@ -13,11 +13,16 @@ import { Button } from '../shared/components/ui/Button'
 import { useDisclosure } from '../shared/hooks/useDisclosure'
 import type { JsonObject } from '../shared/utils/json'
 
+function getDocumentDeletionKey(document: DocumentRecord) {
+  return JSON.stringify([document.collectionName, document.id, document.createdAt, document.updatedAt])
+}
+
 export function DocumentsPage() {
   const deleteModal = useDisclosure()
   const editorModal = useDisclosure()
   const { data: collections } = useCollections()
   const [documentToDelete, setDocumentToDelete] = useState<DocumentRecord | null>(null)
+  const [deletedDocumentKeys, setDeletedDocumentKeys] = useState<string[]>([])
   const [documentToEdit, setDocumentToEdit] = useState<DocumentRecord | null>(null)
   const [selectedCollectionName, setSelectedCollectionName] = useState('')
   const activeCollectionName = useMemo(
@@ -25,6 +30,10 @@ export function DocumentsPage() {
     [collections, selectedCollectionName],
   )
   const { data: documents, error, isLoading, refetch } = useDocuments(activeCollectionName)
+  const visibleDocuments = useMemo(
+    () => documents?.filter((document) => !deletedDocumentKeys.includes(getDocumentDeletionKey(document))),
+    [deletedDocumentKeys, documents],
+  )
 
   useEffect(() => {
     if (!selectedCollectionName && collections?.length) {
@@ -63,7 +72,10 @@ export function DocumentsPage() {
       return
     }
 
-    await documentApi.deleteDocument(activeCollectionName, documentToDelete.id)
+    const deletedDocumentId = documentToDelete.id
+    const deletedDocumentKey = getDocumentDeletionKey(documentToDelete)
+    await documentApi.deleteDocument(activeCollectionName, deletedDocumentId)
+    setDeletedDocumentKeys((current) => [...current, deletedDocumentKey])
     deleteModal.close()
     setDocumentToDelete(null)
     await refetch()
@@ -95,7 +107,7 @@ export function DocumentsPage() {
         >
           <DocumentList
             collectionName={activeCollectionName}
-            documents={documents}
+            documents={visibleDocuments}
             error={error}
             isLoading={isLoading}
             onDelete={openDeleteDocument}
