@@ -69,7 +69,7 @@ jobs:
       - name: Repair and validate wheel
         run: |
           mkdir -p wheelhouse
-          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name "nexoradb-*.whl" -print)
+          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name "*.whl" -print)
           if [ "${#wheels[@]}" -ne 1 ]; then
             echo "Expected exactly one NexoraDB wheel, found ${#wheels[@]}" >&2
             find . -maxdepth 3 -type f -name "*.whl" -print >&2
@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/nexoradb/
+      url: https://pypi.org/project/nexoradatabase/
     permissions:
       id-token: write
 
