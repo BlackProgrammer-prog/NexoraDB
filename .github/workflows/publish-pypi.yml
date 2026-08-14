@@ -62,7 +62,7 @@ jobs:
       - name: Build wheel
         run: |
           python -m pip install --upgrade build setuptools wheel twine auditwheel
-          python -m build --wheel NexoraDB
+          python -m build --wheel --outdir NexoraDB/dist NexoraDB
 
       - name: Repair and validate wheel
         run: |
