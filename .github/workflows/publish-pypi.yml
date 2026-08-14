@@ -62,15 +62,23 @@ jobs:
       - name: Build wheel
         run: |
           python -m pip install --upgrade build setuptools wheel twine auditwheel
-          python -m build --wheel --outdir NexoraDB/dist NexoraDB
+          mkdir -p dist
+          python -m build --wheel --outdir "${GITHUB_WORKSPACE}/dist" NexoraDB
+          find dist -maxdepth 1 -type f -name "*.whl" -print
 
       - name: Repair and validate wheel
         run: |
           mkdir -p wheelhouse
+          mapfile -t wheels < <(find dist -maxdepth 1 -type f -name "nexoradb-*.whl" -print)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one NexoraDB wheel, found ${#wheels[@]}" >&2
+            find . -maxdepth 3 -type f -name "*.whl" -print >&2
+            exit 1
+          fi
           python -m auditwheel repair \
             --plat manylinux_2_35_x86_64 \
             --wheel-dir wheelhouse \
-            NexoraDB/dist/nexoradb-*-cp310-cp310-linux_x86_64.whl
+            "${wheels[0]}"
           python -m twine check wheelhouse/*.whl
           python -m auditwheel show wheelhouse/*.whl
           test "$(stat -c %s wheelhouse/*.whl)" -lt 100000000
