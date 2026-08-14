@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name = "nexoradb"
+name = "NexoraDataBase"
 version = "0.1.0"
 description = "NexoraDB hybrid database engine with Python API"
 readme = "README.md"
