@@ -132,6 +132,47 @@ RUN LOCK MutualFriends ON social WITH user1='u1', user2='u2';
 
 ## 📦 Installation
 
+### Install from PyPI (recommended)
+
+The published wheel currently supports **CPython 3.10 on Ubuntu Linux x86_64**.
+Create a virtual environment and install NexoraDB directly from PyPI:
+
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install NexoraDataBase
+```
+
+The PyPI project is named `NexoraDataBase`, while the Python import name is
+`nexoradb`. Verify the installation with:
+
+```bash
+python -c "import nexoradb; print(nexoradb.__version__)"
+```
+
+Then create and query a document database:
+
+```python
+import nexoradb
+
+db = nexoradb.DocEngine("./nexoradb-data")
+db.create_collection("users")
+db.insert_one("users", '{"_id":"u1","name":"Alice","age":28}')
+
+user = db.find_by_id("users", "u1")
+print(user.data)
+```
+
+To upgrade an existing installation:
+
+```bash
+pip install --upgrade NexoraDataBase
+```
+
+The instructions below are only required when building the native engine from
+source.
+
 ### Prerequisites
 
 | Requirement | Version | Notes |
