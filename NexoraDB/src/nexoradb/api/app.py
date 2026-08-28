@@ -58,7 +58,7 @@ def create_api_app(
 
     app = FastAPI(
         title="NexoraDB External API",
-        version="0.1.0",
+        version="0.1.1",
         docs_url="/docs" if api_settings.environment != "production" else None,
         redoc_url=None,
     )
