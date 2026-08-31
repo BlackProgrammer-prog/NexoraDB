@@ -216,9 +216,9 @@ static void testDocEngine(DocEngine& engine) {
     sep("1. Collection Management");
 
     SchemaDefinition users_schema;
-    users_schema.fields.push_back({"username", FieldType::String, true,  true});
-    users_schema.fields.push_back({"email",    FieldType::String, true,  false});
-    users_schema.fields.push_back({"age",      FieldType::Int32,  false, false});
+    users_schema.fields.push_back({"username", FieldType::String, true,  true , std::nullopt});
+    users_schema.fields.push_back({"email",    FieldType::String, true,  false , std::nullopt});
+    users_schema.fields.push_back({"age",      FieldType::Int32,  false, false , std::nullopt});
 
     printResult("CreateCollection users",    engine.CreateCollection("users",  users_schema));
     printResult("CreateCollection posts",    engine.CreateCollection("posts"));
