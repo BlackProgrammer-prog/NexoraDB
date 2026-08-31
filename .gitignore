@@ -28,3 +28,4 @@ NexoraDB/src/nexoradb/native/nexoradb.cpython-310-x86_64-linux-gnu.so
 /dist/
 /wheelhouse/
 /NexoraDB/dist/
+/temp
