@@ -35,6 +35,25 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from nexoradb.api import connect  # noqa: E402
+from nexoradb_admin.config import AdminApiSettings  # noqa: E402
+from nexoradb_admin.native import load_native_module  # noqa: E402
+
+
+def print_native_build_info() -> None:
+    """Print metadata embedded in the local pybind11 C++ extension."""
+    try:
+        native = load_native_module(AdminApiSettings())
+        getter = getattr(native, "build_info", None)
+        if getter is None:
+            print("Native C++ build info: unavailable (extension is older than build_info API)")
+            return
+        info = dict(getter())
+    except Exception as exc:  # noqa: BLE001 - metadata must not abort a benchmark
+        print(f"Native C++ build info: unavailable ({exc})")
+        return
+
+    print("Native C++ build info (pybind11):")
+    print(json.dumps(info, ensure_ascii=False, sort_keys=True, indent=2))
 
 
 @dataclass
@@ -448,6 +467,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    print_native_build_info()
     prefix = f"nxbench_{int(time.time())}_{os.getpid()}"
     names = {key: f"{prefix}_{key}" for key in ("users", "posts", "comments", "follows", "likes")}
     graph = f"{prefix}_social"
