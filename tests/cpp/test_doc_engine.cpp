@@ -209,6 +209,7 @@ namespace {
 
             const auto committed = engine.CommitTransaction(*transaction);
             ASSERT_TRUE(committed.success) << committed.error_msg;
+            EXPECT_FALSE(transaction->IsValid());
         }
 
         EXPECT_TRUE(engine.FindById("users", "committed").success);
@@ -229,6 +230,7 @@ namespace {
                     engine.RollbackTransaction(*transaction);
 
             ASSERT_TRUE(rolled_back.success) << rolled_back.error_msg;
+            EXPECT_FALSE(transaction->IsValid());
         }
 
         EXPECT_FALSE(engine.FindById("users", "rolled_back").success);
