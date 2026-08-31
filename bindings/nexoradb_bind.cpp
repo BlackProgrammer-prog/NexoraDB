@@ -74,6 +74,33 @@ static py::dict result_to_dict(const DBResult& r) {
     return d;
 }
 
+static py::dict build_info_dict() {
+    py::dict info;
+    info["project"]          = "NexoraDB";
+    info["project_version"]  = NEXORA_PROJECT_VERSION;
+    info["build_type"]       = NEXORA_BUILD_TYPE;
+    info["cmake_version"]    = NEXORA_CMAKE_VERSION;
+    info["compiler_id"]      = NEXORA_COMPILER_ID;
+    info["compiler_version"] = NEXORA_COMPILER_VERSION;
+    info["system"]           = NEXORA_SYSTEM_NAME;
+    info["processor"]        = NEXORA_SYSTEM_PROCESSOR;
+    info["cpp_standard"]     = 20;
+    info["rocksdb_version"]  = NEXORA_ROCKSDB_VERSION;
+    info["fmt_version"]      = NEXORA_FMT_VERSION;
+    info["pybind11_version"] = NEXORA_PYBIND11_VERSION;
+    info["python_version"]   = NEXORA_PYTHON_VERSION;
+    info["lto_enabled"]      = static_cast<bool>(NEXORA_LTO_ENABLED);
+    info["asan_enabled"]     = static_cast<bool>(NEXORA_ASAN_ENABLED);
+    info["ubsan_enabled"]    = static_cast<bool>(NEXORA_UBSAN_ENABLED);
+    info["tsan_enabled"]     = static_cast<bool>(NEXORA_TSAN_ENABLED);
+#ifdef NEXORA_BUILD_GRAPH
+    info["graph_enabled"]    = true;
+#else
+    info["graph_enabled"]    = false;
+#endif
+    return info;
+}
+
 #ifdef NEXORA_BUILD_GRAPH
 static const char* wal_op_to_string(WalOpType op) {
     switch (op) {
@@ -94,6 +121,8 @@ static const char* wal_op_to_string(WalOpType op) {
 // ══════════════════════════════════════════════════════════════
 
 PYBIND11_MODULE(nexoradb, m) {
+    m.def("build_info", &build_info_dict,
+          "Return compiler, dependency, sanitizer and build metadata for this C++ core.");
     m.doc() = "NexoraDB — High-performance Document + Graph Database (C++ core)";
 
 #ifdef NEXORA_BUILD_GRAPH
