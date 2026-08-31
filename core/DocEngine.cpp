@@ -1179,6 +1179,7 @@ namespace nexora {
                 return DBResult::Err("Invalid transaction handle");
             rocksdb::Status s = tx_handle.Get()->Commit();
             ROCKS_CHECK(s, "CommitTransaction");
+            tx_handle.Reset();
             return DBResult::Ok("Transaction committed");
         }
 
@@ -1187,6 +1188,7 @@ namespace nexora {
                 return DBResult::Err("Invalid transaction handle");
             rocksdb::Status s = tx_handle.Get()->Rollback();
             ROCKS_CHECK(s, "RollbackTransaction");
+            tx_handle.Reset();
             return DBResult::Ok("Transaction rolled back");
         }
 

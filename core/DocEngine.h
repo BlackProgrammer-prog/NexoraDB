@@ -250,11 +250,12 @@ namespace nexora {
             TxHandle(TxHandle&&)                 = default;
             TxHandle& operator=(TxHandle&&)      = default;
 
-            rocksdb::Transaction* Get()     const noexcept { return tx_; }
+            rocksdb::Transaction* Get()     const noexcept { return tx_.get(); }
             bool                  IsValid() const noexcept { return tx_ != nullptr; }
+            void                  Reset()         noexcept { tx_.reset(); }
 
         private:
-            rocksdb::Transaction* tx_ = nullptr;
+            std::unique_ptr<rocksdb::Transaction> tx_;
         };
 
 // ══════════════════════════════════════════════════════════════
