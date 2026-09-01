@@ -84,13 +84,14 @@
     },
     {
       "name": "benchmark",
-      "displayName": "Python/pybind11 Benchmark",
-      "description": "Release build of the Python extension for repeatable benchmarks",
+      "displayName": "Native C++ Benchmark",
+      "description": "Portable Release build with LTO for native benchmarks",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build/benchmark",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "NEXORA_BUILD_PYTHON": "ON",
+        "NEXORA_BUILD_PYTHON": "OFF",
+        "NEXORA_BUILD_BENCHMARKS": "ON",
         "NEXORA_DEBUG_LOG": "OFF",
         "NEXORA_ENABLE_LTO": "ON",
         "BUILD_TESTING": "OFF"
@@ -126,7 +127,7 @@
       "name": "benchmark",
       "configurePreset": "benchmark",
       "targets": [
-        "nexoradb_py"
+        "nexora_benchmark"
       ]
     }
   ],

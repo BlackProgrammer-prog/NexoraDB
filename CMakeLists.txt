@@ -26,6 +26,7 @@ option(NEXORA_ENABLE_ASAN   "Enable AddressSanitizer"    OFF)
 option(NEXORA_ENABLE_UBSAN  "Enable UndefinedSanitizer"  OFF)
 option(NEXORA_ENABLE_TSAN   "Enable ThreadSanitizer"     OFF)
 option(NEXORA_ENABLE_LTO    "Enable LTO in optimized builds" OFF)
+option(NEXORA_BUILD_BENCHMARKS "Build native C++ benchmarks" OFF)
 
 # CMake supplies the optimization/debug flags for each configuration. Choose a
 # predictable default only for single-config generators such as Make and Ninja.
@@ -251,6 +252,10 @@ if(BUILD_TESTING)
     add_subdirectory(tests/cpp)
 endif ()
 
+if (NEXORA_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks/cpp)
+endif ()
+
 # ─────────────────────────────────────────────────────────────
 # §9  Build summary
 # ─────────────────────────────────────────────────────────────
@@ -267,6 +272,7 @@ message(STATUS "  ASAN           : ${NEXORA_ENABLE_ASAN}")
 message(STATUS "  UBSAN          : ${NEXORA_ENABLE_UBSAN}")
 message(STATUS "  TSAN           : ${NEXORA_ENABLE_TSAN}")
 message(STATUS "  LTO            : ${NEXORA_ENABLE_LTO}")
+message(STATUS "  C++ Benchmarks : ${NEXORA_BUILD_BENCHMARKS}")
 message(STATUS "")
 message(STATUS "  nexora_query → nexora_core → nexora_graph")
 message(STATUS "                                    ↓")
