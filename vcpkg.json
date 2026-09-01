@@ -15,6 +15,9 @@
     },
     {
       "name": "gtest"
+    },
+    {
+      "name": "benchmark"
     }
   ],
   "builtin-baseline": "7476f0d4e77d3333fbb249657df8251c28c4faae",
