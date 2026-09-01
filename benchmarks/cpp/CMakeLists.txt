@@ -4,7 +4,7 @@ add_executable(nexora_benchmark
         nexora_benchmark.cpp
 )
 
-target_link_directories(nexora_benchmark
+target_include_directories(nexora_benchmark
         PRIVATE
         ${PROJECT_SOURCE_DIR}
 )
@@ -13,7 +13,7 @@ target_link_libraries(nexora_benchmark
         PRIVATE
         benchmark::benchmark
         nexora_core
-        Thread::Thread
+        Threads::Threads
 )
 
 if (NEXORA_BUILD_GRAPH)
