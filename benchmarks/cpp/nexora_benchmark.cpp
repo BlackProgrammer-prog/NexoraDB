@@ -14,11 +14,17 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+#include <algorithm>
+#include <cstdint>
+#include <fstream>
+#include <limits>
+#include <system_error>
+
+
 
 // CMake supplies these values for the nexora_benchmark target.  The fallbacks
 // keep standalone IDE/indexer parsing valid without overriding configured
@@ -181,6 +187,39 @@ namespace {
         std::unique_ptr<DocEngine> engine_;
     };
 
+    double percentile(const std::vector<double>& values, double  quantile) {
+
+        if(values.empty()){
+            return 0.0;
+        }
+
+        std::vector<double> sortedValues = values;
+        std::sort(sortedValues.begin(), sortedValues.end());
+
+        if (sortedValues.size() == 1) {
+            return sortedValues.front();
+        }
+
+        const double  position = quantile * static_cast<double>(sortedValues.size() - 1);
+        const auto  lowerIndex = static_cast<size_t>(position);
+        const auto upperIndex = std::min(lowerIndex + 1 , sortedValues.size() - 1);
+        const double fraction = position - static_cast<double>(lowerIndex);
+        return sortedValues[lowerIndex] + ((sortedValues[upperIndex] - sortedValues[lowerIndex]) * fraction);
+    }
+
+    double percentile50(const std::vector<double>& values){
+        return percentile(values,50);
+    }
+
+    double percentile95(const std::vector<double>& values){
+        return percentile(values,95);
+    }
+
+    double percentile99(const std::vector<double>& values){
+        return percentile(values,99);
+    }
+
+
     void standardDatasetSizes(benchmark::internal::Benchmark* benchmark) {
         benchmark
                 ->ArgName("documents")
@@ -192,6 +231,20 @@ namespace {
         if (enable10m != nullptr && std::string(enable10m) == "1") {
             benchmark->Arg(10'000'000);
         }
+
+        benchmark
+                ->ComputeStatistics(
+                        "p50",
+                        percentile50,
+                        benchmark::StatisticUnit::kTime)
+                ->ComputeStatistics(
+                        "p95",
+                        percentile95,
+                        benchmark::StatisticUnit::kTime)
+                ->ComputeStatistics(
+                        "p99",
+                        percentile99,
+                        benchmark::StatisticUnit::kTime);
     }
 
 // ---------------------------------------------------------
