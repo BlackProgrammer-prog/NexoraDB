@@ -59,6 +59,8 @@ namespace {
 
     using nexora::core::DBResult;
     using nexora::core::DocEngine;
+    using nexora::core::IndexDefinition;
+    using nexora::core::IndexType;
     using nexora::query::Condition;
     using nexora::query::Op;
     using nexora::query::UpdateSpec;
@@ -165,6 +167,17 @@ namespace {
             return path_;
         }
 
+        void createGroupIndex() {
+            IndexDefinition definition;
+            definition.index_name = "idx_benchmark_group";
+            definition.fields = {"group"};
+            definition.type = IndexType::SingleField;
+            const auto result = engine_->CreateIndex("documents", definition);
+            if (!result.success) {
+                throw std::runtime_error(result.error_msg);
+            }
+        }
+
     private:
         void load() {
             std::vector<std::string> batch;
@@ -190,6 +203,17 @@ namespace {
         std::size_t size_;
         std::unique_ptr<DocEngine> engine_;
     };
+
+    std::uint64_t jsonUnsignedMetric(
+            const std::string& json,
+            const std::string& name) {
+        const std::string marker = "\"" + name + "\":";
+        const auto begin = json.find(marker);
+        if (begin == std::string::npos) return 0;
+        const auto value_begin = begin + marker.size();
+        const auto value_end = json.find_first_not_of("0123456789", value_begin);
+        return std::stoull(json.substr(value_begin, value_end - value_begin));
+    }
 
     double percentile(const std::vector<double>& values, double  quantile) {
 
@@ -371,9 +395,16 @@ namespace {
 // Document: FindMany equality
 // ---------------------------------------------------------
 
-    void BM_DocumentFindManyEquality(benchmark::State& state) {
+    void runDocumentFindManyEquality(
+            benchmark::State& state,
+            const bool force_full_scan) {
         const auto size = static_cast<std::size_t>(state.range(0));
-        DocumentDataset dataset("find_equality", size, true);
+        DocumentDataset dataset(
+                force_full_scan ? "find_equality_reference"
+                                : "find_equality_indexed",
+                size,
+                true);
+        dataset.createGroupIndex();
 
         const auto condition = Condition::Leaf(
                 "group",
@@ -384,8 +415,10 @@ namespace {
 
         for (auto _ : state) {
             const auto begin = Clock::now();
-            const auto result =
-                    dataset.engine().FindMany("documents", condition);
+            const auto result = force_full_scan
+                    ? dataset.engine().FindManyFullScanForTesting(
+                            "documents", condition)
+                    : dataset.engine().FindMany("documents", condition);
             const auto end = Clock::now();
 
             if (!result.success) {
@@ -399,7 +432,26 @@ namespace {
         }
 
         state.SetItemsProcessed(state.iterations());
+        const auto plan = dataset.engine().ExplainPlan(
+                "documents", condition, force_full_scan);
+        if (plan.success) {
+            state.counters["scanned_documents"] =
+                    static_cast<double>(jsonUnsignedMetric(
+                            plan.data, "scanned_documents"));
+            state.counters["scanned_index_entries"] =
+                    static_cast<double>(jsonUnsignedMetric(
+                            plan.data, "scanned_index_entries"));
+        }
         recordBenchmarkMetrics(state, dataset.path());
+    }
+
+    void BM_DocumentFindManyEqualityIndexed(benchmark::State& state) {
+        runDocumentFindManyEquality(state, false);
+    }
+
+    void BM_DocumentFindManyEqualityFullScanReference(
+            benchmark::State& state) {
+        runDocumentFindManyEquality(state, true);
     }
 
 // ---------------------------------------------------------
@@ -960,7 +1012,11 @@ namespace {
             ->Apply(standardDatasetSizes)
             ->UseManualTime();
 
-    BENCHMARK(BM_DocumentFindManyEquality)
+    BENCHMARK(BM_DocumentFindManyEqualityIndexed)
+            ->Apply(standardDatasetSizes)
+            ->UseManualTime();
+
+    BENCHMARK(BM_DocumentFindManyEqualityFullScanReference)
             ->Apply(standardDatasetSizes)
             ->UseManualTime();
 
