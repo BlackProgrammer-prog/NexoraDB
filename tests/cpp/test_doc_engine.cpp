@@ -174,18 +174,25 @@ namespace {
         EXPECT_NE(first.data.find("\"_id\":\"b\""), std::string::npos);
         EXPECT_FALSE(first.continuation_token.empty());
 
+        // This key sorts before the cursor, but the active snapshot must also
+        // keep it out of every later page.
+        ASSERT_TRUE(engine.InsertOne(
+                "items", R"({"_id":"aa","value":99})").success);
+
         const auto second = engine.FindPage(
                 "items", Condition{}, 2, first.continuation_token);
         ASSERT_TRUE(second.success) << second.error_msg;
         EXPECT_EQ(second.data.find("\"_id\":\"b\""), std::string::npos);
         EXPECT_NE(second.data.find("\"_id\":\"c\""), std::string::npos);
         EXPECT_NE(second.data.find("\"_id\":\"d\""), std::string::npos);
+        EXPECT_EQ(second.data.find("\"_id\":\"aa\""), std::string::npos);
         EXPECT_FALSE(second.continuation_token.empty());
 
         const auto third = engine.FindPage(
                 "items", Condition{}, 2, second.continuation_token);
         ASSERT_TRUE(third.success) << third.error_msg;
         EXPECT_NE(third.data.find("\"_id\":\"e\""), std::string::npos);
+        EXPECT_EQ(third.data.find("\"_id\":\"aa\""), std::string::npos);
         EXPECT_TRUE(third.continuation_token.empty());
 
         EXPECT_FALSE(engine.FindPage("items", Condition{}, 2, "bad").success);
@@ -1085,6 +1092,111 @@ namespace {
                   nexora::core::IndexState::Ready);
         EXPECT_FALSE(engine.InsertOne(
                 "items", R"({"_id":"duplicate","email":"during@example.com"})").success);
+    }
+
+    TEST(DocEngineQueryPlanner, EqualityMatchesReferenceAndAvoidsFullScan) {
+        TestTempDir temp("nexora_doc_query_planner_equality");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        std::vector<std::string> documents;
+        for (int i = 0; i < 200; ++i)
+            documents.push_back("{\"_id\":\"id_" + std::to_string(i) +
+                                "\",\"group\":\"g" + std::to_string(i % 20) +
+                                "\",\"age\":" + std::to_string(i) + "}");
+        ASSERT_TRUE(engine.InsertMany("items", documents).success);
+        IndexDefinition index;
+        index.index_name = "idx_group";
+        index.fields = {"group"};
+        ASSERT_TRUE(engine.CreateIndex("items", index).success);
+
+        const Condition condition = Condition::Leaf("group", Op::EQ, "g7");
+        const auto indexed = engine.FindMany("items", condition);
+        const auto reference = engine.FindManyFullScanForTesting("items", condition);
+        ASSERT_TRUE(indexed.success) << indexed.error_msg;
+        ASSERT_TRUE(reference.success) << reference.error_msg;
+        EXPECT_EQ(indexed.data, reference.data);
+
+        const auto explain = engine.ExplainPlan("items", condition);
+        ASSERT_TRUE(explain.success) << explain.error_msg;
+        EXPECT_NE(explain.data.find("\"scan_type\":\"index_equality\""),
+                  std::string::npos);
+        EXPECT_NE(explain.data.find("\"index\":\"idx_group\""),
+                  std::string::npos);
+        EXPECT_NE(explain.data.find("\"scanned_documents\":10"),
+                  std::string::npos);
+    }
+
+    TEST(DocEngineQueryPlanner, SelectsCompoundOrderAndRange) {
+        TestTempDir temp("nexora_doc_query_planner_compound");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        std::vector<std::string> documents;
+        for (int i = 0; i < 100; ++i)
+            documents.push_back("{\"_id\":\"id_" + std::to_string(i) +
+                                "\",\"tenant\":\"t" + std::to_string(i % 2) +
+                                "\",\"age\":" + std::to_string(i) + "}");
+        ASSERT_TRUE(engine.InsertMany("items", documents).success);
+        IndexDefinition wrong_order;
+        wrong_order.index_name = "idx_age_tenant";
+        wrong_order.fields = {"age", "tenant"};
+        wrong_order.type = IndexType::Compound;
+        ASSERT_TRUE(engine.CreateIndex("items", wrong_order).success);
+        IndexDefinition correct_order;
+        correct_order.index_name = "idx_tenant_age";
+        correct_order.fields = {"tenant", "age"};
+        correct_order.type = IndexType::Compound;
+        ASSERT_TRUE(engine.CreateIndex("items", correct_order).success);
+
+        const Condition condition = Condition::And({
+                Condition::Leaf("tenant", Op::EQ, "t1"),
+                Condition::Leaf("age", Op::GTE, "50", ValueType::Int64)});
+        const auto explain = engine.ExplainPlan("items", condition);
+        ASSERT_TRUE(explain.success) << explain.error_msg;
+        EXPECT_NE(explain.data.find("\"index\":\"idx_tenant_age\""),
+                  std::string::npos);
+        EXPECT_NE(explain.data.find("\"scan_type\":\"index_range\""),
+                  std::string::npos);
+        EXPECT_EQ(engine.Count("items", condition).data, "25");
+        EXPECT_EQ(engine.Exists("items", condition).data, "true");
+    }
+
+    TEST(DocEngineQueryPlanner, DroppingOneSameFieldIndexKeepsOtherUsable) {
+        TestTempDir temp("nexora_doc_drop_isolated_index");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "items", R"({"_id":"one","tag":"a:b:✓"})").success);
+        IndexDefinition first;
+        first.index_name = "idx_tag_first";
+        first.fields = {"tag"};
+        ASSERT_TRUE(engine.CreateIndex("items", first).success);
+        IndexDefinition second = first;
+        second.index_name = "idx_tag_second";
+        ASSERT_TRUE(engine.CreateIndex("items", second).success);
+        ASSERT_TRUE(engine.DropIndex("items", "idx_tag_first").success);
+
+        const Condition condition = Condition::Leaf("tag", Op::EQ, "a:b:✓");
+        const auto explain = engine.ExplainPlan("items", condition);
+        ASSERT_TRUE(explain.success) << explain.error_msg;
+        EXPECT_NE(explain.data.find("idx_tag_second"), std::string::npos);
+        EXPECT_NE(engine.FindMany("items", condition).data.find("\"_id\":\"one\""),
+                  std::string::npos);
+    }
+
+    TEST(IndexCodecV2, HandlesSeparatorUnicodeNullAndBinarySafely) {
+        using nexora::core::indexv2::EncodeValues;
+        using nexora::query::FieldValue;
+        const auto colon = EncodeValues({FieldValue{"a:b", ValueType::String, true}});
+        const auto unicode = EncodeValues({FieldValue{"سلام✓", ValueType::String, true}});
+        const auto binary = EncodeValues({FieldValue{
+                std::string("a\0:b", 4), ValueType::String, true}});
+        const auto null_value = EncodeValues({FieldValue{"null", ValueType::Null, true}});
+        const auto missing = EncodeValues({FieldValue{"", ValueType::Null, false}});
+        ASSERT_TRUE(colon && unicode && binary);
+        EXPECT_NE(*colon, *unicode);
+        EXPECT_NE(*colon, *binary);
+        EXPECT_FALSE(null_value.has_value());
+        EXPECT_FALSE(missing.has_value());
     }
 
 } // namespace
