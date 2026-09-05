@@ -21,6 +21,7 @@ namespace {
     using nexora::core::ForeignKeyDefinition;
     using nexora::core::IndexDefinition;
     using nexora::core::IndexType;
+    using nexora::core::MutationFaultPoint;
     using nexora::core::SchemaDefinition;
     using nexora::core::SchemaField;
     using nexora::core::TransactionSettings;
@@ -197,7 +198,7 @@ namespace {
 
         const auto duplicate = engine.InsertOne(
                 "users",
-                R"({"_id":"u1","email":"old@example.com","name":"Ali"})"
+                R"({"_id":"u1","email":"ghost@example.com","name":"Ali"})"
         );
         EXPECT_FALSE(duplicate.success);
         EXPECT_NE(duplicate.error_msg.find("Duplicate document _id"),
@@ -208,6 +209,12 @@ namespace {
         ASSERT_TRUE(count_after_duplicate.success)
                 << count_after_duplicate.error_msg;
         EXPECT_EQ(count_after_duplicate.data, "1");
+
+        // A rejected duplicate must not leave an index entry for its payload.
+        EXPECT_FALSE(engine.InsertOne(
+                "posts",
+                R"({"_id":"p_ghost","user_email":"ghost@example.com"})"
+        ).success);
 
         UpdateSpec update;
         update.Set("email", "new@example.com");
@@ -247,6 +254,64 @@ namespace {
         ASSERT_TRUE(final_count.success)
                 << final_count.error_msg;
         EXPECT_EQ(final_count.data, "0");
+    }
+
+    TEST(DocEngineMutation,
+         InjectedFaultsNeverExposePartialDocumentIndexOrCounter) {
+        TestTempDir temp("nexora_doc_fault_injection");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("users").success);
+        ASSERT_TRUE(engine.CreateCollection("posts").success);
+
+        IndexDefinition index;
+        index.index_name = "idx_users_email";
+        index.fields = {"email"};
+        index.type = IndexType::SingleField;
+        ASSERT_TRUE(engine.CreateIndex("users", index).success);
+
+        ForeignKeyDefinition foreign_key;
+        foreign_key.fk_name = "fk_posts_user_email";
+        foreign_key.local_field = "user_email";
+        foreign_key.ref_collection = "users";
+        foreign_key.ref_field = "email";
+        ASSERT_TRUE(engine.AddForeignKey("posts", foreign_key).success);
+
+        const std::vector<MutationFaultPoint> fault_points = {
+                MutationFaultPoint::AfterDocument,
+                MutationFaultPoint::AfterIndexes,
+                MutationFaultPoint::AfterCounter
+        };
+
+        for (std::size_t index_value = 0;
+             index_value < fault_points.size();
+             ++index_value) {
+            const std::string id = "fault_" + std::to_string(index_value);
+            const std::string email = id + "@example.com";
+            const std::string document =
+                    "{\"_id\":\"" + id +
+                    "\",\"email\":\"" + email + "\"}";
+
+            engine.SetMutationFaultPointForTesting(
+                    fault_points[index_value]);
+            const auto failed = engine.InsertOne("users", document);
+            EXPECT_FALSE(failed.success);
+            EXPECT_NE(failed.error_msg.find("Injected mutation fault"),
+                      std::string::npos);
+            EXPECT_FALSE(engine.FindById("users", id).success);
+
+            const auto count = engine.Count("users", Condition{});
+            ASSERT_TRUE(count.success) << count.error_msg;
+            EXPECT_EQ(count.data, "0");
+
+            EXPECT_FALSE(engine.InsertOne(
+                    "posts",
+                    "{\"_id\":\"post_" + std::to_string(index_value) +
+                    "\",\"user_email\":\"" + email + "\"}").success);
+
+            // The one-shot fault is consumed; the same ID must now be usable.
+            ASSERT_TRUE(engine.InsertOne("users", document).success);
+            ASSERT_TRUE(engine.DeleteById("users", id).success);
+        }
     }
 
     TEST(DocEngineBulkMutation,
@@ -659,6 +724,81 @@ namespace {
         ASSERT_TRUE(stored.success) << stored.error_msg;
         EXPECT_NE(stored.data.find("\"owner\":\"original\""),
                   std::string::npos);
+    }
+
+    TEST(DocEngineTransaction,
+         NormalAndTransactionalValidationHaveEquivalentBehavior) {
+        TestTempDir temp("nexora_doc_validation_parity");
+        DocEngine engine((temp.path() / "db").string());
+
+        SchemaDefinition schema;
+        schema.fields.push_back(SchemaField{
+                .name = "name",
+                .type = FieldType::String,
+                .required = true,
+                .unique = false,
+                .default_val = std::nullopt
+        });
+        ASSERT_TRUE(engine.CreateCollection("users", schema).success);
+        ASSERT_TRUE(engine.CreateCollection("posts").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "users",
+                R"({"_id":"u1","name":"Ali"})").success);
+
+        ForeignKeyDefinition foreign_key;
+        foreign_key.fk_name = "fk_posts_user";
+        foreign_key.local_field = "user_id";
+        foreign_key.ref_collection = "users";
+        foreign_key.ref_field = "_id";
+        ASSERT_TRUE(engine.AddForeignKey("posts", foreign_key).success);
+
+        auto transaction = engine.BeginTransaction();
+        ASSERT_NE(transaction, nullptr);
+
+        const auto normal_schema = engine.InsertOne(
+                "users",
+                R"({"_id":"normal_invalid"})");
+        const auto tx_schema = engine.InsertOneTx(
+                *transaction,
+                "users",
+                R"({"_id":"tx_invalid"})");
+        EXPECT_FALSE(normal_schema.success);
+        EXPECT_FALSE(tx_schema.success);
+        EXPECT_NE(normal_schema.error_msg.find("Schema validation failed"),
+                  std::string::npos);
+        EXPECT_NE(tx_schema.error_msg.find("Schema validation failed"),
+                  std::string::npos);
+
+        const auto normal_fk = engine.InsertOne(
+                "posts",
+                R"({"_id":"p_normal","user_id":"missing"})");
+        const auto tx_fk = engine.InsertOneTx(
+                *transaction,
+                "posts",
+                R"({"_id":"p_tx","user_id":"missing"})");
+        EXPECT_FALSE(normal_fk.success);
+        EXPECT_FALSE(tx_fk.success);
+        EXPECT_NE(normal_fk.error_msg.find("FK violation"),
+                  std::string::npos);
+        EXPECT_NE(tx_fk.error_msg.find("FK violation"),
+                  std::string::npos);
+
+        UpdateSpec invalid_update;
+        invalid_update.Unset("name");
+        const auto normal_update = engine.UpdateById(
+                "users", "u1", invalid_update);
+        const auto tx_update = engine.UpdateByIdTx(
+                *transaction, "users", "u1", invalid_update);
+        EXPECT_FALSE(normal_update.success);
+        EXPECT_FALSE(tx_update.success);
+        EXPECT_NE(normal_update.error_msg.find("Schema validation failed"),
+                  std::string::npos);
+        EXPECT_NE(tx_update.error_msg.find("Schema validation failed"),
+                  std::string::npos);
+
+        ASSERT_TRUE(engine.RollbackTransaction(*transaction).success);
+        EXPECT_FALSE(engine.FindById("users", "normal_invalid").success);
+        EXPECT_FALSE(engine.FindById("users", "tx_invalid").success);
     }
 
     TEST(DocEngineForeignKey, RejectsNonIndexedReferenceField) {
