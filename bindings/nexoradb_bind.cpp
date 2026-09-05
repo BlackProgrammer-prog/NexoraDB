@@ -693,6 +693,11 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("limit") = 100,
                  py::arg("continuation_token") = "")
 
+            .def("explain_plan", &DocEngine::ExplainPlan,
+                 py::arg("collection"), py::arg("condition"),
+                 py::arg("force_full_scan") = false,
+                 "نمایش scan type، index و تعداد candidateهای بررسی‌شده")
+
                     // ── CRUD: Update ──
             .def("update_by_id",
                  [](DocEngine& e, const std::string& col,
