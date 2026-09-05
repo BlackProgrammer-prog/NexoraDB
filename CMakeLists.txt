@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(NexoraDB VERSION 1.0.0 LANGUAGES CXX)
+project(NexoraDB VERSION 0.2.0 LANGUAGES CXX)
 
 # Generate compile_commands.json where the selected generator supports it.
 if (CMAKE_GENERATOR MATCHES "Ninja")
