@@ -465,6 +465,25 @@ namespace nexora {
             return txn_db_->GetProperty("rocksdb.num-live-versions", &prop);
         }
 
+        void DocEngine::SetMutationFaultPointForTesting(
+                MutationFaultPoint point) noexcept {
+            mutation_fault_point_.store(point, std::memory_order_release);
+        }
+
+        rocksdb::Status DocEngine::InjectMutationFaultIfRequested(
+                MutationFaultPoint point) noexcept {
+            MutationFaultPoint expected = point;
+            if (mutation_fault_point_.compare_exchange_strong(
+                    expected,
+                    MutationFaultPoint::None,
+                    std::memory_order_acq_rel)) {
+                return rocksdb::Status::IOError(
+                        "Injected mutation fault at stage " +
+                        std::to_string(static_cast<unsigned>(point)));
+            }
+            return rocksdb::Status::OK();
+        }
+
 // ══════════════════════════════════════════════════════════════
 // §5  مدیریت Collection و Schema
 // ══════════════════════════════════════════════════════════════
@@ -488,12 +507,11 @@ namespace nexora {
                 return DBResult::Err("RocksDB error: " + s.ToString());
 
             SchemaDefinition eff_schema = schema.value_or(SchemaDefinition{});
-            s = txn_db_->Put(write_options_, meta_key, SerializeSchema(eff_schema));
-            ROCKS_CHECK(s, "CreateCollection metadata");
-
-            s = txn_db_->Put(write_options_,
-                             std::string(keys::kSeq) + collection_name, "0");
-            ROCKS_CHECK(s, "CreateCollection seq");
+            rocksdb::WriteBatch batch;
+            batch.Put(meta_key, SerializeSchema(eff_schema));
+            batch.Put(std::string(keys::kSeq) + collection_name, "0");
+            s = txn_db_->Write(write_options_, &batch);
+            ROCKS_CHECK(s, "CreateCollection metadata/counter");
 
             NX_LOG("Collection created: " << collection_name);
             return DBResult::Ok("Collection '" + collection_name + "' created");
@@ -532,6 +550,9 @@ namespace nexora {
             for (it->Seek(meta_fk_prefix);
                  it->Valid() && it->key().starts_with(meta_fk_prefix); it->Next())
                 batch.Delete(it->key());
+
+            if (!it->status().ok())
+                return RocksFailure("DropCollection scan", it->status());
 
             batch.Delete(MakeMetaKey(keys::kMetaCol, collection_name));
             batch.Delete(std::string(keys::kSeq) + collection_name);
@@ -638,6 +659,8 @@ namespace nexora {
                 for (it->Seek(ip); it->Valid() && it->key().starts_with(ip); it->Next())
                     batch.Delete(it->key());
             }
+            if (!it->status().ok())
+                return RocksFailure("DropIndex scan", it->status());
             batch.Delete(meta_key);
 
             s = txn_db_->Write(write_options_, &batch);
@@ -973,9 +996,17 @@ namespace nexora {
                     return status;
                 }
 
-                return PutIndexEntries(
+                status = engine_.InjectMutationFaultIfRequested(
+                        MutationFaultPoint::AfterDocument);
+                if (!status.ok()) return status;
+
+                status = PutIndexEntries(
                         document_id,
                         bson_document);
+                if (!status.ok()) return status;
+
+                return engine_.InjectMutationFaultIfRequested(
+                        MutationFaultPoint::AfterIndexes);
             }
 
             rocksdb::Status ReplaceDocument(
@@ -1075,9 +1106,13 @@ namespace nexora {
                     next_value = 0;
                 }
 
-                return transaction_->Put(
+                status = transaction_->Put(
                         counter_key,
                         std::to_string(next_value));
+                if (!status.ok()) return status;
+
+                return engine_.InjectMutationFaultIfRequested(
+                        MutationFaultPoint::AfterCounter);
             }
 
             std::unique_ptr<rocksdb::Iterator> NewIterator(
@@ -2770,21 +2805,26 @@ namespace nexora {
             if (username == "root" && role != "admin")
                 return DBResult::Err("root user must be admin");
 
-            const std::string doc_key = MakeDocKey(keys::kInternalUsers, username);
+            const std::vector<IndexDefinition> indexes;
+            MutationBuilder mutation(*this, keys::kInternalUsers, indexes);
+            if (!mutation.IsValid())
+                return DBResult::Err(
+                        "CreateInternalUser: unable to start transaction");
+
             std::string existing;
-            rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &existing);
+            rocksdb::Status s = mutation.ReadDocumentForUpdate(
+                    username,
+                    existing);
             if (s.ok()) return DBResult::Err("internal user already exists");
             if (!s.IsNotFound())
-                return DBResult::Err("[RocksDB] CreateInternalUser read: " + s.ToString());
+                return RocksFailure("CreateInternalUser read", s);
 
-            s = txn_db_->Put(write_options_, doc_key, user_json);
-            ROCKS_CHECK(s, "CreateInternalUser");
-
-            const std::string seq_key = std::string(keys::kSeq) + keys::kInternalUsers;
-            std::string seq_val;
-            txn_db_->Get(read_options_, seq_key, &seq_val);
-            int64_t cnt = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
-            txn_db_->Put(write_options_, seq_key, std::to_string(cnt));
+            s = mutation.PutDocument(username, user_json);
+            if (!s.ok()) return RocksFailure("CreateInternalUser write", s);
+            s = mutation.AdjustCounter(1);
+            if (!s.ok()) return RocksFailure("CreateInternalUser counter", s);
+            s = mutation.Commit();
+            if (!s.ok()) return RocksFailure("CreateInternalUser commit", s);
 
             return DBResult::Ok(username);
         }
@@ -2816,14 +2856,22 @@ namespace nexora {
             if (username == "root" && role != "admin")
                 return DBResult::Err("root user must be admin");
 
-            const std::string doc_key = MakeDocKey(keys::kInternalUsers, username);
+            const std::vector<IndexDefinition> indexes;
+            MutationBuilder mutation(*this, keys::kInternalUsers, indexes);
+            if (!mutation.IsValid())
+                return DBResult::Err(
+                        "UpdateInternalUser: unable to start transaction");
             std::string existing;
-            rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &existing);
+            rocksdb::Status s = mutation.ReadDocumentForUpdate(
+                    username,
+                    existing);
             if (s.IsNotFound()) return DBResult::Err("internal user not found");
-            ROCKS_CHECK(s, "UpdateInternalUser read");
+            if (!s.ok()) return RocksFailure("UpdateInternalUser read", s);
 
-            s = txn_db_->Put(write_options_, doc_key, user_json);
-            ROCKS_CHECK(s, "UpdateInternalUser write");
+            s = mutation.ReplaceDocument(username, existing, user_json);
+            if (!s.ok()) return RocksFailure("UpdateInternalUser write", s);
+            s = mutation.Commit();
+            if (!s.ok()) return RocksFailure("UpdateInternalUser commit", s);
             return DBResult::Ok("1");
         }
 
@@ -2831,19 +2879,27 @@ namespace nexora {
             if (username.empty()) return DBResult::Err("username is required");
             if (username == "root") return DBResult::Err("cannot delete root user");
 
-            const std::string doc_key = MakeDocKey(keys::kInternalUsers, username);
+            const std::vector<IndexDefinition> indexes;
+            MutationBuilder mutation(*this, keys::kInternalUsers, indexes);
+            if (!mutation.IsValid())
+                return DBResult::Err(
+                        "DeleteInternalUser: unable to start transaction");
             std::string existing;
-            rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &existing);
+            rocksdb::Status s = mutation.ReadDocumentForUpdate(
+                    username,
+                    existing);
             if (s.IsNotFound()) return DBResult::Err("internal user not found");
-            ROCKS_CHECK(s, "DeleteInternalUser read");
+            if (!s.ok()) return RocksFailure("DeleteInternalUser read", s);
 
             nexora::query::UpdateSpec spec;
             spec.Set("status", "deleted");
             spec.TouchDate("updated_at");
             const std::string deleted_json = ApplyUpdate(existing, spec);
 
-            s = txn_db_->Put(write_options_, doc_key, deleted_json);
-            ROCKS_CHECK(s, "DeleteInternalUser write");
+            s = mutation.ReplaceDocument(username, existing, deleted_json);
+            if (!s.ok()) return RocksFailure("DeleteInternalUser write", s);
+            s = mutation.Commit();
+            if (!s.ok()) return RocksFailure("DeleteInternalUser commit", s);
             return DBResult::Ok("1");
         }
 
@@ -2858,22 +2914,28 @@ namespace nexora {
             if (!EnsureInternalCollections())
                 return DBResult::Err("failed to initialize internal collections");
 
-            const std::string key = MakeDocKey(keys::kInternalAppTokens, token_id);
+            const std::vector<IndexDefinition> indexes;
+            MutationBuilder mutation(
+                    *this,
+                    keys::kInternalAppTokens,
+                    indexes);
+            if (!mutation.IsValid())
+                return DBResult::Err(
+                        "CreateInternalAppToken: unable to start transaction");
             std::string existing;
-            rocksdb::Status s = txn_db_->Get(read_options_, key, &existing);
+            rocksdb::Status s = mutation.ReadDocumentForUpdate(
+                    token_id,
+                    existing);
             if (s.ok()) return DBResult::Err("application token already exists");
             if (!s.IsNotFound())
-                return DBResult::Err("[RocksDB] CreateInternalAppToken read: " + s.ToString());
+                return RocksFailure("CreateInternalAppToken read", s);
 
-            rocksdb::WriteBatch batch;
-            batch.Put(key, token_json);
-            const std::string seq_key = std::string(keys::kSeq) + keys::kInternalAppTokens;
-            std::string seq_val;
-            txn_db_->Get(read_options_, seq_key, &seq_val);
-            const int64_t count = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
-            batch.Put(seq_key, std::to_string(count));
-            s = txn_db_->Write(write_options_, &batch);
-            ROCKS_CHECK(s, "CreateInternalAppToken");
+            s = mutation.PutDocument(token_id, token_json);
+            if (!s.ok()) return RocksFailure("CreateInternalAppToken write", s);
+            s = mutation.AdjustCounter(1);
+            if (!s.ok()) return RocksFailure("CreateInternalAppToken counter", s);
+            s = mutation.Commit();
+            if (!s.ok()) return RocksFailure("CreateInternalAppToken commit", s);
             return DBResult::Ok(token_id);
         }
 
@@ -2900,13 +2962,26 @@ namespace nexora {
 
         DBResult DocEngine::DeleteInternalAppToken(const std::string& token_id) {
             if (token_id.empty()) return DBResult::Err("token id is required");
-            const std::string key = MakeDocKey(keys::kInternalAppTokens, token_id);
+            const std::vector<IndexDefinition> indexes;
+            MutationBuilder mutation(
+                    *this,
+                    keys::kInternalAppTokens,
+                    indexes);
+            if (!mutation.IsValid())
+                return DBResult::Err(
+                        "DeleteInternalAppToken: unable to start transaction");
             std::string existing;
-            rocksdb::Status s = txn_db_->Get(read_options_, key, &existing);
+            rocksdb::Status s = mutation.ReadDocumentForUpdate(
+                    token_id,
+                    existing);
             if (s.IsNotFound()) return DBResult::Err("application token not found");
-            ROCKS_CHECK(s, "DeleteInternalAppToken read");
-            s = txn_db_->Delete(write_options_, key);
-            ROCKS_CHECK(s, "DeleteInternalAppToken write");
+            if (!s.ok()) return RocksFailure("DeleteInternalAppToken read", s);
+            s = mutation.DeleteDocument(token_id, existing);
+            if (!s.ok()) return RocksFailure("DeleteInternalAppToken write", s);
+            s = mutation.AdjustCounter(-1);
+            if (!s.ok()) return RocksFailure("DeleteInternalAppToken counter", s);
+            s = mutation.Commit();
+            if (!s.ok()) return RocksFailure("DeleteInternalAppToken commit", s);
             return DBResult::Ok("1");
         }
 

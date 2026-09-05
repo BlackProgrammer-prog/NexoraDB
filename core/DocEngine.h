@@ -56,6 +56,7 @@
 
 // ─── Standard Library ───
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -127,6 +128,13 @@ namespace nexora {
             std::int64_t expiration_ms = 30000;
             bool deadlock_detect = true;
             std::int64_t deadlock_detect_depth = 50;
+        };
+
+        enum class MutationFaultPoint : uint8_t {
+            None = 0,
+            AfterDocument = 1,
+            AfterIndexes = 2,
+            AfterCounter = 3
         };
 
 // ══════════════════════════════════════════════════════════════
@@ -364,6 +372,10 @@ namespace nexora {
              * @return true اگر RocksDB سالم و قابل استفاده باشد
              */
             bool IsHealthy() const noexcept;
+
+            /** Test-only one-shot fault injection for atomicity tests. */
+            void SetMutationFaultPointForTesting(
+                    MutationFaultPoint point) noexcept;
 
             // ──────────────────────────────────────────────────────────
             // 6.2  مدیریت Collection و Schema
@@ -918,6 +930,8 @@ namespace nexora {
             rocksdb::WriteOptions         write_options_;
             rocksdb::ReadOptions          read_options_;
             rocksdb::TransactionOptions   transaction_options_;
+            std::atomic<MutationFaultPoint> mutation_fault_point_{
+                    MutationFaultPoint::None};
 
             struct MutationMetadata {
                 SchemaDefinition schema;
@@ -926,6 +940,9 @@ namespace nexora {
             };
 
             class MutationBuilder;
+
+            rocksdb::Status InjectMutationFaultIfRequested(
+                    MutationFaultPoint point) noexcept;
 
             // ─── متدهای کمکی خصوصی ───
 
