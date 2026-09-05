@@ -61,6 +61,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -208,6 +209,8 @@ namespace nexora {
             std::string              index_name;
             std::vector<std::string> fields;
             IndexType                type = IndexType::SingleField;
+            std::string              index_id;
+            std::uint32_t            format_version = 2;
         };
 
 /**
@@ -275,7 +278,8 @@ namespace nexora {
  */
         class TxHandle {
         public:
-            explicit TxHandle(rocksdb::Transaction* tx) : tx_(tx) {}
+            TxHandle(rocksdb::Transaction* tx, std::shared_mutex& ddl_mutex)
+                    : ddl_guard_(ddl_mutex), tx_(tx) {}
             ~TxHandle() = default;
 
             // non-copyable, movable
@@ -286,9 +290,13 @@ namespace nexora {
 
             rocksdb::Transaction* Get()     const noexcept { return tx_.get(); }
             bool                  IsValid() const noexcept { return tx_ != nullptr; }
-            void                  Reset()         noexcept { tx_.reset(); }
+            void Reset() noexcept {
+                tx_.reset();
+                if (ddl_guard_.owns_lock()) ddl_guard_.unlock();
+            }
 
         private:
+            std::shared_lock<std::shared_mutex> ddl_guard_;
             std::unique_ptr<rocksdb::Transaction> tx_;
         };
 
@@ -456,6 +464,9 @@ namespace nexora {
              */
             DBResult DropIndex(const std::string& collection_name,
                                const std::string& index_name);
+
+            /** Rebuild all indexes and migrate legacy physical keys to v2. */
+            DBResult RebuildIndexes(const std::string& collection_name);
 
             // ──────────────────────────────────────────────────────────
             // 6.4  مدیریت Foreign Key
@@ -930,6 +941,7 @@ namespace nexora {
             rocksdb::WriteOptions         write_options_;
             rocksdb::ReadOptions          read_options_;
             rocksdb::TransactionOptions   transaction_options_;
+            mutable std::shared_mutex index_ddl_mutex_;
             std::atomic<MutationFaultPoint> mutation_fault_point_{
                     MutationFaultPoint::None};
 
