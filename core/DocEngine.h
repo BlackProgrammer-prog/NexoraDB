@@ -57,8 +57,10 @@
 // ─── Standard Library ───
 #include <cstdint>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <shared_mutex>
@@ -608,6 +610,17 @@ namespace nexora {
                               uint32_t                        limit = 0,
                               uint32_t                        skip  = 0);
 
+            DBResult ExplainPlan(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    bool force_full_scan = false);
+
+            DBResult FindManyFullScanForTesting(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    std::uint32_t limit = 0,
+                    std::uint32_t skip = 0);
+
             PageResult FindPage(
                     const std::string& collection_name,
                     const nexora::query::Condition& condition,
@@ -974,6 +987,15 @@ namespace nexora {
                     MutationFaultPoint::None};
             std::atomic<std::uint32_t> pause_index_build_chunks_{0};
 
+            struct PageSession {
+                const rocksdb::Snapshot* snapshot = nullptr;
+                std::string collection;
+                nexora::query::Condition condition;
+                std::chrono::steady_clock::time_point expires_at;
+            };
+            std::mutex page_sessions_mutex_;
+            std::unordered_map<std::string, PageSession> page_sessions_;
+
             struct MutationMetadata {
                 SchemaDefinition schema;
                 std::vector<ForeignKeyDefinition> foreign_keys;
@@ -981,6 +1003,22 @@ namespace nexora {
             };
 
             class MutationBuilder;
+
+            struct QueryExecution {
+                DBResult result;
+                std::string index_name;
+                std::string scan_type = "full_scan";
+                std::uint64_t scanned_index_entries = 0;
+                std::uint64_t scanned_documents = 0;
+                std::uint64_t matched_documents = 0;
+            };
+
+            QueryExecution ExecuteQuery(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    std::uint32_t limit,
+                    std::uint32_t skip,
+                    bool force_full_scan);
 
             rocksdb::Status InjectMutationFaultIfRequested(
                     MutationFaultPoint point) noexcept;

@@ -148,6 +148,73 @@ namespace nexora {
                 }
                 return key;
             }
+
+            struct SelectedIndexPlan {
+                const IndexDefinition* index = nullptr;
+                std::vector<const nexora::query::Condition*> equalities;
+                const nexora::query::Condition* range = nullptr;
+                std::size_t score = 0;
+            };
+
+            bool CollectAndLeaves(
+                    const nexora::query::Condition& condition,
+                    std::vector<const nexora::query::Condition*>& leaves) {
+                if (condition.IsLeaf()) {
+                    leaves.push_back(&condition);
+                    return true;
+                }
+                if (condition.IsEmpty()) return true;
+                if (condition.logic != nexora::query::LogicOp::AND) return false;
+                for (const auto& child : condition.sub_conditions)
+                    if (!CollectAndLeaves(child, leaves)) return false;
+                return true;
+            }
+
+            SelectedIndexPlan SelectIndexPlan(
+                    const std::vector<IndexDefinition>& indexes,
+                    const nexora::query::Condition& condition) {
+                std::vector<const nexora::query::Condition*> leaves;
+                if (!CollectAndLeaves(condition, leaves)) return {};
+                SelectedIndexPlan best;
+                for (const auto& index : indexes) {
+                    if (index.state != IndexState::Ready ||
+                        index.format_version != indexv2::kFormatVersion)
+                        continue;
+                    SelectedIndexPlan candidate;
+                    candidate.index = &index;
+                    for (const auto& field : index.fields) {
+                        const auto equality = std::find_if(
+                                leaves.begin(), leaves.end(),
+                                [&](const auto* leaf) {
+                                    return leaf->field == field &&
+                                           leaf->op == nexora::query::Op::EQ;
+                                });
+                        if (equality != leaves.end()) {
+                            candidate.equalities.push_back(*equality);
+                            candidate.score += 10;
+                            continue;
+                        }
+                        const auto range = std::find_if(
+                                leaves.begin(), leaves.end(),
+                                [&](const auto* leaf) {
+                                    return leaf->field == field &&
+                                           (leaf->op == nexora::query::Op::GT ||
+                                            leaf->op == nexora::query::Op::GTE ||
+                                            leaf->op == nexora::query::Op::LT ||
+                                            leaf->op == nexora::query::Op::LTE);
+                                });
+                        if (range != leaves.end()) {
+                            candidate.range = *range;
+                            candidate.score += 5;
+                        }
+                        break;
+                    }
+                    if ((!candidate.equalities.empty() || candidate.range) &&
+                        candidate.score > best.score)
+                        best = candidate;
+                }
+                return best;
+            }
         } //namespace
 
 
@@ -521,6 +588,12 @@ namespace nexora {
         }
 
         DocEngine::~DocEngine() {
+            std::lock_guard<std::mutex> lock(page_sessions_mutex_);
+            for (const auto& [id, session] : page_sessions_) {
+                (void)id;
+                if (session.snapshot) txn_db_->ReleaseSnapshot(session.snapshot);
+            }
+            page_sessions_.clear();
             NX_LOG("DocEngine closing at: " << db_path_);
         }
 
@@ -1987,37 +2060,150 @@ namespace nexora {
                                      const nexora::query::Condition& condition,
                                      uint32_t                        limit,
                                      uint32_t                        skip) {
-            if (IsReservedCollectionName(collection_name))
-                return DBResult::Err("reserved collection name");
-            if (!CollectionExists(collection_name))
-                return DBResult::Err("Collection '" + collection_name + "' does not exist");
+            return ExecuteQuery(collection_name, condition, limit, skip, false).result;
+        }
 
-            std::string data_prefix = std::string(keys::kData) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
+        DBResult DocEngine::FindManyFullScanForTesting(
+                const std::string& collection_name,
+                const nexora::query::Condition& condition,
+                std::uint32_t limit,
+                std::uint32_t skip) {
+            return ExecuteQuery(collection_name, condition, limit, skip, true).result;
+        }
+
+        DocEngine::QueryExecution DocEngine::ExecuteQuery(
+                const std::string& collection_name,
+                const nexora::query::Condition& condition,
+                std::uint32_t limit,
+                std::uint32_t skip,
+                bool force_full_scan) {
+            QueryExecution execution;
+            if (IsReservedCollectionName(collection_name))
+                { execution.result = DBResult::Err("reserved collection name"); return execution; }
+            if (!CollectionExists(collection_name))
+                { execution.result = DBResult::Err("Collection '" + collection_name + "' does not exist"); return execution; }
 
             std::string results_json = "[";
-            uint32_t count   = 0;
-            uint32_t skipped = 0;
             bool first = true;
-
-            for (it->Seek(data_prefix);
-                 it->Valid() && it->key().starts_with(data_prefix); it->Next()) {
-
-                std::string bson = it->value().ToString();
-                if (!MatchesCondition(bson, condition)) continue;
-                if (skipped < skip) { ++skipped; continue; }
-
-                if (!first) results_json += ",";
-                results_json += bson;
+            std::uint32_t count = 0;
+            std::uint32_t skipped = 0;
+            auto append_if_match = [&](const std::string& document) {
+                ++execution.scanned_documents;
+                if (!MatchesCondition(document, condition)) return false;
+                ++execution.matched_documents;
+                if (skipped < skip) { ++skipped; return false; }
+                if (!first) results_json.push_back(',');
                 first = false;
+                results_json += document;
                 ++count;
+                return limit > 0 && count >= limit;
+            };
 
-                if (limit > 0 && count >= limit) break;
+            const auto indexes = GetIndexes(collection_name);
+            const SelectedIndexPlan plan = force_full_scan
+                    ? SelectedIndexPlan{} : SelectIndexPlan(indexes, condition);
+
+            if (plan.index) {
+                execution.index_name = plan.index->index_name;
+                execution.scan_type = plan.range ? "index_range" : "index_equality";
+                std::vector<query::FieldValue> equality_values;
+                for (const auto* equality : plan.equalities)
+                    equality_values.push_back({equality->value,
+                                               equality->value_type, true});
+                const auto encoded_equalities = indexv2::EncodeValues(equality_values);
+                if (!encoded_equalities) {
+                    execution.result = DBResult::Err("Unable to encode index predicate");
+                    return execution;
+                }
+                std::string prefix = indexv2::IndexPrefix(
+                        collection_name, plan.index->index_id);
+                prefix.push_back('E');
+                prefix.append(*encoded_equalities);
+                std::string seek_key = prefix;
+                std::string boundary;
+                if (plan.range) {
+                    const auto encoded_range = indexv2::EncodeValues({
+                            query::FieldValue{plan.range->value,
+                                              plan.range->value_type, true}});
+                    if (!encoded_range) {
+                        execution.result = DBResult::Err("Unable to encode range predicate");
+                        return execution;
+                    }
+                    boundary = prefix + *encoded_range;
+                    if (plan.range->op == query::Op::GT ||
+                        plan.range->op == query::Op::GTE)
+                        seek_key = boundary;
+                }
+                const std::string upper_value = PrefixUpperBound(prefix);
+                const rocksdb::Slice upper_bound(upper_value);
+                rocksdb::ReadOptions options;
+                options.iterate_upper_bound = &upper_bound;
+                auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                        txn_db_->NewIterator(options));
+                for (iterator->Seek(seek_key); iterator->Valid(); iterator->Next()) {
+                    const std::string physical_key = iterator->key().ToString();
+                    if (plan.range) {
+                        if (plan.range->op == query::Op::GT &&
+                            physical_key.starts_with(boundary)) continue;
+                        if (plan.range->op == query::Op::LT &&
+                            physical_key >= boundary) break;
+                        if (plan.range->op == query::Op::LTE &&
+                            physical_key > boundary &&
+                            !physical_key.starts_with(boundary)) break;
+                    }
+                    ++execution.scanned_index_entries;
+                    std::string document;
+                    const rocksdb::Status status = txn_db_->Get(
+                            read_options_, MakeDocKey(collection_name,
+                                                      iterator->value().ToString()),
+                            &document);
+                    if (status.IsNotFound()) continue;
+                    if (!status.ok()) {
+                        execution.result = RocksFailure("indexed query document read", status);
+                        return execution;
+                    }
+                    if (append_if_match(document)) break;
+                }
+                if (!iterator->status().ok()) {
+                    execution.result = RocksFailure("index scan", iterator->status());
+                    return execution;
+                }
+            } else {
+                const std::string data_prefix = std::string(keys::kData) + collection_name + ":";
+                const std::string upper_value = PrefixUpperBound(data_prefix);
+                const rocksdb::Slice upper_bound(upper_value);
+                rocksdb::ReadOptions options;
+                options.fill_cache = false;
+                options.iterate_upper_bound = &upper_bound;
+                auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                        txn_db_->NewIterator(options));
+                for (iterator->Seek(data_prefix); iterator->Valid(); iterator->Next())
+                    if (append_if_match(iterator->value().ToString())) break;
+                if (!iterator->status().ok()) {
+                    execution.result = RocksFailure("full scan", iterator->status());
+                    return execution;
+                }
             }
 
-            results_json += "]";
-            return DBResult::Ok(results_json);
+            results_json.push_back(']');
+            execution.result = DBResult::Ok(std::move(results_json));
+            return execution;
+        }
+
+        DBResult DocEngine::ExplainPlan(
+                const std::string& collection_name,
+                const nexora::query::Condition& condition,
+                bool force_full_scan) {
+            const QueryExecution execution = ExecuteQuery(
+                    collection_name, condition, 0, 0, force_full_scan);
+            if (!execution.result.success) return execution.result;
+            return DBResult::Ok(
+                    "{\"scan_type\":\"" + execution.scan_type +
+                    "\",\"index\":\"" + execution.index_name +
+                    "\",\"scanned_index_entries\":" +
+                    std::to_string(execution.scanned_index_entries) +
+                    ",\"scanned_documents\":" +
+                    std::to_string(execution.scanned_documents) + "}");
         }
 
         PageResult DocEngine::FindPage(
@@ -2034,25 +2220,72 @@ namespace nexora {
                 result.error_msg = "Collection '" + collection_name + "' does not exist";
                 return result;
             }
+            std::unique_lock<std::mutex> sessions_lock(page_sessions_mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            for (auto iterator = page_sessions_.begin();
+                 iterator != page_sessions_.end();) {
+                if (iterator->second.expires_at <= now) {
+                    txn_db_->ReleaseSnapshot(iterator->second.snapshot);
+                    iterator = page_sessions_.erase(iterator);
+                } else {
+                    ++iterator;
+                }
+            }
+
+            std::string session_id;
+            std::string cursor_key;
+            PageSession* session = nullptr;
+            if (continuation_token.empty()) {
+                session_id = GenerateDocId();
+                PageSession created;
+                created.snapshot = txn_db_->GetSnapshot();
+                created.collection = collection_name;
+                created.condition = condition;
+                created.expires_at = now + std::chrono::minutes(5);
+                session = &page_sessions_.emplace(
+                        session_id, std::move(created)).first->second;
+            } else {
+                if (!continuation_token.starts_with("s1.")) {
+                    result.error_msg = "Invalid continuation token";
+                    return result;
+                }
+                const std::size_t separator = continuation_token.find('.', 3);
+                if (separator == std::string::npos) {
+                    result.error_msg = "Invalid continuation token";
+                    return result;
+                }
+                session_id = continuation_token.substr(3, separator - 3);
+                const auto decoded = DecodeCursorToken(
+                        continuation_token.substr(separator + 1));
+                const auto found = page_sessions_.find(session_id);
+                if (!decoded || found == page_sessions_.end() ||
+                    found->second.collection != collection_name) {
+                    result.error_msg = "Expired or invalid continuation token";
+                    return result;
+                }
+                cursor_key = *decoded;
+                session = &found->second;
+                session->expires_at = now + std::chrono::minutes(5);
+            }
             const std::string prefix = std::string(keys::kData) + collection_name + ":";
             const std::string upper_value = PrefixUpperBound(prefix);
             const rocksdb::Slice upper_bound(upper_value);
             rocksdb::ReadOptions options;
             options.fill_cache = false;
             options.iterate_upper_bound = &upper_bound;
+            options.snapshot = session->snapshot;
             auto iterator = std::unique_ptr<rocksdb::Iterator>(
                     txn_db_->NewIterator(options));
 
-            if (continuation_token.empty()) {
+            if (cursor_key.empty()) {
                 iterator->Seek(prefix);
             } else {
-                const auto decoded = DecodeCursorToken(continuation_token);
-                if (!decoded || !decoded->starts_with(prefix)) {
+                if (!cursor_key.starts_with(prefix)) {
                     result.error_msg = "Invalid continuation token";
                     return result;
                 }
-                iterator->Seek(*decoded);
-                if (iterator->Valid() && iterator->key() == *decoded)
+                iterator->Seek(cursor_key);
+                if (iterator->Valid() && iterator->key() == cursor_key)
                     iterator->Next();
             }
 
@@ -2062,7 +2295,7 @@ namespace nexora {
             std::string last_key;
             for (; iterator->Valid() && emitted < limit; iterator->Next()) {
                 const std::string document = iterator->value().ToString();
-                if (!MatchesCondition(document, condition)) continue;
+                if (!MatchesCondition(document, session->condition)) continue;
                 if (!first) json.push_back(',');
                 first = false;
                 json += document;
@@ -2071,13 +2304,20 @@ namespace nexora {
             }
             if (!iterator->status().ok()) {
                 result.error_msg = iterator->status().ToString();
+                txn_db_->ReleaseSnapshot(session->snapshot);
+                page_sessions_.erase(session_id);
                 return result;
             }
             json.push_back(']');
             result.success = true;
             result.data = std::move(json);
-            if (!last_key.empty() && iterator->Valid())
-                result.continuation_token = EncodeCursorToken(last_key);
+            if (!last_key.empty() && iterator->Valid()) {
+                result.continuation_token = "s1." + session_id + "." +
+                        EncodeCursorToken(last_key);
+            } else {
+                txn_db_->ReleaseSnapshot(session->snapshot);
+                page_sessions_.erase(session_id);
+            }
             return result;
         }
 
@@ -3237,15 +3477,10 @@ namespace nexora {
                 return DBResult::Ok(std::to_string(sz >= 0 ? sz : 0));
             }
 
-            std::string data_prefix = std::string(keys::kData) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            int64_t count = 0;
-            for (it->Seek(data_prefix);
-                 it->Valid() && it->key().starts_with(data_prefix); it->Next())
-                if (MatchesCondition(it->value().ToString(), condition)) ++count;
-
-            return DBResult::Ok(std::to_string(count));
+            const QueryExecution execution = ExecuteQuery(
+                    collection_name, condition, 0, 0, false);
+            if (!execution.result.success) return execution.result;
+            return DBResult::Ok(std::to_string(execution.matched_documents));
         }
 
         DBResult DocEngine::Exists(const std::string&              collection_name,
@@ -3255,15 +3490,11 @@ namespace nexora {
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
-            std::string data_prefix = std::string(keys::kData) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            for (it->Seek(data_prefix);
-                 it->Valid() && it->key().starts_with(data_prefix); it->Next())
-                if (MatchesCondition(it->value().ToString(), condition))
-                    return DBResult::Ok("true");
-
-            return DBResult::Ok("false");
+            const QueryExecution execution = ExecuteQuery(
+                    collection_name, condition, 1, 0, false);
+            if (!execution.result.success) return execution.result;
+            return DBResult::Ok(
+                    execution.matched_documents > 0 ? "true" : "false");
         }
 
 // ══════════════════════════════════════════════════════════════
