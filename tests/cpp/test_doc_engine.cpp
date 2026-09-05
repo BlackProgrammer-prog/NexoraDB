@@ -157,6 +157,40 @@ namespace {
         EXPECT_TRUE(engine.GetIndexes("users").empty());
     }
 
+    TEST(DocEnginePagination, UsesStableExclusiveContinuationTokens) {
+        TestTempDir temp("nexora_doc_keyset_pagination");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertMany("items", {
+                R"({"_id":"a","value":1})",
+                R"({"_id":"b","value":2})",
+                R"({"_id":"c","value":3})",
+                R"({"_id":"d","value":4})",
+                R"({"_id":"e","value":5})"}).success);
+
+        const auto first = engine.FindPage("items", Condition{}, 2);
+        ASSERT_TRUE(first.success) << first.error_msg;
+        EXPECT_NE(first.data.find("\"_id\":\"a\""), std::string::npos);
+        EXPECT_NE(first.data.find("\"_id\":\"b\""), std::string::npos);
+        EXPECT_FALSE(first.continuation_token.empty());
+
+        const auto second = engine.FindPage(
+                "items", Condition{}, 2, first.continuation_token);
+        ASSERT_TRUE(second.success) << second.error_msg;
+        EXPECT_EQ(second.data.find("\"_id\":\"b\""), std::string::npos);
+        EXPECT_NE(second.data.find("\"_id\":\"c\""), std::string::npos);
+        EXPECT_NE(second.data.find("\"_id\":\"d\""), std::string::npos);
+        EXPECT_FALSE(second.continuation_token.empty());
+
+        const auto third = engine.FindPage(
+                "items", Condition{}, 2, second.continuation_token);
+        ASSERT_TRUE(third.success) << third.error_msg;
+        EXPECT_NE(third.data.find("\"_id\":\"e\""), std::string::npos);
+        EXPECT_TRUE(third.continuation_token.empty());
+
+        EXPECT_FALSE(engine.FindPage("items", Condition{}, 2, "bad").success);
+    }
+
     TEST(DocEngineMutation,
          KeepsDocumentIndexesAndCounterConsistent) {
         TestTempDir temp("nexora_doc_atomic_mutation");
@@ -983,7 +1017,9 @@ namespace {
         index.fields = {"email"};
         index.type = IndexType::Unique;
         EXPECT_FALSE(engine.CreateIndex("legacy", index).success);
-        EXPECT_TRUE(engine.GetIndexes("legacy").empty());
+        ASSERT_EQ(engine.GetIndexes("legacy").size(), 1U);
+        EXPECT_EQ(engine.GetIndexes("legacy").front().state,
+                  nexora::core::IndexState::Failed);
 
         ASSERT_TRUE(engine.CreateCollection("race").success);
         ASSERT_TRUE(engine.CreateIndex("race", index).success);
@@ -1016,6 +1052,39 @@ namespace {
         EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"u2","email":"same"})").success);
         EXPECT_FALSE(engine.DropIndex("users", indexes.front().index_name).success);
         EXPECT_TRUE(engine.RebuildIndexes("users").success);
+    }
+
+    TEST(DocEngineOnlineIndexBuild, ResumesCheckpointAndIndexesConcurrentWrites) {
+        TestTempDir temp("nexora_doc_online_index_resume");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        std::vector<std::string> documents;
+        documents.reserve(1100);
+        for (int i = 0; i < 1100; ++i)
+            documents.push_back("{\"_id\":\"id_" + std::to_string(i) +
+                                "\",\"email\":\"e" + std::to_string(i) + "\"}");
+        ASSERT_TRUE(engine.InsertMany("items", documents).success);
+
+        IndexDefinition index;
+        index.index_name = "uniq_email";
+        index.fields = {"email"};
+        index.type = IndexType::Unique;
+        engine.PauseIndexBuildAfterChunksForTesting(1);
+        const auto paused = engine.CreateIndex("items", index);
+        EXPECT_FALSE(paused.success);
+        const auto building = engine.GetIndexes("items");
+        ASSERT_EQ(building.size(), 1U);
+        EXPECT_EQ(building.front().state,
+                  nexora::core::IndexState::Building);
+        EXPECT_FALSE(building.front().build_cursor.empty());
+
+        ASSERT_TRUE(engine.InsertOne(
+                "items", R"({"_id":"during","email":"during@example.com"})").success);
+        ASSERT_TRUE(engine.ResumeIndexBuild("items", "uniq_email").success);
+        EXPECT_EQ(engine.GetIndexes("items").front().state,
+                  nexora::core::IndexState::Ready);
+        EXPECT_FALSE(engine.InsertOne(
+                "items", R"({"_id":"duplicate","email":"during@example.com"})").success);
     }
 
 } // namespace
