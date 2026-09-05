@@ -328,7 +328,10 @@ PYBIND11_MODULE(nexoradb, m) {
             .def(py::init<>())
             .def_readwrite("index_name", &IndexDefinition::index_name)
             .def_readwrite("fields",     &IndexDefinition::fields)
-            .def_readwrite("type",       &IndexDefinition::type);
+            .def_readwrite("type",       &IndexDefinition::type)
+            .def_readonly("index_id",    &IndexDefinition::index_id)
+            .def_readonly("format_version",
+                          &IndexDefinition::format_version);
 
     py::class_<ForeignKeyDefinition>(m, "ForeignKeyDefinition",
                                      R"doc(
@@ -539,6 +542,10 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("drop_index", &DocEngine::DropIndex,
                  py::arg("collection"), py::arg("index_name"),
                  "حذف Index")
+
+            .def("rebuild_indexes", &DocEngine::RebuildIndexes,
+                 py::arg("collection"),
+                 "بازسازی indexها و migration فرمت legacy به v2")
 
             .def("get_indexes",
                  [](DocEngine& e, const std::string& col) {
