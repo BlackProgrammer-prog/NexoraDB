@@ -7,10 +7,10 @@ Build: Release, GCC 11.4.0, RocksDB 8.5.3, LTO enabled
 
 | Path | p50 | p95 | p99 | Documents scanned | Index entries scanned |
 |---|---:|---:|---:|---:|---:|
-| v2 index equality | 0.310 ms | 0.317 ms | 0.317 ms | 100 | 100 |
-| full-scan reference | 261.759 ms | 263.266 ms | 263.372 ms | 100,000 | 0 |
+| v2 index equality | 0.307 ms | 0.315 ms | 0.316 ms | 100 | 100 |
+| full-scan reference | 257.420 ms | 264.152 ms | 266.128 ms | 100,000 | 0 |
 
-The indexed p95 is approximately 832x faster for this workload and reads
+The indexed p95 is approximately 839x faster for this workload and reads
 1,000x fewer documents. These values are the aggregate of 10 benchmark
 repetitions. The complete machine-readable output is stored in
 `query_planner_phase2_100k.json`.
