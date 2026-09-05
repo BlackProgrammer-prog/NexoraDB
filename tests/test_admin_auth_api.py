@@ -71,6 +71,61 @@ class FakeInternalUserEngine:
     def is_internal_app_token_active(self, token_id: str) -> bool:
         return token_id in self.app_tokens
 
+    def create_collection(self, collection: str) -> FakeResult:
+        if collection in self.collections:
+            return FakeResult(False, error_msg=f"Collection '{collection}' already exists")
+        self.collections[collection] = {}
+        return FakeResult(True, f"Collection '{collection}' created")
+
+    def drop_collection(self, collection: str) -> FakeResult:
+        if collection not in self.collections:
+            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
+        self.collections.pop(collection)
+        return FakeResult(True, f"Collection '{collection}' dropped")
+
+    def list_collections(self) -> list[str]:
+        return sorted(self.collections)
+
+    def collection_exists(self, collection: str) -> bool:
+        return collection in self.collections
+
+    def insert_one(self, collection: str, document_json: str) -> FakeResult:
+        if collection not in self.collections:
+            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
+        document = json.loads(document_json)
+        document_id = str(document.get("_id"))
+        self.collections[collection][document_id] = document
+        return FakeResult(True, document_id)
+
+    def find_by_id(self, collection: str, document_id: str) -> FakeResult:
+        if collection not in self.collections:
+            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
+        document = self.collections[collection].get(document_id)
+        if document is None:
+            return FakeResult(
+                False,
+                error_msg=f"Document '{document_id}' not found in '{collection}'",
+            )
+        return FakeResult(True, json.dumps(document))
+
+    def find_many(self, collection: str) -> FakeResult:
+        if collection not in self.collections:
+            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
+        return FakeResult(True, json.dumps(list(self.collections[collection].values())))
+
+    def count(self, collection: str) -> FakeResult:
+        if collection not in self.collections:
+            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
+        return FakeResult(True, str(len(self.collections[collection])))
+
+    def delete_by_id(self, collection: str, document_id: str) -> FakeResult:
+        if collection not in self.collections:
+            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
+        if document_id not in self.collections[collection]:
+            return FakeResult(True, "0")
+        self.collections[collection].pop(document_id)
+        return FakeResult(True, "1")
+
 
 class FakeGraphMode:
     Live = "live"
@@ -128,62 +183,6 @@ class FakeGraphManager:
 
     def get_disk_usage_bytes(self) -> int:
         return 654_321
-
-    def create_collection(self, collection: str) -> FakeResult:
-        if collection in self.collections:
-            return FakeResult(False, error_msg=f"Collection '{collection}' already exists")
-        self.collections[collection] = {}
-        return FakeResult(True, f"Collection '{collection}' created")
-
-    def drop_collection(self, collection: str) -> FakeResult:
-        if collection not in self.collections:
-            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
-        self.collections.pop(collection)
-        return FakeResult(True, f"Collection '{collection}' dropped")
-
-    def list_collections(self) -> list[str]:
-        return sorted(self.collections)
-
-    def collection_exists(self, collection: str) -> bool:
-        return collection in self.collections
-
-    def insert_one(self, collection: str, document_json: str) -> FakeResult:
-        if collection not in self.collections:
-            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
-        document = json.loads(document_json)
-        document_id = str(document.get("_id"))
-        self.collections[collection][document_id] = document
-        return FakeResult(True, document_id)
-
-    def find_by_id(self, collection: str, document_id: str) -> FakeResult:
-        if collection not in self.collections:
-            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
-        document = self.collections[collection].get(document_id)
-        if document is None:
-            return FakeResult(
-                False,
-                error_msg=f"Document '{document_id}' not found in '{collection}'",
-            )
-        return FakeResult(True, json.dumps(document))
-
-    def find_many(self, collection: str) -> FakeResult:
-        if collection not in self.collections:
-            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
-        return FakeResult(True, json.dumps(list(self.collections[collection].values())))
-
-    def count(self, collection: str) -> FakeResult:
-        if collection not in self.collections:
-            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
-        return FakeResult(True, str(len(self.collections[collection])))
-
-    def delete_by_id(self, collection: str, document_id: str) -> FakeResult:
-        if collection not in self.collections:
-            return FakeResult(False, error_msg=f"Collection '{collection}' does not exist")
-        if document_id not in self.collections[collection]:
-            return FakeResult(True, "0")
-        self.collections[collection].pop(document_id)
-        return FakeResult(True, "1")
-
 
 def test_register_login_and_me_use_internal_user_store() -> None:
     engine = FakeInternalUserEngine()
