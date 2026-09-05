@@ -31,6 +31,8 @@ cmake_minimum_required(VERSION 3.22)
 add_library(nexora_core STATIC
         DocEngine.cpp
         DocEngine.h
+        IndexCodec.cpp
+        IndexCodec.h
 )
 
 # ─────────────────────────────────────────────────────────────
