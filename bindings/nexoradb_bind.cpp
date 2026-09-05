@@ -163,6 +163,16 @@ PYBIND11_MODULE(nexoradb, m) {
                        " data='" + r.data.substr(0, 80) + "'>";
             });
 
+    py::class_<PageResult>(m, "PageResult")
+            .def_readonly("success", &PageResult::success)
+            .def_readonly("data", &PageResult::data)
+            .def_readonly("continuation_token",
+                          &PageResult::continuation_token)
+            .def_readonly("error_msg", &PageResult::error_msg)
+            .def("__bool__", [](const PageResult& result) {
+                return result.success;
+            });
+
     py::enum_<BulkWriteMode>(m, "BulkWriteMode")
             .value("Atomic", BulkWriteMode::Atomic)
             .value("OrderedChunks", BulkWriteMode::OrderedChunks);
@@ -218,6 +228,11 @@ PYBIND11_MODULE(nexoradb, m) {
             .value("Compound",    IndexType::Compound)
             .value("Unique",      IndexType::Unique)
             .export_values();
+
+    py::enum_<IndexState>(m, "IndexState")
+            .value("Building", IndexState::Building)
+            .value("Ready", IndexState::Ready)
+            .value("Failed", IndexState::Failed);
 
     py::enum_<Op>(m, "Op",
                   "عملگرهای مقایسه‌ای برای Condition")
@@ -331,7 +346,10 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_readwrite("type",       &IndexDefinition::type)
             .def_readonly("index_id",    &IndexDefinition::index_id)
             .def_readonly("format_version",
-                          &IndexDefinition::format_version);
+                          &IndexDefinition::format_version)
+            .def_readonly("state", &IndexDefinition::state)
+            .def_readonly("build_cursor", &IndexDefinition::build_cursor)
+            .def_readonly("last_error", &IndexDefinition::last_error);
 
     py::class_<ForeignKeyDefinition>(m, "ForeignKeyDefinition",
                                      R"doc(
@@ -547,6 +565,12 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("collection"),
                  "بازسازی indexها و migration فرمت legacy به v2")
 
+            .def("resume_index_build", &DocEngine::ResumeIndexBuild,
+                 py::arg("collection"), py::arg("index_name"))
+
+            .def("cleanup_index_build", &DocEngine::CleanupIndexBuild,
+                 py::arg("collection"), py::arg("index_name"))
+
             .def("get_indexes",
                  [](DocEngine& e, const std::string& col) {
                      return e.GetIndexes(col);
@@ -656,6 +680,18 @@ PYBIND11_MODULE(nexoradb, m) {
                                              nexoradb.ValueType.Int64)
                 r = db.find_many("users", c, limit=10)
             )doc")
+
+            .def("find_page",
+                 [](DocEngine& e, const std::string& collection,
+                    const Condition& condition, std::uint32_t limit,
+                    const std::string& token) {
+                     py::gil_scoped_release release;
+                     return e.FindPage(collection, condition, limit, token);
+                 },
+                 py::arg("collection"),
+                 py::arg("condition") = Condition{},
+                 py::arg("limit") = 100,
+                 py::arg("continuation_token") = "")
 
                     // ── CRUD: Update ──
             .def("update_by_id",
