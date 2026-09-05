@@ -6,18 +6,24 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <optional>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
     using nexora::core::DocEngine;
+    using nexora::core::BulkWriteMode;
+    using nexora::core::BulkWriteOptions;
     using nexora::core::FieldType;
     using nexora::core::ForeignKeyDefinition;
     using nexora::core::IndexDefinition;
     using nexora::core::IndexType;
     using nexora::core::SchemaDefinition;
     using nexora::core::SchemaField;
+    using nexora::core::TransactionSettings;
 
     using nexora::query::Condition;
     using nexora::query::Op;
@@ -149,6 +155,279 @@ namespace {
         EXPECT_TRUE(engine.GetIndexes("users").empty());
     }
 
+    TEST(DocEngineMutation,
+         KeepsDocumentIndexesAndCounterConsistent) {
+        TestTempDir temp("nexora_doc_atomic_mutation");
+        DocEngine engine((temp.path() / "db").string());
+
+        ASSERT_TRUE(engine.CreateCollection("users").success);
+        ASSERT_TRUE(engine.CreateCollection("posts").success);
+
+        IndexDefinition index;
+        index.index_name = "idx_users_email";
+        index.fields = {"email"};
+        index.type = IndexType::SingleField;
+
+        const auto index_result =
+                engine.CreateIndex("users", index);
+        ASSERT_TRUE(index_result.success)
+                << index_result.error_msg;
+
+        ForeignKeyDefinition foreign_key;
+        foreign_key.fk_name = "fk_posts_user_email";
+        foreign_key.local_field = "user_email";
+        foreign_key.ref_collection = "users";
+        foreign_key.ref_field = "email";
+
+        const auto foreign_key_result =
+                engine.AddForeignKey("posts", foreign_key);
+        ASSERT_TRUE(foreign_key_result.success)
+                << foreign_key_result.error_msg;
+
+        ASSERT_TRUE(engine.InsertOne(
+                "users",
+                R"({"_id":"u1","email":"old@example.com"})"
+        ).success);
+
+        const auto initial_count =
+                engine.Count("users", Condition{});
+        ASSERT_TRUE(initial_count.success)
+                << initial_count.error_msg;
+        EXPECT_EQ(initial_count.data, "1");
+
+        const auto duplicate = engine.InsertOne(
+                "users",
+                R"({"_id":"u1","email":"old@example.com","name":"Ali"})"
+        );
+        EXPECT_FALSE(duplicate.success);
+        EXPECT_NE(duplicate.error_msg.find("Duplicate document _id"),
+                  std::string::npos);
+
+        const auto count_after_duplicate =
+                engine.Count("users", Condition{});
+        ASSERT_TRUE(count_after_duplicate.success)
+                << count_after_duplicate.error_msg;
+        EXPECT_EQ(count_after_duplicate.data, "1");
+
+        UpdateSpec update;
+        update.Set("email", "new@example.com");
+
+        const auto update_result =
+                engine.UpdateById("users", "u1", update);
+        ASSERT_TRUE(update_result.success)
+                << update_result.error_msg;
+
+        const auto old_index_reference = engine.InsertOne(
+                "posts",
+                R"({"_id":"p_old","user_email":"old@example.com"})"
+        );
+        EXPECT_FALSE(old_index_reference.success);
+
+        const auto new_index_reference = engine.InsertOne(
+                "posts",
+                R"({"_id":"p_new","user_email":"new@example.com"})"
+        );
+        ASSERT_TRUE(new_index_reference.success)
+                << new_index_reference.error_msg;
+
+        const auto delete_result =
+                engine.DeleteById("users", "u1");
+        ASSERT_TRUE(delete_result.success)
+                << delete_result.error_msg;
+        EXPECT_EQ(delete_result.data, "1");
+
+        const auto reference_after_delete = engine.InsertOne(
+                "posts",
+                R"({"_id":"p_deleted","user_email":"new@example.com"})"
+        );
+        EXPECT_FALSE(reference_after_delete.success);
+
+        const auto final_count =
+                engine.Count("users", Condition{});
+        ASSERT_TRUE(final_count.success)
+                << final_count.error_msg;
+        EXPECT_EQ(final_count.data, "0");
+    }
+
+    TEST(DocEngineBulkMutation,
+         RollsBackOnValidationErrorAndMaintainsIndexesAndCounter) {
+        TestTempDir temp("nexora_doc_atomic_bulk_mutation");
+        DocEngine engine((temp.path() / "db").string());
+
+        SchemaDefinition schema;
+        schema.fields.push_back(SchemaField{
+                .name = "name",
+                .type = FieldType::String,
+                .required = true,
+                .unique = false,
+                .default_val = std::nullopt
+        });
+
+        ASSERT_TRUE(engine.CreateCollection("users", schema).success);
+        ASSERT_TRUE(engine.CreateCollection("posts").success);
+
+        IndexDefinition index;
+        index.index_name = "idx_users_email";
+        index.fields = {"email"};
+        index.type = IndexType::SingleField;
+        ASSERT_TRUE(engine.CreateIndex("users", index).success);
+
+        ForeignKeyDefinition foreign_key;
+        foreign_key.fk_name = "fk_posts_user_email";
+        foreign_key.local_field = "user_email";
+        foreign_key.ref_collection = "users";
+        foreign_key.ref_field = "email";
+        ASSERT_TRUE(engine.AddForeignKey("posts", foreign_key).success);
+
+        const auto rejected_batch = engine.InsertMany(
+                "users",
+                {
+                        R"({"_id":"u1","name":"Ali","email":"one@example.com","group":"g"})",
+                        R"({"_id":"u2","email":"two@example.com","group":"g"})"
+                });
+        EXPECT_FALSE(rejected_batch.success);
+        EXPECT_FALSE(engine.FindById("users", "u1").success);
+
+        const auto count_after_rejection =
+                engine.Count("users", Condition{});
+        ASSERT_TRUE(count_after_rejection.success);
+        EXPECT_EQ(count_after_rejection.data, "0");
+
+        const auto inserted = engine.InsertMany(
+                "users",
+                {
+                        R"({"_id":"u1","name":"Ali","email":"one@example.com","group":"g"})",
+                        R"({"_id":"u2","name":"Sara","email":"two@example.com","group":"g"})"
+                });
+        ASSERT_TRUE(inserted.success) << inserted.error_msg;
+
+        const auto count_after_insert =
+                engine.Count("users", Condition{});
+        ASSERT_TRUE(count_after_insert.success);
+        EXPECT_EQ(count_after_insert.data, "2");
+
+        const auto duplicate_batch = engine.InsertMany(
+                "users",
+                {
+                        R"({"_id":"u3","name":"Reza","email":"three@example.com","group":"g"})",
+                        R"({"_id":"u1","name":"Duplicate","email":"duplicate@example.com","group":"g"})"
+                });
+        EXPECT_FALSE(duplicate_batch.success);
+        EXPECT_FALSE(engine.FindById("users", "u3").success);
+
+        UpdateSpec update;
+        update.Set("email", "shared@example.com");
+
+        const auto updated = engine.UpdateMany(
+                "users",
+                Condition::Leaf("group", Op::EQ, "g"),
+                update);
+        ASSERT_TRUE(updated.success) << updated.error_msg;
+        EXPECT_EQ(updated.data, "2");
+
+        EXPECT_FALSE(engine.InsertOne(
+                "posts",
+                R"({"_id":"old","user_email":"one@example.com"})"
+        ).success);
+        ASSERT_TRUE(engine.InsertOne(
+                "posts",
+                R"({"_id":"current","user_email":"shared@example.com"})"
+        ).success);
+
+        const auto deleted = engine.DeleteMany(
+                "users",
+                Condition::Leaf("group", Op::EQ, "g"));
+        ASSERT_TRUE(deleted.success) << deleted.error_msg;
+        EXPECT_EQ(deleted.data, "2");
+
+        const auto final_count =
+                engine.Count("users", Condition{});
+        ASSERT_TRUE(final_count.success);
+        EXPECT_EQ(final_count.data, "0");
+
+        EXPECT_FALSE(engine.InsertOne(
+                "posts",
+                R"({"_id":"after-delete","user_email":"shared@example.com"})"
+        ).success);
+    }
+
+    TEST(DocEngineBulkMutation,
+         OrderedChunksReportCommittedProgressAndStopOnError) {
+        TestTempDir temp("nexora_doc_ordered_chunks");
+        DocEngine engine((temp.path() / "db").string());
+
+        SchemaDefinition schema;
+        schema.fields.push_back(SchemaField{
+                .name = "name",
+                .type = FieldType::String,
+                .required = true,
+                .unique = false,
+                .default_val = std::nullopt
+        });
+        ASSERT_TRUE(engine.CreateCollection("items", schema).success);
+
+        BulkWriteOptions options;
+        options.mode = BulkWriteMode::OrderedChunks;
+        options.max_operations_per_chunk = 2;
+        options.max_bytes_per_chunk = 1024 * 1024;
+
+        const auto inserted = engine.InsertManyBulk(
+                "items",
+                {
+                        R"({"_id":"i1","name":"one","group":"g"})",
+                        R"({"_id":"i2","name":"two","group":"g"})",
+                        R"({"_id":"i3","name":"three","group":"g"})",
+                        R"({"_id":"i4","name":"four","group":"g"})",
+                        R"({"_id":"i5","name":"five","group":"g"})"
+                },
+                options);
+        ASSERT_TRUE(inserted.success) << inserted.last_error;
+        EXPECT_EQ(inserted.processed, 5);
+        EXPECT_EQ(inserted.modified, 5);
+        EXPECT_EQ(inserted.committed_chunks, 3);
+
+        UpdateSpec update;
+        update.Set("state", "updated");
+        const auto updated = engine.UpdateManyBulk(
+                "items",
+                Condition::Leaf("group", Op::EQ, "g"),
+                update,
+                options);
+        ASSERT_TRUE(updated.success) << updated.last_error;
+        EXPECT_EQ(updated.modified, 5);
+        EXPECT_EQ(updated.committed_chunks, 3);
+
+        const auto partial = engine.InsertManyBulk(
+                "items",
+                {
+                        R"({"_id":"p1","name":"valid"})",
+                        R"({"_id":"p2","name":"valid"})",
+                        R"({"_id":"p3"})",
+                        R"({"_id":"p4","name":"not-attempted"})"
+                },
+                options);
+        EXPECT_FALSE(partial.success);
+        EXPECT_EQ(partial.processed, 3);
+        EXPECT_EQ(partial.modified, 2);
+        EXPECT_EQ(partial.committed_chunks, 1);
+        EXPECT_FALSE(partial.last_error.empty());
+        EXPECT_TRUE(engine.FindById("items", "p1").success);
+        EXPECT_FALSE(engine.FindById("items", "p3").success);
+        EXPECT_FALSE(engine.FindById("items", "p4").success);
+
+        const auto deleted = engine.DeleteManyBulk(
+                "items",
+                Condition::Leaf("group", Op::EQ, "g"),
+                options);
+        ASSERT_TRUE(deleted.success) << deleted.last_error;
+        EXPECT_EQ(deleted.modified, 5);
+        EXPECT_EQ(deleted.committed_chunks, 3);
+
+        const auto count = engine.Count("items", Condition{});
+        ASSERT_TRUE(count.success) << count.error_msg;
+        EXPECT_EQ(count.data, "2");
+    }
+
     TEST(DocEngineForeignKey, AcceptsValidAndRejectsInvalidReference) {
         TestTempDir temp("nexora_doc_fk");
         DocEngine engine((temp.path() / "db").string());
@@ -234,6 +513,251 @@ namespace {
         }
 
         EXPECT_FALSE(engine.FindById("users", "rolled_back").success);
+    }
+
+    TEST(DocEngineTransaction,
+         TxMutationsValidateAndMaintainIndexesAndCounter) {
+        TestTempDir temp("nexora_doc_transaction_mutations");
+        DocEngine engine((temp.path() / "db").string());
+
+        SchemaDefinition user_schema;
+        user_schema.fields.push_back(SchemaField{
+                .name = "name",
+                .type = FieldType::String,
+                .required = true,
+                .unique = false,
+                .default_val = std::nullopt
+        });
+
+        ASSERT_TRUE(engine.CreateCollection("users", user_schema).success);
+        ASSERT_TRUE(engine.CreateCollection("posts").success);
+
+        IndexDefinition email_index;
+        email_index.index_name = "idx_users_email";
+        email_index.fields = {"email"};
+        email_index.type = IndexType::SingleField;
+        ASSERT_TRUE(engine.CreateIndex("users", email_index).success);
+
+        ForeignKeyDefinition foreign_key;
+        foreign_key.fk_name = "fk_posts_email";
+        foreign_key.local_field = "user_email";
+        foreign_key.ref_collection = "users";
+        foreign_key.ref_field = "email";
+        ASSERT_TRUE(engine.AddForeignKey("posts", foreign_key).success);
+
+        auto transaction = engine.BeginTransaction();
+        ASSERT_NE(transaction, nullptr);
+
+        const auto inserted = engine.InsertOneTx(
+                *transaction,
+                "users",
+                R"({"_id":"u1","name":"Ali","email":"ali@example.com"})");
+        ASSERT_TRUE(inserted.success) << inserted.error_msg;
+
+        UpdateSpec invalid_update;
+        invalid_update.Unset("name");
+        const auto rejected_update = engine.UpdateByIdTx(
+                *transaction,
+                "users",
+                "u1",
+                invalid_update);
+        EXPECT_FALSE(rejected_update.success);
+
+        const auto still_visible = engine.FindByIdTx(
+                *transaction,
+                "users",
+                "u1");
+        ASSERT_TRUE(still_visible.success) << still_visible.error_msg;
+        EXPECT_NE(
+                still_visible.data.find("\"name\":\"Ali\""),
+                std::string::npos);
+
+        // FK validation must see the index entry staged earlier in this same
+        // transaction.
+        const auto referenced = engine.InsertOneTx(
+                *transaction,
+                "posts",
+                R"({"_id":"p1","user_email":"ali@example.com"})");
+        ASSERT_TRUE(referenced.success) << referenced.error_msg;
+
+        const auto committed = engine.CommitTransaction(*transaction);
+        ASSERT_TRUE(committed.success) << committed.error_msg;
+
+        const auto user_count = engine.Count("users", Condition{});
+        ASSERT_TRUE(user_count.success);
+        EXPECT_EQ(user_count.data, "1");
+
+        const auto post_count = engine.Count("posts", Condition{});
+        ASSERT_TRUE(post_count.success);
+        EXPECT_EQ(post_count.data, "1");
+
+        auto delete_transaction = engine.BeginTransaction();
+        ASSERT_NE(delete_transaction, nullptr);
+        ASSERT_TRUE(engine.DeleteByIdTx(
+                *delete_transaction,
+                "users",
+                "u1").success);
+        ASSERT_TRUE(engine.RollbackTransaction(*delete_transaction).success);
+
+        // Rolling back the outer transaction must restore document, index and
+        // counter together.
+        EXPECT_TRUE(engine.FindById("users", "u1").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "posts",
+                R"({"_id":"p2","user_email":"ali@example.com"})"
+        ).success);
+
+        const auto count_after_rollback =
+                engine.Count("users", Condition{});
+        ASSERT_TRUE(count_after_rollback.success);
+        EXPECT_EQ(count_after_rollback.data, "1");
+    }
+
+    TEST(DocEngineTransaction,
+         ConflictingWriterReturnsTimeoutWithoutPartialMutation) {
+        TestTempDir temp("nexora_doc_transaction_conflict");
+        TransactionSettings settings;
+        settings.lock_timeout_ms = 50;
+        settings.expiration_ms = 5000;
+        settings.deadlock_detect = true;
+        DocEngine engine((temp.path() / "db").string(), settings);
+
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "items",
+                R"({"_id":"same","owner":"original"})").success);
+
+        auto first = engine.BeginTransaction();
+        auto second = engine.BeginTransaction();
+        ASSERT_NE(first, nullptr);
+        ASSERT_NE(second, nullptr);
+
+        UpdateSpec first_update;
+        first_update.Set("owner", "first");
+        ASSERT_TRUE(engine.UpdateByIdTx(
+                *first,
+                "items",
+                "same",
+                first_update).success);
+
+        UpdateSpec second_update;
+        second_update.Set("owner", "second");
+        const auto conflict = engine.UpdateByIdTx(
+                *second,
+                "items",
+                "same",
+                second_update);
+        EXPECT_FALSE(conflict.success);
+        EXPECT_NE(
+                conflict.error_msg.find("[transaction-timeout]"),
+                std::string::npos) << conflict.error_msg;
+
+        ASSERT_TRUE(engine.RollbackTransaction(*second).success);
+        ASSERT_TRUE(engine.RollbackTransaction(*first).success);
+
+        const auto stored = engine.FindById("items", "same");
+        ASSERT_TRUE(stored.success) << stored.error_msg;
+        EXPECT_NE(stored.data.find("\"owner\":\"original\""),
+                  std::string::npos);
+    }
+
+    TEST(DocEngineForeignKey, RejectsNonIndexedReferenceField) {
+        TestTempDir temp("nexora_doc_fk_requires_index");
+        DocEngine engine((temp.path() / "db").string());
+
+        ASSERT_TRUE(engine.CreateCollection("users").success);
+        ASSERT_TRUE(engine.CreateCollection("posts").success);
+
+        ForeignKeyDefinition foreign_key;
+        foreign_key.fk_name = "fk_posts_email";
+        foreign_key.local_field = "user_email";
+        foreign_key.ref_collection = "users";
+        foreign_key.ref_field = "email";
+
+        const auto result = engine.AddForeignKey("posts", foreign_key);
+        EXPECT_FALSE(result.success);
+        EXPECT_NE(result.error_msg.find("requires an index"),
+                  std::string::npos);
+    }
+
+    TEST(DocEngineCounter,
+         ConcurrentInsertAndDeleteDoNotLoseUpdates) {
+        TestTempDir temp("nexora_doc_counter_concurrency");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+
+        std::vector<std::string> initial_documents;
+        initial_documents.reserve(200);
+        for (int index = 0; index < 200; ++index) {
+            initial_documents.push_back(
+                    R"({"_id":"old_)" +
+                    std::to_string(index) +
+                    R"(","value":1})");
+        }
+        ASSERT_TRUE(engine.InsertMany(
+                "items",
+                initial_documents).success);
+
+        std::atomic<bool> start{false};
+        std::atomic<bool> operation_failed{false};
+        std::vector<std::thread> workers;
+
+        for (int worker = 0; worker < 2; ++worker) {
+            workers.emplace_back([&, worker] {
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                for (int offset = 0; offset < 50; ++offset) {
+                    const int index = worker * 50 + offset;
+                    const auto result = engine.InsertOne(
+                            "items",
+                            R"({"_id":"new_)" +
+                            std::to_string(index) +
+                            R"(","value":2})");
+                    if (!result.success) {
+                        operation_failed.store(
+                                true,
+                                std::memory_order_relaxed);
+                    }
+                }
+            });
+        }
+
+        for (int worker = 0; worker < 2; ++worker) {
+            workers.emplace_back([&, worker] {
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                for (int offset = 0; offset < 50; ++offset) {
+                    const int index = worker * 50 + offset;
+                    const auto result = engine.DeleteById(
+                            "items",
+                            "old_" + std::to_string(index));
+                    if (!result.success || result.data != "1") {
+                        operation_failed.store(
+                                true,
+                                std::memory_order_relaxed);
+                    }
+                }
+            });
+        }
+
+        start.store(true, std::memory_order_release);
+        for (auto& worker : workers) {
+            worker.join();
+        }
+
+        EXPECT_FALSE(operation_failed.load(std::memory_order_relaxed));
+
+        const auto stored_count = engine.Count("items", Condition{});
+        ASSERT_TRUE(stored_count.success) << stored_count.error_msg;
+        EXPECT_EQ(stored_count.data, "200");
+        EXPECT_EQ(engine.GetDocumentRange("items").size(), 200U);
+
+        const auto reconciled =
+                engine.ReconcileCollectionCounter("items");
+        ASSERT_TRUE(reconciled.success) << reconciled.error_msg;
+        EXPECT_EQ(reconciled.data, "200");
     }
 
 } // namespace
