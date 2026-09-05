@@ -100,6 +100,17 @@ if(NEXORA_ENABLE_LTO)
     if(NEXORA_IPO_SUPPORTED)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            add_compile_options(
+                    "$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-flto=auto>"
+            )
+
+            add_link_options(
+                    "$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-flto=auto>"
+            )
+            
+        endif ()
     else()
         message(FATAL_ERROR "LTO is not supported: ${NEXORA_IPO_ERROR}")
     endif()
