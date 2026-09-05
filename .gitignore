@@ -30,3 +30,60 @@ NexoraDB/src/nexoradb/native/nexoradb.cpython-310-x86_64-linux-gnu.so
 /NexoraDB/dist/
 /temp
 /Testing/Temporary
+
+# Python build and packaging artifacts
+/NexoraDB/build/
+**/*.egg-info/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local Python environments
+/.venv/
+/venv/
+/env/
+/wheel-test/
+/.release-venv/
+
+# CMake artifacts accidentally generated outside the preset build trees
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# Native compiler, sanitizer, and profiling artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.dylib
+*.dll
+*.dSYM/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+
+# Runtime and local diagnostic output
+*.log
+*.pid
+*.trace
+*.core
+vgcore.*
+
+# Editors and operating systems
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
