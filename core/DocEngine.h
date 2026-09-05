@@ -105,6 +105,13 @@ namespace nexora {
             }
         };
 
+        struct PageResult {
+            bool success = false;
+            std::string data = "[]";
+            std::string continuation_token;
+            std::string error_msg;
+        };
+
         enum class BulkWriteMode : uint8_t {
             Atomic = 0,
             OrderedChunks = 1
@@ -197,6 +204,12 @@ namespace nexora {
             Unique      = 2  ///< ایندکس یکتا
         };
 
+        enum class IndexState : uint8_t {
+            Building = 0,
+            Ready = 1,
+            Failed = 2
+        };
+
 /**
  * @struct IndexDefinition
  * @brief تعریف یک Index
@@ -211,6 +224,9 @@ namespace nexora {
             IndexType                type = IndexType::SingleField;
             std::string              index_id;
             std::uint32_t            format_version = 2;
+            IndexState               state = IndexState::Ready;
+            std::string              build_cursor;
+            std::string              last_error;
         };
 
 /**
@@ -384,6 +400,8 @@ namespace nexora {
             /** Test-only one-shot fault injection for atomicity tests. */
             void SetMutationFaultPointForTesting(
                     MutationFaultPoint point) noexcept;
+            void PauseIndexBuildAfterChunksForTesting(
+                    std::uint32_t chunks) noexcept;
 
             // ──────────────────────────────────────────────────────────
             // 6.2  مدیریت Collection و Schema
@@ -467,6 +485,10 @@ namespace nexora {
 
             /** Rebuild all indexes and migrate legacy physical keys to v2. */
             DBResult RebuildIndexes(const std::string& collection_name);
+            DBResult ResumeIndexBuild(const std::string& collection_name,
+                                      const std::string& index_name);
+            DBResult CleanupIndexBuild(const std::string& collection_name,
+                                       const std::string& index_name);
 
             // ──────────────────────────────────────────────────────────
             // 6.4  مدیریت Foreign Key
@@ -585,6 +607,12 @@ namespace nexora {
                               const nexora::query::Condition& condition,
                               uint32_t                        limit = 0,
                               uint32_t                        skip  = 0);
+
+            PageResult FindPage(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    std::uint32_t limit,
+                    const std::string& continuation_token = "");
 
             // ──────────────────────────────────────────────────────────
             // 6.7  CRUD - Update
@@ -944,6 +972,7 @@ namespace nexora {
             mutable std::shared_mutex index_ddl_mutex_;
             std::atomic<MutationFaultPoint> mutation_fault_point_{
                     MutationFaultPoint::None};
+            std::atomic<std::uint32_t> pause_index_build_chunks_{0};
 
             struct MutationMetadata {
                 SchemaDefinition schema;

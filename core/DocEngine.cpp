@@ -105,6 +105,49 @@ namespace nexora {
                         category + "[RocksDB] " + operation + ": " +
                         status.ToString());
             }
+
+            std::string PrefixUpperBound(std::string prefix) {
+                for (std::size_t i = prefix.size(); i > 0; --i) {
+                    auto& byte = reinterpret_cast<unsigned char&>(prefix[i - 1]);
+                    if (byte != 0xff) {
+                        ++byte;
+                        prefix.resize(i);
+                        return prefix;
+                    }
+                }
+                return {};
+            }
+
+            std::string EncodeCursorToken(const std::string& key) {
+                static constexpr char hex[] = "0123456789abcdef";
+                std::string token = "d1.";
+                token.reserve(3 + key.size() * 2);
+                for (const unsigned char byte : key) {
+                    token.push_back(hex[byte >> 4]);
+                    token.push_back(hex[byte & 0x0f]);
+                }
+                return token;
+            }
+
+            std::optional<std::string> DecodeCursorToken(
+                    const std::string& token) {
+                if (!token.starts_with("d1.") || (token.size() - 3) % 2 != 0)
+                    return std::nullopt;
+                auto nibble = [](char value) -> int {
+                    if (value >= '0' && value <= '9') return value - '0';
+                    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+                    return -1;
+                };
+                std::string key;
+                key.reserve((token.size() - 3) / 2);
+                for (std::size_t i = 3; i < token.size(); i += 2) {
+                    const int high = nibble(token[i]);
+                    const int low = nibble(token[i + 1]);
+                    if (high < 0 || low < 0) return std::nullopt;
+                    key.push_back(static_cast<char>((high << 4) | low));
+                }
+                return key;
+            }
         } //namespace
 
 
@@ -363,6 +406,9 @@ namespace nexora {
             uint32_t fc = static_cast<uint32_t>(idx.fields.size());
             out.append(reinterpret_cast<const char*>(&fc), 4);
             for (const auto& f : idx.fields) serial::WriteString(out, f);
+            serial::WriteByte(out, static_cast<uint8_t>(idx.state));
+            serial::WriteString(out, idx.build_cursor);
+            serial::WriteString(out, idx.last_error);
             return out;
         }
 
@@ -390,6 +436,13 @@ namespace nexora {
                 std::string f;
                 if (!serial::ReadString(bytes, pos, f)) return std::nullopt;
                 idx.fields.push_back(std::move(f));
+            }
+            if (pos < bytes.size()) {
+                uint8_t state = 0;
+                if (!serial::ReadByte(bytes, pos, state)) return std::nullopt;
+                idx.state = static_cast<IndexState>(state);
+                if (!serial::ReadString(bytes, pos, idx.build_cursor)) return std::nullopt;
+                if (!serial::ReadString(bytes, pos, idx.last_error)) return std::nullopt;
             }
             return idx;
         }
@@ -480,6 +533,11 @@ namespace nexora {
         void DocEngine::SetMutationFaultPointForTesting(
                 MutationFaultPoint point) noexcept {
             mutation_fault_point_.store(point, std::memory_order_release);
+        }
+
+        void DocEngine::PauseIndexBuildAfterChunksForTesting(
+                std::uint32_t chunks) noexcept {
+            pause_index_build_chunks_.store(chunks, std::memory_order_release);
         }
 
         rocksdb::Status DocEngine::InjectMutationFaultIfRequested(
@@ -597,6 +655,7 @@ namespace nexora {
 
         DBResult DocEngine::SetSchemaValidation(const std::string&      collection_name,
                                                 const SchemaDefinition& schema) {
+            std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
@@ -607,6 +666,7 @@ namespace nexora {
                 const bool enforced = std::any_of(
                         indexes.begin(), indexes.end(),
                         [&](const IndexDefinition& index) {
+                            if (index.state != IndexState::Ready) return false;
                             return index.type == IndexType::Unique &&
                                    index.fields.size() == 1 &&
                                    index.fields.front() == field.name;
@@ -636,7 +696,6 @@ namespace nexora {
 
         DBResult DocEngine::CreateIndex(const std::string&     collection_name,
                                         const IndexDefinition& index_def) {
-            std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
@@ -649,59 +708,26 @@ namespace nexora {
             // or accidentally reuse an ID belonging to another index.
             effective_index.index_id = GenerateDocId();
             effective_index.format_version = indexv2::kFormatVersion;
+            effective_index.state = IndexState::Building;
+            effective_index.build_cursor.clear();
+            effective_index.last_error.clear();
             std::string meta_key = MakeMetaKey(keys::kMetaIdx, collection_name,
                                                effective_index.index_name);
-            std::string ex;
-            rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &ex);
-            if (s.ok())
-                return DBResult::Err("Index '" + index_def.index_name + "' already exists");
-            if (!s.IsNotFound())
-                return RocksFailure("CreateIndex metadata lookup", s);
-
-            // Rebuild index از داده‌های موجود
-            std::string data_prefix = std::string(keys::kData) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            rocksdb::WriteBatch batch;
-            batch.Put(meta_key, SerializeIndex(effective_index));
-            uint64_t cnt = 0;
-            std::unordered_map<std::string, std::string> unique_owners;
-
-            for (it->Seek(data_prefix);
-                 it->Valid() &&
-                 it->key().starts_with(rocksdb::Slice(data_prefix));
-                 it->Next()) {
-                std::string doc_id = it->key().ToString().substr(data_prefix.size());
-                std::string bson   = it->value().ToString();
-                const auto tuple = indexv2::EncodeTuple(
-                        bson, effective_index.fields);
-                if (!tuple) continue;
-                if (effective_index.type == IndexType::Unique) {
-                    const std::string unique_key = indexv2::UniqueKey(
-                            collection_name, effective_index.index_id, *tuple);
-                    const auto [owner, inserted] = unique_owners.emplace(
-                            unique_key, doc_id);
-                    if (!inserted && owner->second != doc_id) {
-                        return DBResult::Err(
-                                "Unique index duplicate while building '" +
-                                effective_index.index_name + "'");
-                    }
-                    batch.Put(unique_key, doc_id);
-                }
-                batch.Put(indexv2::EntryKey(collection_name,
-                                            effective_index.index_id,
-                                            *tuple, doc_id), doc_id);
-                ++cnt;
+            {
+                std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
+                std::string existing;
+                rocksdb::Status status = txn_db_->Get(
+                        read_options_, meta_key, &existing);
+                if (status.ok())
+                    return DBResult::Err("Index '" + index_def.index_name + "' already exists");
+                if (!status.IsNotFound())
+                    return RocksFailure("CreateIndex metadata lookup", status);
+                status = txn_db_->Put(write_options_, meta_key,
+                                      SerializeIndex(effective_index));
+                if (!status.ok())
+                    return RocksFailure("CreateIndex publish Building", status);
             }
-
-            if (!it->status().ok())
-                return RocksFailure("CreateIndex data scan", it->status());
-
-            s = txn_db_->Write(write_options_, &batch);
-            ROCKS_CHECK(s, "CreateIndex atomic metadata/rebuild");
-
-            return DBResult::Ok("Index '" + index_def.index_name +
-                                "' created (" + std::to_string(cnt) + " entries)");
+            return ResumeIndexBuild(collection_name, effective_index.index_name);
         }
 
         DBResult DocEngine::DropIndex(const std::string& collection_name,
@@ -792,6 +818,9 @@ namespace nexora {
                     index.index_id = GenerateDocId();
                     index.format_version = indexv2::kFormatVersion;
                 }
+                index.state = IndexState::Ready;
+                index.build_cursor.clear();
+                index.last_error.clear();
 
                 std::unordered_map<std::string, std::string> unique_owners;
                 const std::string data_prefix = std::string(keys::kData) +
@@ -827,12 +856,199 @@ namespace nexora {
             return DBResult::Ok(std::to_string(indexes.size()));
         }
 
+        DBResult DocEngine::CleanupIndexBuild(
+                const std::string& collection_name,
+                const std::string& index_name) {
+            std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
+            const std::string meta_key = MakeMetaKey(
+                    keys::kMetaIdx, collection_name, index_name);
+            std::string serialized;
+            rocksdb::Status status = txn_db_->Get(
+                    read_options_, meta_key, &serialized);
+            if (!status.ok()) return RocksFailure("CleanupIndexBuild metadata", status);
+            auto index = DeserializeIndex(serialized);
+            if (!index) return DBResult::Err("Corrupted index metadata");
+            if (index->state == IndexState::Ready)
+                return DBResult::Err("Cannot cleanup a Ready index");
+
+            const std::string prefix = indexv2::IndexPrefix(
+                    collection_name, index->index_id);
+            while (true) {
+                rocksdb::WriteBatch batch;
+                std::size_t count = 0;
+                auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                        txn_db_->NewIterator(read_options_));
+                for (iterator->Seek(prefix);
+                     iterator->Valid() && iterator->key().starts_with(prefix) &&
+                     count < 1000;
+                     iterator->Next(), ++count)
+                    batch.Delete(iterator->key());
+                if (!iterator->status().ok())
+                    return RocksFailure("CleanupIndexBuild scan", iterator->status());
+                if (count == 0) break;
+                status = txn_db_->Write(write_options_, &batch);
+                if (!status.ok())
+                    return RocksFailure("CleanupIndexBuild delete chunk", status);
+            }
+            index->build_cursor.clear();
+            status = txn_db_->Put(write_options_, meta_key, SerializeIndex(*index));
+            if (!status.ok()) return RocksFailure("CleanupIndexBuild checkpoint", status);
+            return DBResult::Ok("Index build artifacts cleaned");
+        }
+
+        DBResult DocEngine::ResumeIndexBuild(
+                const std::string& collection_name,
+                const std::string& index_name) {
+            const std::string meta_key = MakeMetaKey(
+                    keys::kMetaIdx, collection_name, index_name);
+            std::string serialized;
+            rocksdb::Status status = txn_db_->Get(
+                    read_options_, meta_key, &serialized);
+            if (!status.ok()) return RocksFailure("ResumeIndexBuild metadata", status);
+            auto decoded = DeserializeIndex(serialized);
+            if (!decoded) return DBResult::Err("Corrupted index metadata");
+            IndexDefinition index = *decoded;
+            if (index.state == IndexState::Ready)
+                return DBResult::Ok("Index is already Ready");
+            if (index.state == IndexState::Failed) {
+                const DBResult cleanup = CleanupIndexBuild(
+                        collection_name, index_name);
+                if (!cleanup.success) return cleanup;
+                index.state = IndexState::Building;
+                index.last_error.clear();
+                status = txn_db_->Put(write_options_, meta_key, SerializeIndex(index));
+                if (!status.ok()) return RocksFailure("ResumeIndexBuild restart", status);
+            }
+
+            auto fail_build = [&](const std::string& message) -> DBResult {
+                index.state = IndexState::Failed;
+                index.last_error = message;
+                const rocksdb::Status stored = txn_db_->Put(
+                        write_options_, meta_key, SerializeIndex(index));
+                if (!stored.ok())
+                    return RocksFailure("ResumeIndexBuild mark Failed", stored);
+                const DBResult cleanup = CleanupIndexBuild(
+                        collection_name, index_name);
+                if (!cleanup.success)
+                    return DBResult::Err(message + "; " + cleanup.error_msg);
+                return DBResult::Err(message);
+            };
+
+            const std::string data_prefix = std::string(keys::kData) +
+                    collection_name + ":";
+            constexpr std::size_t kMaxDocuments = 1000;
+            constexpr std::size_t kMaxBytes = 4 * 1024 * 1024;
+            std::uint64_t indexed = 0;
+
+            while (true) {
+                std::vector<std::string> keys_to_process;
+                std::size_t bytes = 0;
+                rocksdb::ReadOptions scan_options;
+                scan_options.fill_cache = false;
+                const std::string upper_value = PrefixUpperBound(data_prefix);
+                const rocksdb::Slice upper_bound(upper_value);
+                scan_options.iterate_upper_bound = &upper_bound;
+                auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                        txn_db_->NewIterator(scan_options));
+                if (index.build_cursor.empty()) iterator->Seek(data_prefix);
+                else {
+                    iterator->Seek(index.build_cursor);
+                    if (iterator->Valid() && iterator->key() == index.build_cursor)
+                        iterator->Next();
+                }
+                for (; iterator->Valid() && keys_to_process.size() < kMaxDocuments;
+                     iterator->Next()) {
+                    const std::size_t item_bytes = iterator->key().size() +
+                                                   iterator->value().size();
+                    if (!keys_to_process.empty() && bytes + item_bytes > kMaxBytes)
+                        break;
+                    keys_to_process.push_back(iterator->key().ToString());
+                    bytes += item_bytes;
+                }
+                if (!iterator->status().ok())
+                    return fail_build(iterator->status().ToString());
+                if (keys_to_process.empty()) break;
+
+                auto transaction = BeginTransaction();
+                if (!transaction)
+                    return fail_build("Unable to start index build transaction");
+                for (const auto& document_key : keys_to_process) {
+                    std::string document;
+                    status = transaction->Get()->GetForUpdate(
+                            read_options_, document_key, &document);
+                    if (status.IsNotFound()) continue;
+                    if (!status.ok()) {
+                        RollbackTransaction(*transaction);
+                        return fail_build(status.ToString());
+                    }
+                    const std::string doc_id = document_key.substr(data_prefix.size());
+                    const auto tuple = indexv2::EncodeTuple(document, index.fields);
+                    if (!tuple) continue;
+                    if (index.type == IndexType::Unique) {
+                        const std::string unique_key = indexv2::UniqueKey(
+                                collection_name, index.index_id, *tuple);
+                        std::string owner;
+                        status = transaction->Get()->GetForUpdate(
+                                read_options_, unique_key, &owner);
+                        if (status.ok() && owner != doc_id) {
+                            RollbackTransaction(*transaction);
+                            return fail_build(
+                                    "Unique index duplicate while building '" +
+                                    index.index_name + "'");
+                        }
+                        if (!status.ok() && !status.IsNotFound()) {
+                            RollbackTransaction(*transaction);
+                            return fail_build(status.ToString());
+                        }
+                        status = transaction->Get()->Put(unique_key, doc_id);
+                        if (!status.ok()) {
+                            RollbackTransaction(*transaction);
+                            return fail_build(status.ToString());
+                        }
+                    }
+                    status = transaction->Get()->Put(
+                            indexv2::EntryKey(collection_name, index.index_id,
+                                             *tuple, doc_id), doc_id);
+                    if (!status.ok()) {
+                        RollbackTransaction(*transaction);
+                        return fail_build(status.ToString());
+                    }
+                    ++indexed;
+                }
+                index.build_cursor = keys_to_process.back();
+                status = transaction->Get()->Put(
+                        meta_key, SerializeIndex(index));
+                if (!status.ok()) {
+                    RollbackTransaction(*transaction);
+                    return fail_build(status.ToString());
+                }
+                const DBResult committed = CommitTransaction(*transaction);
+                if (!committed.success) return fail_build(committed.error_msg);
+                const std::uint32_t remaining = pause_index_build_chunks_.load(
+                        std::memory_order_acquire);
+                if (remaining > 0 && pause_index_build_chunks_.fetch_sub(
+                        1, std::memory_order_acq_rel) == 1)
+                    return DBResult::Err("Index build paused for testing");
+            }
+
+            {
+                std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
+                index.state = IndexState::Ready;
+                index.build_cursor.clear();
+                index.last_error.clear();
+                status = txn_db_->Put(write_options_, meta_key, SerializeIndex(index));
+            }
+            if (!status.ok()) return RocksFailure("ResumeIndexBuild publish Ready", status);
+            return DBResult::Ok(std::to_string(indexed));
+        }
+
 // ══════════════════════════════════════════════════════════════
 // §7  مدیریت Foreign Key
 // ══════════════════════════════════════════════════════════════
 
         DBResult DocEngine::AddForeignKey(const std::string&          collection_name,
                                           const ForeignKeyDefinition& fk_def) {
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name) ||
                 IsReservedCollectionName(fk_def.ref_collection))
                 return DBResult::Err("reserved collection name");
@@ -861,10 +1077,9 @@ namespace nexora {
                         referenced_metadata.indexes.begin(),
                         referenced_metadata.indexes.end(),
                         [&](const IndexDefinition& index) {
-                            return std::find(
-                                    index.fields.begin(),
-                                    index.fields.end(),
-                                    fk_def.ref_field) != index.fields.end();
+                            return index.state == IndexState::Ready &&
+                                   !index.fields.empty() &&
+                                   index.fields.front() == fk_def.ref_field;
                         });
 
                 if (!has_supporting_index) {
@@ -1048,6 +1263,7 @@ namespace nexora {
                         indexes.begin(), indexes.end(),
                         [&](const IndexDefinition& index) {
                             return index.format_version == indexv2::kFormatVersion &&
+                                   index.state == IndexState::Ready &&
                                    !index.fields.empty() &&
                                    index.fields.front() == foreign_key.ref_field;
                         });
@@ -1099,8 +1315,7 @@ namespace nexora {
                     const std::vector<IndexDefinition>& indexes)
                     : engine_(engine),
                       collection_(collection),
-                      indexes_(indexes),
-                      ddl_guard_(engine.index_ddl_mutex_) {
+                      indexes_(indexes) {
                 owned_transaction_.reset(
                         engine_.txn_db_->BeginTransaction(
                                 engine_.write_options_,
@@ -1333,6 +1548,7 @@ namespace nexora {
                     const std::string& document_id,
                     const std::string& bson_document) {
                 for (const auto& index : indexes_) {
+                    if (index.state == IndexState::Failed) continue;
                     if (index.format_version != indexv2::kFormatVersion ||
                         index.index_id.empty())
                         return rocksdb::Status::InvalidArgument(
@@ -1369,6 +1585,7 @@ namespace nexora {
                     const std::string& document_id,
                     const std::string& bson_document) {
                 for (const auto& index : indexes_) {
+                    if (index.state == IndexState::Failed) continue;
                     if (index.format_version != indexv2::kFormatVersion ||
                         index.index_id.empty())
                         return rocksdb::Status::InvalidArgument(
@@ -1394,7 +1611,6 @@ namespace nexora {
             DocEngine& engine_;
             std::string collection_;
             const std::vector<IndexDefinition>& indexes_;
-            std::shared_lock<std::shared_mutex> ddl_guard_;
             std::unique_ptr<rocksdb::Transaction> owned_transaction_;
             rocksdb::Transaction* transaction_ = nullptr;
             bool uses_savepoint_ = false;
@@ -1425,6 +1641,7 @@ namespace nexora {
         DBResult DocEngine::InsertOne(
                 const std::string& collection_name,
                 const std::string& bson_document) {
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -1543,6 +1760,7 @@ namespace nexora {
 
         DBResult DocEngine::InsertMany(const std::string&              collection_name,
                                        const std::vector<std::string>& bson_documents) {
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -1802,6 +2020,67 @@ namespace nexora {
             return DBResult::Ok(results_json);
         }
 
+        PageResult DocEngine::FindPage(
+                const std::string& collection_name,
+                const nexora::query::Condition& condition,
+                std::uint32_t limit,
+                const std::string& continuation_token) {
+            PageResult result;
+            if (limit == 0) {
+                result.error_msg = "Page limit must be greater than zero";
+                return result;
+            }
+            if (!CollectionExists(collection_name)) {
+                result.error_msg = "Collection '" + collection_name + "' does not exist";
+                return result;
+            }
+            const std::string prefix = std::string(keys::kData) + collection_name + ":";
+            const std::string upper_value = PrefixUpperBound(prefix);
+            const rocksdb::Slice upper_bound(upper_value);
+            rocksdb::ReadOptions options;
+            options.fill_cache = false;
+            options.iterate_upper_bound = &upper_bound;
+            auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                    txn_db_->NewIterator(options));
+
+            if (continuation_token.empty()) {
+                iterator->Seek(prefix);
+            } else {
+                const auto decoded = DecodeCursorToken(continuation_token);
+                if (!decoded || !decoded->starts_with(prefix)) {
+                    result.error_msg = "Invalid continuation token";
+                    return result;
+                }
+                iterator->Seek(*decoded);
+                if (iterator->Valid() && iterator->key() == *decoded)
+                    iterator->Next();
+            }
+
+            std::string json = "[";
+            bool first = true;
+            std::uint32_t emitted = 0;
+            std::string last_key;
+            for (; iterator->Valid() && emitted < limit; iterator->Next()) {
+                const std::string document = iterator->value().ToString();
+                if (!MatchesCondition(document, condition)) continue;
+                if (!first) json.push_back(',');
+                first = false;
+                json += document;
+                last_key = iterator->key().ToString();
+                ++emitted;
+            }
+            if (!iterator->status().ok()) {
+                result.error_msg = iterator->status().ToString();
+                return result;
+            }
+            json.push_back(']');
+            result.success = true;
+            result.data = std::move(json);
+            if (!last_key.empty() && iterator->Valid())
+                result.continuation_token = EncodeCursorToken(last_key);
+            return result;
+        }
+
 // ══════════════════════════════════════════════════════════════
 // §11  CRUD - Update
 // ══════════════════════════════════════════════════════════════
@@ -1810,6 +2089,7 @@ namespace nexora {
                 const std::string& collection_name,
                 const std::string& doc_id,
                 const nexora::query::UpdateSpec& update_spec) {
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -1904,6 +2184,7 @@ namespace nexora {
         DBResult DocEngine::UpdateMany(const std::string&               collection_name,
                                        const nexora::query::Condition&  condition,
                                        const nexora::query::UpdateSpec& update_spec) {
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -1936,7 +2217,12 @@ namespace nexora {
             std::vector<std::string> candidate_ids;
 
             {
-                auto iterator = mutation.NewIterator(read_options_);
+                rocksdb::ReadOptions scan_options = read_options_;
+                scan_options.fill_cache = false;
+                const std::string upper_value = PrefixUpperBound(data_prefix);
+                const rocksdb::Slice upper_bound(upper_value);
+                scan_options.iterate_upper_bound = &upper_bound;
+                auto iterator = mutation.NewIterator(scan_options);
                 for (iterator->Seek(data_prefix);
                      iterator->Valid() &&
                      iterator->key().starts_with(data_prefix);
@@ -2060,8 +2346,13 @@ namespace nexora {
             const std::string prefix =
                     std::string(keys::kData) + collection_name + ":";
             std::vector<std::pair<std::string, std::size_t>> candidates;
+            rocksdb::ReadOptions scan_options = read_options_;
+            scan_options.fill_cache = false;
+            const std::string upper_value = PrefixUpperBound(prefix);
+            const rocksdb::Slice upper_bound(upper_value);
+            scan_options.iterate_upper_bound = &upper_bound;
             auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                    txn_db_->NewIterator(read_options_));
+                    txn_db_->NewIterator(scan_options));
             for (iterator->Seek(prefix);
                  iterator->Valid() && iterator->key().starts_with(prefix);
                  iterator->Next()) {
@@ -2140,6 +2431,7 @@ namespace nexora {
         DBResult DocEngine::DeleteById(
                 const std::string& collection_name,
                 const std::string& doc_id) {
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -2215,6 +2507,7 @@ namespace nexora {
 
         DBResult DocEngine::DeleteMany(const std::string&              collection_name,
                                        const nexora::query::Condition& condition) {
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -2247,7 +2540,12 @@ namespace nexora {
             std::vector<std::string> candidate_ids;
 
             {
-                auto iterator = mutation.NewIterator(read_options_);
+                rocksdb::ReadOptions scan_options = read_options_;
+                scan_options.fill_cache = false;
+                const std::string upper_value = PrefixUpperBound(data_prefix);
+                const rocksdb::Slice upper_bound(upper_value);
+                scan_options.iterate_upper_bound = &upper_bound;
+                auto iterator = mutation.NewIterator(scan_options);
                 for (iterator->Seek(data_prefix);
                      iterator->Valid() &&
                      iterator->key().starts_with(data_prefix);
@@ -2347,8 +2645,13 @@ namespace nexora {
             const std::string prefix =
                     std::string(keys::kData) + collection_name + ":";
             std::vector<std::pair<std::string, std::size_t>> candidates;
+            rocksdb::ReadOptions scan_options = read_options_;
+            scan_options.fill_cache = false;
+            const std::string upper_value = PrefixUpperBound(prefix);
+            const rocksdb::Slice upper_bound(upper_value);
+            scan_options.iterate_upper_bound = &upper_bound;
             auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                    txn_db_->NewIterator(read_options_));
+                    txn_db_->NewIterator(scan_options));
             for (iterator->Seek(prefix);
                  iterator->Valid() && iterator->key().starts_with(prefix);
                  iterator->Next()) {
