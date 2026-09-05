@@ -161,6 +161,10 @@ namespace {
             return *engine_;
         }
 
+        const std::filesystem::path& path() const noexcept {
+            return path_;
+        }
+
     private:
         void load() {
             std::vector<std::string> batch;
@@ -208,15 +212,99 @@ namespace {
     }
 
     double percentile50(const std::vector<double>& values){
-        return percentile(values,50);
+        return percentile(values, 0.50);
     }
 
     double percentile95(const std::vector<double>& values){
-        return percentile(values,95);
+        return percentile(values, 0.95);
     }
 
     double percentile99(const std::vector<double>& values){
-        return percentile(values,99);
+        return percentile(values, 0.99);
+    }
+
+    std::uint64_t currentRssBytes() {
+        #if defined(__linux__)
+            std::ifstream statusFile("/proc/self/status");
+
+            if (!statusFile) {
+              return 0;
+            }
+
+            std::string key;
+            while (statusFile >> key){
+                if (key == "VmRSS:") {
+                    std::uint64_t rssKilobytes  = 0;
+                    statusFile >> rssKilobytes;
+                    return rssKilobytes * 1024ULL;
+                }
+
+                statusFile.ignore(
+                        std::numeric_limits<std::streamsize>::max(),
+                        '\n'
+                        );
+
+            }
+
+        #endif
+            return 0;
+    }
+
+    std::uintmax_t directorySize(const std::filesystem::path& rootPath){
+        if (rootPath.empty()){
+            return 0;
+        }
+        std::error_code error ;
+
+        if (!std::filesystem::exists(rootPath,error) || error) {
+            return 0;
+        }
+        std::uintmax_t totalBytes = 0;
+
+        std::filesystem::recursive_directory_iterator iterator (
+                rootPath,
+                std::filesystem::directory_options::skip_permission_denied,
+                error
+                );
+
+        const std::filesystem::recursive_directory_iterator end ;
+
+        while (!error && iterator != end) {
+            if (iterator -> is_regular_file(error) && !error) {
+                const auto fileBytes = iterator -> file_size(error);
+
+                if (!error) {
+                    totalBytes += fileBytes;
+                }
+            }
+
+            error.clear();
+            iterator.increment(error);
+
+            if (error) {
+                error.clear();
+            }
+        }
+        return totalBytes;
+    }
+
+    void recordBenchmarkMetrics(benchmark::State& state , const std::filesystem::path& datasetPath = {}) {
+        state.counters["operations_per_second"] =
+                benchmark::Counter(
+                        static_cast<double>(state.iterations()),
+                        benchmark::Counter::kIsRate);
+
+        state.counters["rss_bytes_after"] =
+                benchmark::Counter(
+                        static_cast<double>(currentRssBytes()),
+                        benchmark::Counter::kDefaults,
+                        benchmark::Counter::kIs1024);
+
+        state.counters["dataset_disk_bytes"] =
+                benchmark::Counter(
+                        static_cast<double>(directorySize(datasetPath)),
+                        benchmark::Counter::kDefaults,
+                        benchmark::Counter::kIs1024);
     }
 
 
@@ -276,6 +364,7 @@ namespace {
         }
 
         state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state,dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -308,6 +397,9 @@ namespace {
             benchmark::DoNotOptimize(result.data.size());
             state.SetIterationTime(secondsBetween(begin, end));
         }
+
+        state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -348,6 +440,9 @@ namespace {
             benchmark::DoNotOptimize(result.data.size());
             state.SetIterationTime(secondsBetween(begin, end));
         }
+
+        state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -379,6 +474,7 @@ namespace {
         state.SetItemsProcessed(
                 state.iterations() * static_cast<std::int64_t>(size)
         );
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -412,6 +508,7 @@ namespace {
         }
 
         state.SetItemsProcessed(static_cast<std::int64_t>(size));
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -450,6 +547,7 @@ namespace {
         }
 
         state.SetItemsProcessed(static_cast<std::int64_t>(size));
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -482,6 +580,7 @@ namespace {
         }
 
         state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -520,6 +619,9 @@ namespace {
             benchmark::DoNotOptimize(result.data.size());
             state.SetIterationTime(secondsBetween(begin, end));
         }
+
+        state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -549,6 +651,7 @@ namespace {
         }
 
         state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 // ---------------------------------------------------------
@@ -580,6 +683,9 @@ namespace {
             benchmark::DoNotOptimize(result.data.size());
             state.SetIterationTime(secondsBetween(begin, end));
         }
+
+        state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state, dataset.path());
     }
 
 #ifdef NEXORA_BUILD_GRAPH
@@ -674,6 +780,7 @@ namespace {
         state.SetItemsProcessed(
                 static_cast<std::int64_t>(size * 2)
         );
+        recordBenchmarkMetrics(state);
     }
 
 // ---------------------------------------------------------
@@ -701,6 +808,7 @@ namespace {
         }
 
         state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state);
     }
 
 // ---------------------------------------------------------
@@ -734,6 +842,9 @@ namespace {
             benchmark::DoNotOptimize(result.result_json.size());
             state.SetIterationTime(secondsBetween(begin, end));
         }
+
+        state.SetItemsProcessed(state.iterations());
+        recordBenchmarkMetrics(state);
     }
 
 // ---------------------------------------------------------
@@ -760,6 +871,7 @@ namespace {
                         dataset.graph().activeEdgeCount()
                 )
         );
+        recordBenchmarkMetrics(state);
     }
 
 // ---------------------------------------------------------
@@ -839,6 +951,7 @@ namespace {
         state.SetItemsProcessed(
                 state.iterations() * 1100
         );
+        recordBenchmarkMetrics(state);
     }
 
 #endif
