@@ -965,7 +965,7 @@ namespace nexora {
 
             // Compact فایل‌های دیسک
             if (!storage_->compactNodes(node_remap)) return false;
-            if (!storage_->compactEdges(edge_remap)) return false;
+            if (!storage_->compactEdges(node_remap, edge_remap)) return false;
 
             // آپدیت RAM با remap
             // ── NodeRecords ──
@@ -1014,6 +1014,8 @@ namespace nexora {
             adj_          = std::move(new_adj);
             edge_records_ = std::move(new_edges);
             id_map_       = std::move(new_id_map);
+            active_node_count_.store(node_records_.size());
+            active_edge_count_.store(edge_records_.size());
 
             // پاک کردن free stacks (بعد از compaction تمام رکوردها active هستند)
             while (!node_free_stack_.empty()) node_free_stack_.pop();

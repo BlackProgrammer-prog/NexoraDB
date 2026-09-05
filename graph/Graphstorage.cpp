@@ -334,39 +334,81 @@ namespace nexora {
             return node_file_.good();
         }
 
-        bool GraphStorage::compactEdges(std::unordered_map<EdgeId, EdgeId>& id_remap) {
+        bool GraphStorage::compactEdges(
+                const std::unordered_map<DenseId, DenseId>& node_id_remap,
+                std::unordered_map<EdgeId, EdgeId>& edge_id_remap
+        ) {
             std::vector<EdgeRecord> active_records;
+
             scanAllEdges([&](const EdgeRecord& rec) -> bool {
-                if (rec.isActive()) active_records.push_back(rec);
+                if (!rec.isActive()) {
+                    return true;
+                }
+
+                const auto src_it = node_id_remap.find(rec.src);
+                const auto dst_it = node_id_remap.find(rec.dst);
+
+                // Edgeهایی که endpoint معتبر ندارند نباید بعد از compaction باقی بمانند.
+                if (src_it == node_id_remap.end() ||
+                    dst_it == node_id_remap.end()) {
+                    return true;
+                }
+
+                EdgeRecord remapped = rec;
+                remapped.src = src_it->second;
+                remapped.dst = dst_it->second;
+
+                active_records.push_back(remapped);
                 return true;
             });
 
-            id_remap.clear();
+            edge_id_remap.clear();
+
             for (size_t i = 0; i < active_records.size(); ++i) {
-                EdgeId old_id = active_records[i].edge_id;
-                EdgeId new_id = static_cast<EdgeId>(i);
-                id_remap[old_id] = new_id;
+                const EdgeId old_id = active_records[i].edge_id;
+                const EdgeId new_id = static_cast<EdgeId>(i);
+
+                edge_id_remap.emplace(old_id, new_id);
                 active_records[i].edge_id = new_id;
             }
 
             {
-                std::lock_guard<std::mutex> le(edge_mutex_);
+                std::lock_guard<std::mutex> lock(edge_mutex_);
+
                 edge_file_.close();
-                edge_file_.open(edge_path_,
-                                std::ios::in | std::ios::out | std::ios::binary |
-                                std::ios::trunc);
-                if (!edge_file_.is_open()) return false;
+                edge_file_.open(
+                        edge_path_,
+                        std::ios::in |
+                        std::ios::out |
+                        std::ios::binary |
+                        std::ios::trunc
+                );
+
+                if (!edge_file_.is_open()) {
+                    return false;
+                }
 
                 for (const auto& rec : active_records) {
-                    edge_file_.write(reinterpret_cast<const char*>(&rec),
-                                     sizeof(EdgeRecord));
+                    edge_file_.write(
+                            reinterpret_cast<const char*>(&rec),
+                            sizeof(EdgeRecord)
+                    );
+
+                    if (!edge_file_) {
+                        return false;
+                    }
                 }
+
                 edge_file_.flush();
+
+                if (!edge_file_) {
+                    return false;
+                }
+
                 edge_file_records_ = active_records.size();
             }
 
-            return edge_file_.good();
+            return true;
         }
-
     } // namespace graph
 } // namespace nexora

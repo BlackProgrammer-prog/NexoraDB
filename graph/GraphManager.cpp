@@ -83,12 +83,12 @@ namespace nexora {
 
         namespace {
 // کلیدهای مخفی در RocksDB برای تعریف گراف
-            std::string defKey(const std::string& name) {
-                return "graph:def:" + name;
-            }
-            std::string defListKey() {
-                return "graph:deflist";
-            }
+//            std::string defKey(const std::string& name) {
+//                return "graph:def:" + name;
+//            }
+//            std::string defListKey() {
+//                return "graph:deflist";
+//            }
 
 // Serialization ساده برای GraphDefinition
             std::string serializeDef(const GraphDefinition& def) {
@@ -262,7 +262,7 @@ namespace nexora {
             if (!h->wal->open()) return nullptr;
 
             // IdStore — از RocksDB DocEngine استفاده می‌کند
-            rocksdb::DB* raw_db = nullptr;
+//            rocksdb::DB* raw_db = nullptr;
             // DocEngine::getRocksDB() — این متد باید به DocEngine اضافه شود
             // در MVP از storage->metaPath() استفاده می‌کنیم
             // h->id_store = std::make_unique<GraphIdStore>(raw_db, def.name);

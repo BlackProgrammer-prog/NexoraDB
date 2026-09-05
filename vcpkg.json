@@ -1,6 +1,6 @@
 {
   "name": "nexoradb",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "NexoraDB - Document + Graph Database Engine",
   "dependencies": [
     {
@@ -12,6 +12,12 @@
     },
     {
       "name": "pybind11"
+    },
+    {
+      "name": "gtest"
+    },
+    {
+      "name": "benchmark"
     }
   ],
   "builtin-baseline": "7476f0d4e77d3333fbb249657df8251c28c4faae",

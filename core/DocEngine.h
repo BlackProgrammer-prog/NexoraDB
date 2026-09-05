@@ -56,10 +56,14 @@
 
 // ─── Standard Library ───
 #include <cstdint>
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -101,6 +105,46 @@ namespace nexora {
             static DBResult Err(std::string msg) {
                 return {false, "", std::move(msg)};
             }
+        };
+
+        struct PageResult {
+            bool success = false;
+            std::string data = "[]";
+            std::string continuation_token;
+            std::string error_msg;
+        };
+
+        enum class BulkWriteMode : uint8_t {
+            Atomic = 0,
+            OrderedChunks = 1
+        };
+
+        struct BulkWriteOptions {
+            BulkWriteMode mode = BulkWriteMode::Atomic;
+            std::size_t max_operations_per_chunk = 1000;
+            std::size_t max_bytes_per_chunk = 4 * 1024 * 1024;
+        };
+
+        struct BulkWriteResult {
+            bool success = false;
+            std::uint64_t processed = 0;
+            std::uint64_t modified = 0;
+            std::uint64_t committed_chunks = 0;
+            std::string last_error;
+        };
+
+        struct TransactionSettings {
+            std::int64_t lock_timeout_ms = 1000;
+            std::int64_t expiration_ms = 30000;
+            bool deadlock_detect = true;
+            std::int64_t deadlock_detect_depth = 50;
+        };
+
+        enum class MutationFaultPoint : uint8_t {
+            None = 0,
+            AfterDocument = 1,
+            AfterIndexes = 2,
+            AfterCounter = 3
         };
 
 // ══════════════════════════════════════════════════════════════
@@ -162,6 +206,12 @@ namespace nexora {
             Unique      = 2  ///< ایندکس یکتا
         };
 
+        enum class IndexState : uint8_t {
+            Building = 0,
+            Ready = 1,
+            Failed = 2
+        };
+
 /**
  * @struct IndexDefinition
  * @brief تعریف یک Index
@@ -174,6 +224,11 @@ namespace nexora {
             std::string              index_name;
             std::vector<std::string> fields;
             IndexType                type = IndexType::SingleField;
+            std::string              index_id;
+            std::uint32_t            format_version = 2;
+            IndexState               state = IndexState::Ready;
+            std::string              build_cursor;
+            std::string              last_error;
         };
 
 /**
@@ -241,7 +296,8 @@ namespace nexora {
  */
         class TxHandle {
         public:
-            explicit TxHandle(rocksdb::Transaction* tx) : tx_(tx) {}
+            TxHandle(rocksdb::Transaction* tx, std::shared_mutex& ddl_mutex)
+                    : ddl_guard_(ddl_mutex), tx_(tx) {}
             ~TxHandle() = default;
 
             // non-copyable, movable
@@ -250,11 +306,16 @@ namespace nexora {
             TxHandle(TxHandle&&)                 = default;
             TxHandle& operator=(TxHandle&&)      = default;
 
-            rocksdb::Transaction* Get()     const noexcept { return tx_; }
+            rocksdb::Transaction* Get()     const noexcept { return tx_.get(); }
             bool                  IsValid() const noexcept { return tx_ != nullptr; }
+            void Reset() noexcept {
+                tx_.reset();
+                if (ddl_guard_.owns_lock()) ddl_guard_.unlock();
+            }
 
         private:
-            rocksdb::Transaction* tx_ = nullptr;
+            std::shared_lock<std::shared_mutex> ddl_guard_;
+            std::unique_ptr<rocksdb::Transaction> tx_;
         };
 
 // ══════════════════════════════════════════════════════════════
@@ -319,7 +380,9 @@ namespace nexora {
              * @example
              *   auto engine = std::make_unique<DocEngine>("/data/nexoradb");
              */
-            explicit DocEngine(const std::string& db_path);
+            explicit DocEngine(
+                    const std::string& db_path,
+                    const TransactionSettings& transaction_settings = {});
 
             /**
              * @brief مخرب - اتصال RocksDB را می‌بندد
@@ -335,6 +398,12 @@ namespace nexora {
              * @return true اگر RocksDB سالم و قابل استفاده باشد
              */
             bool IsHealthy() const noexcept;
+
+            /** Test-only one-shot fault injection for atomicity tests. */
+            void SetMutationFaultPointForTesting(
+                    MutationFaultPoint point) noexcept;
+            void PauseIndexBuildAfterChunksForTesting(
+                    std::uint32_t chunks) noexcept;
 
             // ──────────────────────────────────────────────────────────
             // 6.2  مدیریت Collection و Schema
@@ -416,6 +485,13 @@ namespace nexora {
             DBResult DropIndex(const std::string& collection_name,
                                const std::string& index_name);
 
+            /** Rebuild all indexes and migrate legacy physical keys to v2. */
+            DBResult RebuildIndexes(const std::string& collection_name);
+            DBResult ResumeIndexBuild(const std::string& collection_name,
+                                      const std::string& index_name);
+            DBResult CleanupIndexBuild(const std::string& collection_name,
+                                       const std::string& index_name);
+
             // ──────────────────────────────────────────────────────────
             // 6.4  مدیریت Foreign Key
             // ──────────────────────────────────────────────────────────
@@ -468,6 +544,7 @@ namespace nexora {
              * - Schema Validation اعمال می‌شود.
              * - Index‌ها به‌روز می‌شوند.
              * - Foreign Key‌ها بررسی می‌شوند.
+             * - اگر `_id` از قبل وجود داشته باشد، عملیات رد می‌شود.
              *
              * @example
              *   std::string bson = R"({"username":"alice","email":"alice@test.com"})";
@@ -483,10 +560,23 @@ namespace nexora {
              * @param bson_documents  لیست اسناد BSON
              * @return DBResult با data برابر JSON آرایه doc_id‌های ایجاد شده
              *
-             * @details از RocksDB WriteBatch استفاده می‌کند — اتمیک است.
+             * @details در یک RocksDB Transaction اجرا می‌شود و در صورت وجود
+             * `_id` تکراری، کل batch بدون تغییر rollback می‌شود.
              */
             DBResult InsertMany(const std::string&              collection_name,
                                 const std::vector<std::string>& bson_documents);
+
+            /**
+             * @brief Bulk insert با semantics صریح.
+             * @details در حالت Atomic همان all-or-nothing است. در حالت
+             * OrderedChunks هر chunk اتمیک commit می‌شود، پردازش روی اولین
+             * خطا متوقف می‌شود و نتیجه تعداد commitهای قطعی را گزارش می‌کند.
+             * سند بزرگ‌تر از byte limit به‌تنهایی در یک chunk قرار می‌گیرد.
+             */
+            BulkWriteResult InsertManyBulk(
+                    const std::string& collection_name,
+                    const std::vector<std::string>& bson_documents,
+                    const BulkWriteOptions& options = {});
 
             // ──────────────────────────────────────────────────────────
             // 6.6  CRUD - Find
@@ -520,6 +610,23 @@ namespace nexora {
                               uint32_t                        limit = 0,
                               uint32_t                        skip  = 0);
 
+            DBResult ExplainPlan(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    bool force_full_scan = false);
+
+            DBResult FindManyFullScanForTesting(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    std::uint32_t limit = 0,
+                    std::uint32_t skip = 0);
+
+            PageResult FindPage(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    std::uint32_t limit,
+                    const std::string& continuation_token = "");
+
             // ──────────────────────────────────────────────────────────
             // 6.7  CRUD - Update
             // ──────────────────────────────────────────────────────────
@@ -550,6 +657,12 @@ namespace nexora {
                                 const nexora::query::Condition&  condition,
                                 const nexora::query::UpdateSpec& update_spec);
 
+            BulkWriteResult UpdateManyBulk(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    const nexora::query::UpdateSpec& update_spec,
+                    const BulkWriteOptions& options = {});
+
             // ──────────────────────────────────────────────────────────
             // 6.8  CRUD - Delete
             // ──────────────────────────────────────────────────────────
@@ -573,6 +686,11 @@ namespace nexora {
              */
             DBResult DeleteMany(const std::string&              collection_name,
                                 const nexora::query::Condition& condition);
+
+            BulkWriteResult DeleteManyBulk(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    const BulkWriteOptions& options = {});
 
             // ──────────────────────────────────────────────────────────
             // 6.9  Internal API برای GraphEngine
@@ -628,6 +746,13 @@ namespace nexora {
              *   user_nodes_.reserve(count);
              */
             int64_t GetCollectionSize(const std::string& collection_name) const;
+
+            /**
+             * @brief شمارنده ذخیره‌شده Collection را از روی اسناد واقعی بازسازی می‌کند.
+             * @return تعداد نهایی اسناد در DBResult::data
+             */
+            DBResult ReconcileCollectionCounter(
+                    const std::string& collection_name);
 
             /**
              * @brief یک range از اسناد را بر اساس ID prefix بازیابی می‌کند
@@ -856,6 +981,47 @@ namespace nexora {
             rocksdb::TransactionDBOptions txn_db_options_;
             rocksdb::WriteOptions         write_options_;
             rocksdb::ReadOptions          read_options_;
+            rocksdb::TransactionOptions   transaction_options_;
+            mutable std::shared_mutex index_ddl_mutex_;
+            std::atomic<MutationFaultPoint> mutation_fault_point_{
+                    MutationFaultPoint::None};
+            std::atomic<std::uint32_t> pause_index_build_chunks_{0};
+
+            struct PageSession {
+                const rocksdb::Snapshot* snapshot = nullptr;
+                std::string collection;
+                nexora::query::Condition condition;
+                std::chrono::steady_clock::time_point expires_at;
+            };
+            std::mutex page_sessions_mutex_;
+            std::unordered_map<std::string, PageSession> page_sessions_;
+
+            struct MutationMetadata {
+                SchemaDefinition schema;
+                std::vector<ForeignKeyDefinition> foreign_keys;
+                std::vector<IndexDefinition> indexes;
+            };
+
+            class MutationBuilder;
+
+            struct QueryExecution {
+                DBResult result;
+                std::string index_name;
+                std::string scan_type = "full_scan";
+                std::uint64_t scanned_index_entries = 0;
+                std::uint64_t scanned_documents = 0;
+                std::uint64_t matched_documents = 0;
+            };
+
+            QueryExecution ExecuteQuery(
+                    const std::string& collection_name,
+                    const nexora::query::Condition& condition,
+                    std::uint32_t limit,
+                    std::uint32_t skip,
+                    bool force_full_scan);
+
+            rocksdb::Status InjectMutationFaultIfRequested(
+                    MutationFaultPoint point) noexcept;
 
             // ─── متدهای کمکی خصوصی ───
 
@@ -871,6 +1037,17 @@ namespace nexora {
                                             const std::string& value,
                                             const std::string& doc_id);
 
+            rocksdb::Status LoadMutationMetadata(
+                    const std::string& collection_name,
+                    MutationMetadata& metadata) const;
+
+            rocksdb::Status ValidateForeignKeysChecked(
+                    const std::vector<ForeignKeyDefinition>& foreign_keys,
+                    const std::string& bson_document,
+                    std::string& validation_error,
+                    rocksdb::Transaction* transaction = nullptr
+                    ) const;
+
             static bool IsReservedCollectionName(const std::string& name);
 
             bool EnsureInternalCollections();
@@ -882,18 +1059,6 @@ namespace nexora {
             bool ValidateDocument(const std::string&      bson_document,
                                   const SchemaDefinition& schema,
                                   std::string&            error_out) const;
-
-            bool CheckForeignKey(const ForeignKeyDefinition& fk,
-                                 const std::string&          bson_document,
-                                 std::string&                error_out);
-
-            rocksdb::Status UpdateIndexesOnInsert(const std::string& collection,
-                                                  const std::string& doc_id,
-                                                  const std::string& bson_document);
-
-            rocksdb::Status CleanIndexesOnDelete(const std::string& collection,
-                                                 const std::string& doc_id,
-                                                 const std::string& old_bson);
 
             /**
              * @brief استخراج مقدار یک فیلد — از Evaluator استفاده می‌کند

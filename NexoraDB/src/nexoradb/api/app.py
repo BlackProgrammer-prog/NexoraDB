@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from nexoradb_admin.config import AdminApiSettings
 from nexoradb_admin.native import create_doc_engine, create_graph_manager, load_native_module
 from nexoradb_admin.query_runner import QueryExecuteRequest, QueryExecuteResponse, execute_query
+from nexoradb._version import __version__
 
 from .security import AppTokenClaims, require_app_token, require_scope
 
@@ -58,7 +59,7 @@ def create_api_app(
 
     app = FastAPI(
         title="NexoraDB External API",
-        version="0.1.1",
+        version=__version__,
         docs_url="/docs" if api_settings.environment != "production" else None,
         redoc_url=None,
     )

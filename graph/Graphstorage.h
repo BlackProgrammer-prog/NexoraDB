@@ -190,7 +190,9 @@ namespace nexora {
              * @note بعد از compaction، تمام DenseId‌های RAM باید از id_remap به‌روز شوند
              */
             bool compactNodes(std::unordered_map<DenseId, DenseId>& id_remap);
-            bool compactEdges(std::unordered_map<EdgeId, EdgeId>& id_remap);
+            bool compactEdges(const std::unordered_map<DenseId, DenseId>& node_id_remap,
+                    std::unordered_map<EdgeId, EdgeId>& edge_id_remap
+            );
 
             // ──────────────────────────────────────────────────────────
             // Utilities

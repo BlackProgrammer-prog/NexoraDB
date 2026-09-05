@@ -62,7 +62,12 @@ from .errors import (
 )
 from . import ast_nodes
 
-__version__ = "0.1.1"
+try:
+    from .._version import __version__
+except ImportError:
+    # The admin query runner also loads this directory as the standalone
+    # ``nexoraql`` package to avoid replacing the native ``nexoradb`` module.
+    from nexoradb._version import __version__
 
 __all__ = [
     "parse", "parse_one",

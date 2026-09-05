@@ -74,6 +74,33 @@ static py::dict result_to_dict(const DBResult& r) {
     return d;
 }
 
+static py::dict build_info_dict() {
+    py::dict info;
+    info["project"]          = "NexoraDB";
+    info["project_version"]  = NEXORA_PROJECT_VERSION;
+    info["build_type"]       = NEXORA_BUILD_TYPE;
+    info["cmake_version"]    = NEXORA_CMAKE_VERSION;
+    info["compiler_id"]      = NEXORA_COMPILER_ID;
+    info["compiler_version"] = NEXORA_COMPILER_VERSION;
+    info["system"]           = NEXORA_SYSTEM_NAME;
+    info["processor"]        = NEXORA_SYSTEM_PROCESSOR;
+    info["cpp_standard"]     = 20;
+    info["rocksdb_version"]  = NEXORA_ROCKSDB_VERSION;
+    info["fmt_version"]      = NEXORA_FMT_VERSION;
+    info["pybind11_version"] = NEXORA_PYBIND11_VERSION;
+    info["python_version"]   = NEXORA_PYTHON_VERSION;
+    info["lto_enabled"]      = static_cast<bool>(NEXORA_LTO_ENABLED);
+    info["asan_enabled"]     = static_cast<bool>(NEXORA_ASAN_ENABLED);
+    info["ubsan_enabled"]    = static_cast<bool>(NEXORA_UBSAN_ENABLED);
+    info["tsan_enabled"]     = static_cast<bool>(NEXORA_TSAN_ENABLED);
+#ifdef NEXORA_BUILD_GRAPH
+    info["graph_enabled"]    = true;
+#else
+    info["graph_enabled"]    = false;
+#endif
+    return info;
+}
+
 #ifdef NEXORA_BUILD_GRAPH
 static const char* wal_op_to_string(WalOpType op) {
     switch (op) {
@@ -94,6 +121,8 @@ static const char* wal_op_to_string(WalOpType op) {
 // ══════════════════════════════════════════════════════════════
 
 PYBIND11_MODULE(nexoradb, m) {
+    m.def("build_info", &build_info_dict,
+          "Return compiler, dependency, sanitizer and build metadata for this C++ core.");
     m.doc() = "NexoraDB — High-performance Document + Graph Database (C++ core)";
 
 #ifdef NEXORA_BUILD_GRAPH
@@ -134,6 +163,50 @@ PYBIND11_MODULE(nexoradb, m) {
                        " data='" + r.data.substr(0, 80) + "'>";
             });
 
+    py::class_<PageResult>(m, "PageResult")
+            .def_readonly("success", &PageResult::success)
+            .def_readonly("data", &PageResult::data)
+            .def_readonly("continuation_token",
+                          &PageResult::continuation_token)
+            .def_readonly("error_msg", &PageResult::error_msg)
+            .def("__bool__", [](const PageResult& result) {
+                return result.success;
+            });
+
+    py::enum_<BulkWriteMode>(m, "BulkWriteMode")
+            .value("Atomic", BulkWriteMode::Atomic)
+            .value("OrderedChunks", BulkWriteMode::OrderedChunks);
+
+    py::class_<BulkWriteOptions>(m, "BulkWriteOptions")
+            .def(py::init<>())
+            .def_readwrite("mode", &BulkWriteOptions::mode)
+            .def_readwrite("max_operations_per_chunk",
+                           &BulkWriteOptions::max_operations_per_chunk)
+            .def_readwrite("max_bytes_per_chunk",
+                           &BulkWriteOptions::max_bytes_per_chunk);
+
+    py::class_<BulkWriteResult>(m, "BulkWriteResult")
+            .def_readonly("success", &BulkWriteResult::success)
+            .def_readonly("processed", &BulkWriteResult::processed)
+            .def_readonly("modified", &BulkWriteResult::modified)
+            .def_readonly("committed_chunks",
+                          &BulkWriteResult::committed_chunks)
+            .def_readonly("last_error", &BulkWriteResult::last_error)
+            .def("__bool__", [](const BulkWriteResult& result) {
+                return result.success;
+            });
+
+    py::class_<TransactionSettings>(m, "TransactionSettings")
+            .def(py::init<>())
+            .def_readwrite("lock_timeout_ms",
+                           &TransactionSettings::lock_timeout_ms)
+            .def_readwrite("expiration_ms",
+                           &TransactionSettings::expiration_ms)
+            .def_readwrite("deadlock_detect",
+                           &TransactionSettings::deadlock_detect)
+            .def_readwrite("deadlock_detect_depth",
+                           &TransactionSettings::deadlock_detect_depth);
+
     // ──────────────────────────────────────────────────────────
     // §2  Enums (Query)
     // ──────────────────────────────────────────────────────────
@@ -155,6 +228,11 @@ PYBIND11_MODULE(nexoradb, m) {
             .value("Compound",    IndexType::Compound)
             .value("Unique",      IndexType::Unique)
             .export_values();
+
+    py::enum_<IndexState>(m, "IndexState")
+            .value("Building", IndexState::Building)
+            .value("Ready", IndexState::Ready)
+            .value("Failed", IndexState::Failed);
 
     py::enum_<Op>(m, "Op",
                   "عملگرهای مقایسه‌ای برای Condition")
@@ -265,7 +343,13 @@ PYBIND11_MODULE(nexoradb, m) {
             .def(py::init<>())
             .def_readwrite("index_name", &IndexDefinition::index_name)
             .def_readwrite("fields",     &IndexDefinition::fields)
-            .def_readwrite("type",       &IndexDefinition::type);
+            .def_readwrite("type",       &IndexDefinition::type)
+            .def_readonly("index_id",    &IndexDefinition::index_id)
+            .def_readonly("format_version",
+                          &IndexDefinition::format_version)
+            .def_readonly("state", &IndexDefinition::state)
+            .def_readonly("build_cursor", &IndexDefinition::build_cursor)
+            .def_readonly("last_error", &IndexDefinition::last_error);
 
     py::class_<ForeignKeyDefinition>(m, "ForeignKeyDefinition",
                                      R"doc(
@@ -424,6 +508,9 @@ PYBIND11_MODULE(nexoradb, m) {
             .def(py::init<const std::string&>(),
                  py::arg("db_path"),
                  "باز کردن / ایجاد دیتابیس در db_path")
+            .def(py::init<const std::string&, const TransactionSettings&>(),
+                 py::arg("db_path"), py::arg("transaction_settings"),
+                 "باز کردن دیتابیس با timeout و deadlock policy سفارشی")
 
                     // ── Lifecycle ──
             .def("is_healthy", &DocEngine::IsHealthy,
@@ -473,6 +560,16 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("drop_index", &DocEngine::DropIndex,
                  py::arg("collection"), py::arg("index_name"),
                  "حذف Index")
+
+            .def("rebuild_indexes", &DocEngine::RebuildIndexes,
+                 py::arg("collection"),
+                 "بازسازی indexها و migration فرمت legacy به v2")
+
+            .def("resume_index_build", &DocEngine::ResumeIndexBuild,
+                 py::arg("collection"), py::arg("index_name"))
+
+            .def("cleanup_index_build", &DocEngine::CleanupIndexBuild,
+                 py::arg("collection"), py::arg("index_name"))
 
             .def("get_indexes",
                  [](DocEngine& e, const std::string& col) {
@@ -537,6 +634,16 @@ PYBIND11_MODULE(nexoradb, m) {
                 DBResult: data = '["id1","id2","id3"]'
             )doc")
 
+            .def("insert_many_bulk",
+                 [](DocEngine& e, const std::string& col,
+                    const std::vector<std::string>& docs,
+                    const BulkWriteOptions& options) {
+                     py::gil_scoped_release rel;
+                     return e.InsertManyBulk(col, docs, options);
+                 },
+                 py::arg("collection"), py::arg("bson_list"),
+                 py::arg("options") = BulkWriteOptions{})
+
                     // ── CRUD: Find ──
             .def("find_by_id",
                  [](DocEngine& e, const std::string& col, const std::string& id) {
@@ -574,6 +681,23 @@ PYBIND11_MODULE(nexoradb, m) {
                 r = db.find_many("users", c, limit=10)
             )doc")
 
+            .def("find_page",
+                 [](DocEngine& e, const std::string& collection,
+                    const Condition& condition, std::uint32_t limit,
+                    const std::string& token) {
+                     py::gil_scoped_release release;
+                     return e.FindPage(collection, condition, limit, token);
+                 },
+                 py::arg("collection"),
+                 py::arg("condition") = Condition{},
+                 py::arg("limit") = 100,
+                 py::arg("continuation_token") = "")
+
+            .def("explain_plan", &DocEngine::ExplainPlan,
+                 py::arg("collection"), py::arg("condition"),
+                 py::arg("force_full_scan") = false,
+                 "نمایش scan type، index و تعداد candidateهای بررسی‌شده")
+
                     // ── CRUD: Update ──
             .def("update_by_id",
                  [](DocEngine& e, const std::string& col,
@@ -593,6 +717,17 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("collection"), py::arg("condition"), py::arg("update_spec"),
                  "به‌روزرسانی همه اسناد منطبق با شرط")
 
+            .def("update_many_bulk",
+                 [](DocEngine& e, const std::string& col,
+                    const Condition& cond, const UpdateSpec& spec,
+                    const BulkWriteOptions& options) {
+                     py::gil_scoped_release rel;
+                     return e.UpdateManyBulk(col, cond, spec, options);
+                 },
+                 py::arg("collection"), py::arg("condition"),
+                 py::arg("update_spec"),
+                 py::arg("options") = BulkWriteOptions{})
+
                     // ── CRUD: Delete ──
             .def("delete_by_id",
                  [](DocEngine& e, const std::string& col, const std::string& id) {
@@ -609,6 +744,16 @@ PYBIND11_MODULE(nexoradb, m) {
                  },
                  py::arg("collection"), py::arg("condition"),
                  "حذف اسناد منطبق با شرط → DBResult(data=count)")
+
+            .def("delete_many_bulk",
+                 [](DocEngine& e, const std::string& col,
+                    const Condition& cond,
+                    const BulkWriteOptions& options) {
+                     py::gil_scoped_release rel;
+                     return e.DeleteManyBulk(col, cond, options);
+                 },
+                 py::arg("collection"), py::arg("condition"),
+                 py::arg("options") = BulkWriteOptions{})
 
                     // ── Utility ──
             .def("count",
@@ -630,6 +775,14 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("get_collection_size", &DocEngine::GetCollectionSize,
                  py::arg("collection"),
                  "تعداد اسناد → int (O(1))")
+
+            .def("reconcile_collection_counter",
+                 [](DocEngine& e, const std::string& col) {
+                     py::gil_scoped_release rel;
+                     return e.ReconcileCollectionCounter(col);
+                 },
+                 py::arg("collection"),
+                 "بازسازی اتمیک شمارنده collection از روی اسناد واقعی")
 
             .def("get_ram_usage_bytes", &DocEngine::GetRamUsageBytes,
                  "RAM فعلی مصرف‌شده توسط process دیتابیس، بر حسب byte")
@@ -1403,7 +1556,7 @@ PYBIND11_MODULE(nexoradb, m) {
     // §10  Version info
     // ──────────────────────────────────────────────────────────
 
-    m.attr("__version__")    = "0.1.1";
+    m.attr("__version__")    = NEXORA_PROJECT_VERSION;
     m.attr("GRAPH_ENABLED")  =
 #ifdef NEXORA_BUILD_GRAPH
             true;

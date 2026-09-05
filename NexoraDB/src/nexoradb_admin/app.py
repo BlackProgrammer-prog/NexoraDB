@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from nexoradb._version import __version__
 
 from .api_bridge import (
     AVAILABLE_APP_SCOPES,
@@ -85,7 +86,7 @@ def create_app(
 
     app = FastAPI(
         title="NexoraDB Admin API",
-        version="0.1.1",
+        version=__version__,
         docs_url="/docs" if app_settings.environment != "production" else None,
         redoc_url=None,
     )
