@@ -1,6 +1,7 @@
 #include "TestTempDir.h"
 
 #include "core/DocEngine.h"
+#include "core/IndexCodec.h"
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
 
@@ -898,6 +899,123 @@ namespace {
                 engine.ReconcileCollectionCounter("items");
         ASSERT_TRUE(reconciled.success) << reconciled.error_msg;
         EXPECT_EQ(reconciled.data, "200");
+    }
+
+    TEST(IndexCodecV2, PreservesTypeOrderAndCompoundPrefix) {
+        using nexora::core::indexv2::EncodeValues;
+        using nexora::query::FieldValue;
+
+        const auto negative = EncodeValues({FieldValue{"-2", ValueType::Int64, true}});
+        const auto positive = EncodeValues({FieldValue{"10", ValueType::Int64, true}});
+        ASSERT_TRUE(negative && positive);
+        EXPECT_LT(*negative, *positive);
+
+        const auto float_low = EncodeValues({FieldValue{"-1.5", ValueType::Float64, true}});
+        const auto float_high = EncodeValues({FieldValue{"2.5", ValueType::Float64, true}});
+        ASSERT_TRUE(float_low && float_high);
+        EXPECT_LT(*float_low, *float_high);
+
+        const auto compound_prefix = EncodeValues({
+                FieldValue{"tenant", ValueType::String, true}});
+        const auto compound = EncodeValues({
+                FieldValue{"tenant", ValueType::String, true},
+                FieldValue{"user@example.com", ValueType::String, true}});
+        ASSERT_TRUE(compound_prefix && compound);
+        EXPECT_TRUE(compound->starts_with(*compound_prefix));
+    }
+
+    TEST(DocEngineUniqueIndex, EnforcesCompoundNullMissingEmptyAndStableId) {
+        TestTempDir temp("nexora_doc_unique_semantics");
+        const auto path = (temp.path() / "db").string();
+        std::string stable_id;
+        {
+            DocEngine engine(path);
+            ASSERT_TRUE(engine.CreateCollection("users").success);
+            IndexDefinition index;
+            index.index_name = "uniq_tenant_email";
+            index.fields = {"tenant", "email"};
+            index.type = IndexType::Unique;
+            ASSERT_TRUE(engine.CreateIndex("users", index).success);
+            const auto indexes = engine.GetIndexes("users");
+            ASSERT_EQ(indexes.size(), 1U);
+            stable_id = indexes.front().index_id;
+            EXPECT_FALSE(stable_id.empty());
+            EXPECT_EQ(indexes.front().format_version, 2U);
+
+            EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"m1","tenant":"a"})").success);
+            EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"m2","tenant":"a"})").success);
+            EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"n1","tenant":"a","email":null})").success);
+            EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"n2","tenant":"a","email":null})").success);
+            EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"e1","tenant":"a","email":""})").success);
+            EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"e2","tenant":"a","email":""})").success);
+            EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"c1","tenant":"a","email":"x"})").success);
+            EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"c2","tenant":"b","email":"x"})").success);
+            EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"c3","tenant":"a","email":"x"})").success);
+
+            UpdateSpec change_email;
+            change_email.Set("email", "y");
+            ASSERT_TRUE(engine.UpdateById(
+                    "users", "c1", change_email).success);
+            EXPECT_TRUE(engine.InsertOne(
+                    "users",
+                    R"({"_id":"c3","tenant":"a","email":"x"})").success);
+            EXPECT_FALSE(engine.InsertOne(
+                    "users",
+                    R"({"_id":"c4","tenant":"a","email":"y"})").success);
+            ASSERT_TRUE(engine.DeleteById("users", "c1").success);
+            EXPECT_TRUE(engine.InsertOne(
+                    "users",
+                    R"({"_id":"c4","tenant":"a","email":"y"})").success);
+        }
+        DocEngine reopened(path);
+        ASSERT_EQ(reopened.GetIndexes("users").size(), 1U);
+        EXPECT_EQ(reopened.GetIndexes("users").front().index_id, stable_id);
+    }
+
+    TEST(DocEngineUniqueIndex, RejectsDuplicateBuildAndConcurrentRace) {
+        TestTempDir temp("nexora_doc_unique_race");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("legacy").success);
+        ASSERT_TRUE(engine.InsertOne("legacy", R"({"_id":"a","email":"same"})").success);
+        ASSERT_TRUE(engine.InsertOne("legacy", R"({"_id":"b","email":"same"})").success);
+        IndexDefinition index;
+        index.index_name = "uniq_email";
+        index.fields = {"email"};
+        index.type = IndexType::Unique;
+        EXPECT_FALSE(engine.CreateIndex("legacy", index).success);
+        EXPECT_TRUE(engine.GetIndexes("legacy").empty());
+
+        ASSERT_TRUE(engine.CreateCollection("race").success);
+        ASSERT_TRUE(engine.CreateIndex("race", index).success);
+        std::atomic<int> successes{0};
+        std::vector<std::thread> writers;
+        for (int i = 0; i < 2; ++i) {
+            writers.emplace_back([&, i] {
+                const auto result = engine.InsertOne(
+                        "race", "{\"_id\":\"r" + std::to_string(i) +
+                        "\",\"email\":\"same\"}");
+                if (result.success) successes.fetch_add(1);
+            });
+        }
+        for (auto& writer : writers) writer.join();
+        EXPECT_EQ(successes.load(), 1);
+        EXPECT_EQ(engine.Count("race", Condition{}).data, "1");
+    }
+
+    TEST(DocEngineUniqueIndex, SchemaUniqueCreatesAndProtectsPhysicalIndex) {
+        TestTempDir temp("nexora_doc_schema_unique");
+        DocEngine engine((temp.path() / "db").string());
+        SchemaDefinition schema;
+        schema.fields.push_back(SchemaField{"email", FieldType::String,
+                                            false, true, std::nullopt});
+        ASSERT_TRUE(engine.CreateCollection("users", schema).success);
+        const auto indexes = engine.GetIndexes("users");
+        ASSERT_EQ(indexes.size(), 1U);
+        EXPECT_EQ(indexes.front().type, IndexType::Unique);
+        EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"u1","email":"same"})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"u2","email":"same"})").success);
+        EXPECT_FALSE(engine.DropIndex("users", indexes.front().index_name).success);
+        EXPECT_TRUE(engine.RebuildIndexes("users").success);
     }
 
 } // namespace
