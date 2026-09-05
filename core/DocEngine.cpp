@@ -40,6 +40,7 @@
 #include <iostream>
 #include <random>
 #include <sstream>
+#include <limits>
 #include <stdexcept>
 
 #if defined(__linux__)
@@ -81,6 +82,33 @@ namespace nexora {
             constexpr char kInternalUsers[]  = "__nexora_internal_users";
             constexpr char kInternalAppTokens[] = "__nexora_internal_app_tokens";
         } // namespace keys
+
+
+
+// ══════════════════════════════════════════════════════════════
+        namespace {
+            DBResult RocksFailure(
+                    const std::string& operation,
+                    const rocksdb::Status& status
+                    ) {
+                std::string category;
+                if (status.IsTimedOut()) {
+                    category = "[transaction-timeout] ";
+                } else if (status.IsDeadlock()) {
+                    category = "[transaction-deadlock] ";
+                } else if (status.IsBusy()) {
+                    category = "[transaction-conflict] ";
+                }
+                return DBResult::Err(
+                        category + "[RocksDB] " + operation + ": " +
+                        status.ToString());
+            }
+        } //namespace
+
+
+// ══════════════════════════════════════════════════════════════
+
+
 
 // ══════════════════════════════════════════════════════════════
 // §2  Serialization ساده برای metadata
@@ -378,7 +406,9 @@ namespace nexora {
 // §4  سازنده و مخرب
 // ══════════════════════════════════════════════════════════════
 
-        DocEngine::DocEngine(const std::string& db_path)
+        DocEngine::DocEngine(
+                const std::string& db_path,
+                const TransactionSettings& transaction_settings)
                 : db_path_(db_path),
                   txn_db_(nullptr, [](rocksdb::TransactionDB* db) {
                       if (db) { db->SyncWAL(); delete db; }
@@ -394,6 +424,19 @@ namespace nexora {
 
             write_options_.sync         = false;  // برای performance
             read_options_.verify_checksums = true;
+
+            txn_db_options_.transaction_lock_timeout =
+                    transaction_settings.lock_timeout_ms;
+            txn_db_options_.default_lock_timeout =
+                    transaction_settings.lock_timeout_ms;
+            transaction_options_.lock_timeout =
+                    transaction_settings.lock_timeout_ms;
+            transaction_options_.expiration =
+                    transaction_settings.expiration_ms;
+            transaction_options_.deadlock_detect =
+                    transaction_settings.deadlock_detect;
+            transaction_options_.deadlock_detect_depth =
+                    transaction_settings.deadlock_detect_depth;
 
             rocksdb::TransactionDB* raw_db = nullptr;
             rocksdb::Status s = rocksdb::TransactionDB::Open(
@@ -539,19 +582,21 @@ namespace nexora {
             rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &ex);
             if (s.ok())
                 return DBResult::Err("Index '" + index_def.index_name + "' already exists");
-
-            s = txn_db_->Put(write_options_, meta_key, SerializeIndex(index_def));
-            ROCKS_CHECK(s, "CreateIndex metadata");
+            if (!s.IsNotFound())
+                return RocksFailure("CreateIndex metadata lookup", s);
 
             // Rebuild index از داده‌های موجود
             std::string data_prefix = std::string(keys::kData) + collection_name + ":";
             rocksdb::ReadOptions ro;
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
             rocksdb::WriteBatch batch;
+            batch.Put(meta_key, SerializeIndex(index_def));
             uint64_t cnt = 0;
 
             for (it->Seek(data_prefix);
-                 it->Valid() && it->key().starts_with(data_prefix); it->Next()) {
+                 it->Valid() &&
+                 it->key().starts_with(rocksdb::Slice(data_prefix));
+                 it->Next()) {
                 std::string doc_id = it->key().ToString().substr(data_prefix.size());
                 std::string bson   = it->value().ToString();
                 for (const auto& field : index_def.fields) {
@@ -563,8 +608,11 @@ namespace nexora {
                 }
             }
 
+            if (!it->status().ok())
+                return RocksFailure("CreateIndex data scan", it->status());
+
             s = txn_db_->Write(write_options_, &batch);
-            ROCKS_CHECK(s, "CreateIndex rebuild");
+            ROCKS_CHECK(s, "CreateIndex atomic metadata/rebuild");
 
             return DBResult::Ok("Index '" + index_def.index_name +
                                 "' created (" + std::to_string(cnt) + " entries)");
@@ -611,12 +659,48 @@ namespace nexora {
             if (!CollectionExists(fk_def.ref_collection))
                 return DBResult::Err("Referenced collection '" +
                                      fk_def.ref_collection + "' does not exist");
+            if (fk_def.fk_name.empty() ||
+                fk_def.local_field.empty() ||
+                fk_def.ref_collection.empty() ||
+                fk_def.ref_field.empty())
+                return DBResult::Err("Foreign key definition is incomplete");
+
+            if (fk_def.ref_field != "_id") {
+                MutationMetadata referenced_metadata;
+                rocksdb::Status metadata_status = LoadMutationMetadata(
+                        fk_def.ref_collection,
+                        referenced_metadata);
+                if (!metadata_status.ok())
+                    return RocksFailure(
+                            "AddForeignKey referenced metadata",
+                            metadata_status);
+
+                const bool has_supporting_index = std::any_of(
+                        referenced_metadata.indexes.begin(),
+                        referenced_metadata.indexes.end(),
+                        [&](const IndexDefinition& index) {
+                            return std::find(
+                                    index.fields.begin(),
+                                    index.fields.end(),
+                                    fk_def.ref_field) != index.fields.end();
+                        });
+
+                if (!has_supporting_index) {
+                    return DBResult::Err(
+                            "Foreign key reference field '" +
+                            fk_def.ref_collection + "." +
+                            fk_def.ref_field +
+                            "' requires an index");
+                }
+            }
 
             std::string meta_key = MakeMetaKey(keys::kMetaFk, collection_name, fk_def.fk_name);
             std::string ex;
             rocksdb::Status s = txn_db_->Get(read_options_, meta_key, &ex);
             if (s.ok())
                 return DBResult::Err("Foreign key '" + fk_def.fk_name + "' already exists");
+            if (!s.IsNotFound())
+                return RocksFailure("AddForeignKey metadata lookup", s);
 
             s = txn_db_->Put(write_options_, meta_key, SerializeFk(fk_def));
             ROCKS_CHECK(s, "AddForeignKey");
@@ -637,6 +721,477 @@ namespace nexora {
             return DBResult::Ok("Foreign key '" + fk_name + "' dropped");
         }
 
+
+// ══════════════════════════════════════════════════════════════
+
+        rocksdb::Status DocEngine::LoadMutationMetadata(const std::string &collection_name,
+                                                        nexora::core::DocEngine::MutationMetadata &metadata) const {
+            metadata = MutationMetadata{};
+
+            std::string serialized_schema;
+
+            rocksdb::Status status = txn_db_->Get(
+                    read_options_,
+                    MakeMetaKey(keys::kMetaCol, collection_name),
+                    &serialized_schema
+            );
+
+            if (!status.ok()) {
+                return status;
+            }
+
+            const auto schema = DeserializeSchema(serialized_schema);
+
+            if (!schema.has_value()) {
+                return rocksdb::Status::Corruption(
+                        "Invalid schema metadata for collection: " +
+                        collection_name
+                );
+            }
+            metadata.schema = *schema;
+
+            const std::string foreign_key_prefix = std::string(keys::kMetaFk) + collection_name + ":";
+
+            rocksdb::ReadOptions iterator_options = read_options_;
+            {
+                auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                        txn_db_->NewIterator(iterator_options)
+                );
+
+                for (iterator->Seek(foreign_key_prefix);
+                     iterator->Valid() &&
+                     iterator->key().starts_with(foreign_key_prefix);
+                     iterator->Next()) {
+                    const auto foreign_key =
+                            DeserializeFk(iterator->value().ToString());
+
+                    if (!foreign_key.has_value()) {
+                        return rocksdb::Status::Corruption(
+                                "Invalid foreign-key metadata in collection: " +
+                                collection_name);
+                    }
+
+                    metadata.foreign_keys.push_back(*foreign_key);
+                }
+                status = iterator -> status();
+
+                if (!status.ok()){
+                    return status;
+                }
+            }
+            const std::string index_prefix = std::string(keys::kMetaIdx) + collection_name + ":" ;
+
+            {
+                auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                        txn_db_->NewIterator(iterator_options));
+
+                for (iterator->Seek(index_prefix);
+                     iterator->Valid() &&
+                     iterator->key().starts_with(index_prefix);
+                     iterator->Next()) {
+                    const auto index =
+                            DeserializeIndex(iterator->value().ToString());
+
+                    if (!index.has_value()) {
+                        return rocksdb::Status::Corruption(
+                                "Invalid index metadata in collection: " +
+                                collection_name);
+                    }
+
+                    metadata.indexes.push_back(*index);
+                }
+
+                status = iterator->status();
+
+                if (!status.ok()) {
+                    return status;
+                }
+            }
+            return rocksdb::Status::OK();
+        }
+
+        rocksdb::Status DocEngine::ValidateForeignKeysChecked(
+                const std::vector<ForeignKeyDefinition>& foreign_keys,
+                const std::string& bson_document,
+                std::string& validation_error,
+                rocksdb::Transaction* transaction) const {
+            validation_error.clear();
+            std::unique_ptr<rocksdb::Iterator> index_iterator;
+
+            for (const auto& foreign_key : foreign_keys) {
+                const std::string local_value =
+                        ExtractField(bson_document, foreign_key.local_field);
+
+                if (local_value.empty()) {
+                    continue;
+                }
+
+                if (foreign_key.ref_field == "_id") {
+                    std::string referenced_document;
+
+                    const std::string referenced_key = MakeDocKey(
+                            foreign_key.ref_collection,
+                            local_value);
+                    const rocksdb::Status status = transaction
+                            ? transaction->Get(
+                                    read_options_,
+                                    referenced_key,
+                                    &referenced_document)
+                            : txn_db_->Get(
+                                    read_options_,
+                                    referenced_key,
+                                    &referenced_document);
+
+                    if (status.IsNotFound()) {
+                        validation_error =
+                                "FK violation: '" + local_value +
+                                "' not found in '" +
+                                foreign_key.ref_collection + "'";
+
+                        return rocksdb::Status::InvalidArgument(
+                                validation_error);
+                    }
+
+                    if (!status.ok()) {
+                        return status;
+                    }
+
+                    continue;
+                }
+
+                const std::string index_prefix =
+                        std::string(keys::kIdx) +
+                        foreign_key.ref_collection + ":" +
+                        foreign_key.ref_field + ":" +
+                        local_value + ":";
+
+                if (!index_iterator) {
+                    index_iterator.reset(transaction
+                            ? transaction->GetIterator(read_options_)
+                            : txn_db_->NewIterator(read_options_));
+                }
+
+                index_iterator->Seek(index_prefix);
+
+                if (!index_iterator->status().ok()) {
+                    return index_iterator->status();
+                }
+
+                const rocksdb::Slice prefix_slice(index_prefix);
+                if (!index_iterator->Valid() ||
+                    !index_iterator->key().starts_with(prefix_slice)) {
+                    validation_error =
+                            "FK violation: '" + local_value +
+                            "' not found in '" +
+                            foreign_key.ref_collection + "." +
+                            foreign_key.ref_field + "'";
+
+                    return rocksdb::Status::InvalidArgument(
+                            validation_error);
+                }
+            }
+
+            return rocksdb::Status::OK();
+        }
+
+        class DocEngine::MutationBuilder {
+        public:
+            MutationBuilder(
+                    DocEngine& engine,
+                    const std::string& collection,
+                    const std::vector<IndexDefinition>& indexes)
+                    : engine_(engine),
+                      collection_(collection),
+                      indexes_(indexes) {
+                owned_transaction_.reset(
+                        engine_.txn_db_->BeginTransaction(
+                                engine_.write_options_,
+                                engine_.transaction_options_));
+                transaction_ = owned_transaction_.get();
+            }
+
+            MutationBuilder(
+                    DocEngine& engine,
+                    rocksdb::Transaction& transaction,
+                    const std::string& collection,
+                    const std::vector<IndexDefinition>& indexes)
+                    : engine_(engine),
+                      collection_(collection),
+                      indexes_(indexes),
+                      transaction_(&transaction),
+                      uses_savepoint_(true) {
+                transaction_->SetSavePoint();
+            }
+
+            ~MutationBuilder() {
+                if (transaction_ && !finished_) {
+                    const rocksdb::Status rollback_status = uses_savepoint_
+                            ? transaction_->RollbackToSavePoint()
+                            : transaction_->Rollback();
+
+                    if (!rollback_status.ok()) {
+                        NX_LOG(
+                                "Mutation rollback failed: "
+                                        << rollback_status.ToString());
+                    }
+                }
+            }
+
+            MutationBuilder(const MutationBuilder&) = delete;
+            MutationBuilder& operator=(const MutationBuilder&) = delete;
+
+            bool IsValid() const noexcept {
+                return transaction_ != nullptr;
+            }
+
+            rocksdb::Status ReadDocumentForUpdate(
+                    const std::string& document_id,
+                    std::string& document) {
+                if (!transaction_) {
+                    return rocksdb::Status::InvalidArgument(
+                            "Mutation transaction is not initialized");
+                }
+
+                return transaction_->GetForUpdate(
+                        engine_.read_options_,
+                        DocEngine::MakeDocKey(
+                                collection_,
+                                document_id),
+                        &document);
+            }
+
+            rocksdb::Status PutDocument(
+                    const std::string& document_id,
+                    const std::string& bson_document) {
+                rocksdb::Status status = transaction_->Put(
+                        DocEngine::MakeDocKey(
+                                collection_,
+                                document_id),
+                        bson_document);
+
+                if (!status.ok()) {
+                    return status;
+                }
+
+                return PutIndexEntries(
+                        document_id,
+                        bson_document);
+            }
+
+            rocksdb::Status ReplaceDocument(
+                    const std::string& document_id,
+                    const std::string& old_document,
+                    const std::string& new_document) {
+                rocksdb::Status status = DeleteIndexEntries(
+                        document_id,
+                        old_document);
+
+                if (!status.ok()) {
+                    return status;
+                }
+
+                status = transaction_->Put(
+                        DocEngine::MakeDocKey(
+                                collection_,
+                                document_id),
+                        new_document);
+
+                if (!status.ok()) {
+                    return status;
+                }
+
+                return PutIndexEntries(
+                        document_id,
+                        new_document);
+            }
+
+            rocksdb::Status DeleteDocument(
+                    const std::string& document_id,
+                    const std::string& old_document) {
+                rocksdb::Status status = DeleteIndexEntries(
+                        document_id,
+                        old_document);
+
+                if (!status.ok()) {
+                    return status;
+                }
+
+                return transaction_->Delete(
+                        DocEngine::MakeDocKey(
+                                collection_,
+                                document_id));
+            }
+
+            rocksdb::Status AdjustCounter(std::int64_t delta) {
+                const std::string counter_key =
+                        std::string(keys::kSeq) + collection_;
+
+                std::string stored_value;
+
+                rocksdb::Status status = transaction_->GetForUpdate(
+                        engine_.read_options_,
+                        counter_key,
+                        &stored_value);
+
+                if (status.IsNotFound()) {
+                    return rocksdb::Status::Corruption(
+                            "Missing document counter for collection: " +
+                            collection_);
+                }
+
+                if (!status.ok()) {
+                    return status;
+                }
+
+                std::size_t parsed_characters = 0;
+                std::int64_t current_value = 0;
+
+                try {
+                    current_value = std::stoll(
+                            stored_value,
+                            &parsed_characters);
+                } catch (const std::exception&) {
+                    return rocksdb::Status::Corruption(
+                            "Invalid document counter for collection: " +
+                            collection_);
+                }
+
+                if (parsed_characters != stored_value.size()) {
+                    return rocksdb::Status::Corruption(
+                            "Invalid document counter for collection: " +
+                            collection_);
+                }
+
+                if (delta > 0 &&
+                    current_value >
+                    std::numeric_limits<std::int64_t>::max() - delta) {
+                    return rocksdb::Status::InvalidArgument(
+                            "Document counter overflow");
+                }
+
+                std::int64_t next_value = current_value + delta;
+
+                if (next_value < 0) {
+                    next_value = 0;
+                }
+
+                return transaction_->Put(
+                        counter_key,
+                        std::to_string(next_value));
+            }
+
+            std::unique_ptr<rocksdb::Iterator> NewIterator(
+                    const rocksdb::ReadOptions& options) {
+                return std::unique_ptr<rocksdb::Iterator>(
+                        transaction_->GetIterator(options));
+            }
+
+            rocksdb::Status Commit() {
+                if (!transaction_) {
+                    return rocksdb::Status::InvalidArgument(
+                            "Mutation transaction is not initialized");
+                }
+
+                const rocksdb::Status status = uses_savepoint_
+                        ? transaction_->PopSavePoint()
+                        : transaction_->Commit();
+
+                if (status.ok()) {
+                    finished_ = true;
+                }
+
+                return status;
+            }
+
+            rocksdb::Status Rollback() {
+                if (!transaction_) {
+                    return rocksdb::Status::InvalidArgument(
+                            "Mutation transaction is not initialized");
+                }
+
+                const rocksdb::Status status = uses_savepoint_
+                        ? transaction_->RollbackToSavePoint()
+                        : transaction_->Rollback();
+                if (status.ok()) {
+                    finished_ = true;
+                }
+                return status;
+            }
+
+        private:
+            rocksdb::Status PutIndexEntries(
+                    const std::string& document_id,
+                    const std::string& bson_document) {
+                for (const auto& index : indexes_) {
+                    for (const auto& field : index.fields) {
+                        const std::string value =
+                                DocEngine::ExtractField(
+                                        bson_document,
+                                        field);
+
+                        if (value.empty()) {
+                            continue;
+                        }
+
+                        const rocksdb::Status status =
+                                transaction_->Put(
+                                        DocEngine::MakeIndexKey(
+                                                collection_,
+                                                field,
+                                                value,
+                                                document_id),
+                                        document_id);
+
+                        if (!status.ok()) {
+                            return status;
+                        }
+                    }
+                }
+
+                return rocksdb::Status::OK();
+            }
+
+            rocksdb::Status DeleteIndexEntries(
+                    const std::string& document_id,
+                    const std::string& bson_document) {
+                for (const auto& index : indexes_) {
+                    for (const auto& field : index.fields) {
+                        const std::string value =
+                                DocEngine::ExtractField(
+                                        bson_document,
+                                        field);
+
+                        if (value.empty()) {
+                            continue;
+                        }
+
+                        const rocksdb::Status status =
+                                transaction_->Delete(
+                                        DocEngine::MakeIndexKey(
+                                                collection_,
+                                                field,
+                                                value,
+                                                document_id));
+
+                        if (!status.ok()) {
+                            return status;
+                        }
+                    }
+                }
+
+                return rocksdb::Status::OK();
+            }
+
+            DocEngine& engine_;
+            std::string collection_;
+            const std::vector<IndexDefinition>& indexes_;
+            std::unique_ptr<rocksdb::Transaction> owned_transaction_;
+            rocksdb::Transaction* transaction_ = nullptr;
+            bool uses_savepoint_ = false;
+            bool finished_ = false;
+        };
+// ══════════════════════════════════════════════════════════════
+
 // ══════════════════════════════════════════════════════════════
 // §8  متدهای کمکی Validation
 // ══════════════════════════════════════════════════════════════
@@ -653,172 +1208,234 @@ namespace nexora {
             return true;
         }
 
-        bool DocEngine::CheckForeignKey(const ForeignKeyDefinition& fk,
-                                        const std::string&          bson_document,
-                                        std::string&                error_out) {
-            std::string local_val = ExtractField(bson_document, fk.local_field);
-            if (local_val.empty()) return true;  // فیلد وجود ندارد — بررسی لازم نیست
-
-            // بررسی با direct key اگر ref_field == "_id"
-            if (fk.ref_field == "_id") {
-                std::string ref_key = MakeDocKey(fk.ref_collection, local_val);
-                std::string ref_val;
-                rocksdb::Status s = txn_db_->Get(read_options_, ref_key, &ref_val);
-                if (s.IsNotFound()) {
-                    error_out = "FK violation: '" + local_val +
-                                "' not found in '" + fk.ref_collection + "'";
-                    return false;
-                }
-                return true;
-            }
-
-            // جستجو از طریق ایندکس
-            std::string idx_prefix = std::string(keys::kIdx) + fk.ref_collection +
-                                     ":" + fk.ref_field + ":" + local_val + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            it->Seek(idx_prefix);
-            if (!it->Valid() || !it->key().starts_with(idx_prefix)) {
-                error_out = "FK violation: '" + local_val +
-                            "' not found in '" + fk.ref_collection + "." + fk.ref_field + "'";
-                return false;
-            }
-            return true;
-        }
-
-        rocksdb::Status DocEngine::UpdateIndexesOnInsert(const std::string& collection,
-                                                         const std::string& doc_id,
-                                                         const std::string& bson) {
-            auto indexes = GetIndexes(collection);
-            if (indexes.empty()) return rocksdb::Status::OK();
-            rocksdb::WriteBatch batch;
-            for (const auto& idx : indexes)
-                for (const auto& field : idx.fields) {
-                    std::string val = ExtractField(bson, field);
-                    if (!val.empty())
-                        batch.Put(MakeIndexKey(collection, field, val, doc_id), doc_id);
-                }
-            return txn_db_->Write(write_options_, &batch);
-        }
-
-        rocksdb::Status DocEngine::CleanIndexesOnDelete(const std::string& collection,
-                                                        const std::string& doc_id,
-                                                        const std::string& old_bson) {
-            auto indexes = GetIndexes(collection);
-            if (indexes.empty()) return rocksdb::Status::OK();
-            rocksdb::WriteBatch batch;
-            for (const auto& idx : indexes)
-                for (const auto& field : idx.fields) {
-                    std::string val = ExtractField(old_bson, field);
-                    if (!val.empty())
-                        batch.Delete(MakeIndexKey(collection, field, val, doc_id));
-                }
-            return txn_db_->Write(write_options_, &batch);
-        }
-
 // ══════════════════════════════════════════════════════════════
 // §9  CRUD - Insert
 // ══════════════════════════════════════════════════════════════
 
-        DBResult DocEngine::InsertOne(const std::string& collection_name,
-                                      const std::string& bson_document) {
-            if (IsReservedCollectionName(collection_name))
+        DBResult DocEngine::InsertOne(
+                const std::string& collection_name,
+                const std::string& bson_document) {
+            if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
-            if (!CollectionExists(collection_name))
-                return DBResult::Err("Collection '" + collection_name + "' does not exist");
-
-            // Schema Validation
-            auto schema = GetSchema(collection_name);
-            if (schema && !schema->fields.empty()) {
-                std::string err;
-                if (!ValidateDocument(bson_document, *schema, err))
-                    return DBResult::Err("Schema validation failed: " + err);
             }
 
-            // Foreign Key Check
-            for (const auto& fk : GetForeignKeys(collection_name)) {
-                std::string err;
-                if (!CheckForeignKey(fk, bson_document, err))
-                    return DBResult::Err(err);
+            MutationMetadata metadata;
+
+            rocksdb::Status status =
+                    LoadMutationMetadata(
+                            collection_name,
+                            metadata);
+
+            if (status.IsNotFound()) {
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
             }
 
-            // تولید یا استخراج doc_id
-            std::string doc_id = ExtractField(bson_document, "_id");
-            if (doc_id.empty()) doc_id = GenerateDocId();
+            if (!status.ok()) {
+                return RocksFailure(
+                        "InsertOne metadata",
+                        status);
+            }
 
-            rocksdb::Status s = txn_db_->Put(write_options_,
-                                             MakeDocKey(collection_name, doc_id),
-                                             bson_document);
-            ROCKS_CHECK(s, "InsertOne");
+            if (!metadata.schema.fields.empty()) {
+                std::string validation_error;
 
-            // به‌روزرسانی ایندکس‌ها
-            auto idx_status = UpdateIndexesOnInsert(collection_name, doc_id, bson_document);
-            if (!idx_status.ok())
-                NX_LOG("Warning: Index update failed after InsertOne: " << idx_status.ToString());
+                if (!ValidateDocument(
+                        bson_document,
+                        metadata.schema,
+                        validation_error)) {
+                    return DBResult::Err(
+                            "Schema validation failed: " +
+                            validation_error);
+                }
+            }
 
-            // به‌روزرسانی شمارنده
-            std::string seq_key = std::string(keys::kSeq) + collection_name;
-            std::string seq_val;
-            txn_db_->Get(read_options_, seq_key, &seq_val);
-            int64_t cnt = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
-            txn_db_->Put(write_options_, seq_key, std::to_string(cnt));
+            std::string validation_error;
 
-            return DBResult::Ok(doc_id);
+            status = ValidateForeignKeysChecked(
+                    metadata.foreign_keys,
+                    bson_document,
+                    validation_error);
+
+            if (!status.ok()) {
+                if (!validation_error.empty()) {
+                    return DBResult::Err(validation_error);
+                }
+
+                return RocksFailure(
+                        "InsertOne foreign-key validation",
+                        status);
+            }
+
+            std::string document_id =
+                    ExtractField(bson_document, "_id");
+
+            if (document_id.empty()) {
+                document_id = GenerateDocId();
+            }
+
+            MutationBuilder mutation(
+                    *this,
+                    collection_name,
+                    metadata.indexes);
+
+            if (!mutation.IsValid()) {
+                return DBResult::Err(
+                        "InsertOne: unable to start transaction");
+            }
+
+            std::string old_document;
+
+            status = mutation.ReadDocumentForUpdate(
+                    document_id,
+                    old_document);
+
+            if (status.ok()) {
+                return DBResult::Err(
+                        "Duplicate document _id: " + document_id);
+            }
+
+            if (!status.IsNotFound()) {
+                return RocksFailure(
+                        "InsertOne document lookup",
+                        status);
+            }
+
+            status = mutation.PutDocument(
+                    document_id,
+                    bson_document);
+
+            if (!status.ok()) {
+                return RocksFailure(
+                        "InsertOne document/index staging",
+                        status);
+            }
+
+            status = mutation.AdjustCounter(1);
+
+            if (!status.ok()) {
+                return RocksFailure(
+                        "InsertOne counter staging",
+                        status);
+            }
+
+            status = mutation.Commit();
+
+            if (!status.ok()) {
+                return RocksFailure(
+                        "InsertOne commit",
+                        status);
+            }
+
+            return DBResult::Ok(document_id);
         }
 
         DBResult DocEngine::InsertMany(const std::string&              collection_name,
                                        const std::vector<std::string>& bson_documents) {
-            if (IsReservedCollectionName(collection_name))
+            if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
-            if (!CollectionExists(collection_name))
-                return DBResult::Err("Collection '" + collection_name + "' does not exist");
-            if (bson_documents.empty())
+            }
+            if (bson_documents.empty()) {
                 return DBResult::Err("Document list is empty");
+            }
 
-            auto schema  = GetSchema(collection_name);
-            auto fks     = GetForeignKeys(collection_name);
-            auto indexes = GetIndexes(collection_name);
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
 
-            rocksdb::WriteBatch batch;
+            if (status.IsNotFound()) {
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            }
+            if (!status.ok()) {
+                return RocksFailure("InsertMany metadata", status);
+            }
+
+            MutationBuilder mutation(
+                    *this,
+                    collection_name,
+                    metadata.indexes);
+            if (!mutation.IsValid()) {
+                return DBResult::Err(
+                        "InsertMany: unable to start transaction");
+            }
+
             std::vector<std::string> created_ids;
             created_ids.reserve(bson_documents.size());
 
             for (const auto& bson : bson_documents) {
-                if (schema && !schema->fields.empty()) {
-                    std::string err;
-                    if (!ValidateDocument(bson, *schema, err))
-                        return DBResult::Err("Schema validation failed: " + err);
+                if (!metadata.schema.fields.empty()) {
+                    std::string validation_error;
+                    if (!ValidateDocument(
+                            bson,
+                            metadata.schema,
+                            validation_error)) {
+                        return DBResult::Err(
+                                "Schema validation failed: " +
+                                validation_error);
+                    }
                 }
-                for (const auto& fk : fks) {
-                    std::string err;
-                    if (!CheckForeignKey(fk, bson, err))
-                        return DBResult::Err(err);
+
+                std::string validation_error;
+                status = ValidateForeignKeysChecked(
+                        metadata.foreign_keys,
+                        bson,
+                        validation_error);
+                if (!status.ok()) {
+                    if (!validation_error.empty()) {
+                        return DBResult::Err(validation_error);
+                    }
+                    return RocksFailure(
+                            "InsertMany foreign-key validation",
+                            status);
                 }
 
                 std::string doc_id = ExtractField(bson, "_id");
-                if (doc_id.empty()) doc_id = GenerateDocId();
+                if (doc_id.empty()) {
+                    doc_id = GenerateDocId();
+                }
 
-                batch.Put(MakeDocKey(collection_name, doc_id), bson);
-                created_ids.push_back(doc_id);
+                std::string old_document;
+                status = mutation.ReadDocumentForUpdate(
+                        doc_id,
+                        old_document);
+                if (status.ok()) {
+                    return DBResult::Err(
+                            "Duplicate document _id: " + doc_id);
+                }
 
-                for (const auto& idx : indexes)
-                    for (const auto& field : idx.fields) {
-                        std::string val = ExtractField(bson, field);
-                        if (!val.empty())
-                            batch.Put(MakeIndexKey(collection_name, field, val, doc_id), doc_id);
-                    }
+                if (!status.IsNotFound()) {
+                    return RocksFailure(
+                            "InsertMany document lookup",
+                            status);
+                }
+
+                status = mutation.PutDocument(doc_id, bson);
+
+                if (!status.ok()) {
+                    return RocksFailure(
+                            "InsertMany document/index staging",
+                            status);
+                }
+
+                created_ids.push_back(std::move(doc_id));
             }
 
-            rocksdb::Status s = txn_db_->Write(write_options_, &batch);
-            ROCKS_CHECK(s, "InsertMany");
+            status = mutation.AdjustCounter(
+                    static_cast<std::int64_t>(created_ids.size()));
+            if (!status.ok()) {
+                return RocksFailure(
+                        "InsertMany counter staging",
+                        status);
+            }
 
-            // به‌روزرسانی شمارنده
-            std::string seq_key = std::string(keys::kSeq) + collection_name;
-            std::string seq_val;
-            txn_db_->Get(read_options_, seq_key, &seq_val);
-            int64_t cnt = (seq_val.empty() ? 0 : std::stoll(seq_val)) +
-                          static_cast<int64_t>(created_ids.size());
-            txn_db_->Put(write_options_, seq_key, std::to_string(cnt));
+            status = mutation.Commit();
+            if (!status.ok()) {
+                return RocksFailure("InsertMany commit", status);
+            }
 
             // ساخت JSON آرایه IDs
             std::string ids_json = "[";
@@ -828,6 +1445,93 @@ namespace nexora {
             }
             ids_json += "]";
             return DBResult::Ok(ids_json);
+        }
+
+        BulkWriteResult DocEngine::InsertManyBulk(
+                const std::string& collection_name,
+                const std::vector<std::string>& bson_documents,
+                const BulkWriteOptions& options) {
+            BulkWriteResult result;
+            if (options.mode == BulkWriteMode::Atomic) {
+                const DBResult atomic = InsertMany(
+                        collection_name,
+                        bson_documents);
+                result.success = atomic.success;
+                result.processed = atomic.success
+                        ? bson_documents.size() : 0;
+                result.modified = result.processed;
+                result.committed_chunks = atomic.success ? 1 : 0;
+                result.last_error = atomic.error_msg;
+                return result;
+            }
+            if (bson_documents.empty()) {
+                result.last_error = "Document list is empty";
+                return result;
+            }
+            if (options.max_operations_per_chunk == 0 ||
+                options.max_bytes_per_chunk == 0) {
+                result.last_error =
+                        "Bulk chunk limits must be greater than zero";
+                return result;
+            }
+
+            std::size_t offset = 0;
+            while (offset < bson_documents.size()) {
+                auto transaction = BeginTransaction();
+                if (!transaction) {
+                    result.last_error =
+                            "InsertManyBulk: unable to start transaction";
+                    return result;
+                }
+
+                std::size_t chunk_operations = 0;
+                std::size_t chunk_bytes = 0;
+                std::uint64_t chunk_modified = 0;
+                while (offset < bson_documents.size() &&
+                       chunk_operations < options.max_operations_per_chunk) {
+                    const std::size_t document_bytes =
+                            bson_documents[offset].size();
+                    if (chunk_operations > 0 &&
+                        chunk_bytes + document_bytes >
+                                options.max_bytes_per_chunk) {
+                        break;
+                    }
+
+                    const DBResult inserted = InsertOneTx(
+                            *transaction,
+                            collection_name,
+                            bson_documents[offset]);
+                    ++result.processed;
+                    if (!inserted.success) {
+                        const DBResult rollback =
+                                RollbackTransaction(*transaction);
+                        result.last_error = inserted.error_msg;
+                        if (!rollback.success) {
+                            result.last_error +=
+                                    "; rollback failed: " +
+                                    rollback.error_msg;
+                        }
+                        return result;
+                    }
+
+                    ++offset;
+                    ++chunk_operations;
+                    ++chunk_modified;
+                    chunk_bytes += document_bytes;
+                }
+
+                const DBResult committed =
+                        CommitTransaction(*transaction);
+                if (!committed.success) {
+                    result.last_error = committed.error_msg;
+                    return result;
+                }
+                result.modified += chunk_modified;
+                ++result.committed_chunks;
+            }
+
+            result.success = true;
+            return result;
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -892,90 +1596,408 @@ namespace nexora {
 // §11  CRUD - Update
 // ══════════════════════════════════════════════════════════════
 
-        DBResult DocEngine::UpdateById(const std::string&               collection_name,
-                                       const std::string&               doc_id,
-                                       const nexora::query::UpdateSpec& update_spec) {
-            if (IsReservedCollectionName(collection_name))
+        DBResult DocEngine::UpdateById(
+                const std::string& collection_name,
+                const std::string& doc_id,
+                const nexora::query::UpdateSpec& update_spec) {
+            if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
-            auto read_result = FindById(collection_name, doc_id);
-            if (!read_result.success) return read_result;
-
-            std::string old_bson = read_result.data;
-            std::string new_bson = ApplyUpdate(old_bson, update_spec);
-
-            // FK check روی فیلدهای تغییر یافته
-            for (const auto& fk : GetForeignKeys(collection_name)) {
-                std::string err;
-                if (!CheckForeignKey(fk, new_bson, err))
-                    return DBResult::Err(err);
             }
 
-            CleanIndexesOnDelete(collection_name, doc_id, old_bson);
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
 
-            rocksdb::Status s = txn_db_->Put(write_options_,
-                                             MakeDocKey(collection_name, doc_id),
-                                             new_bson);
-            ROCKS_CHECK(s, "UpdateById");
+            if (status.IsNotFound()) {
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            }
 
-            UpdateIndexesOnInsert(collection_name, doc_id, new_bson);
+            if (!status.ok()) {
+                return RocksFailure("UpdateById metadata", status);
+            }
+
+            MutationBuilder mutation(
+                    *this,
+                    collection_name,
+                    metadata.indexes);
+
+            if (!mutation.IsValid()) {
+                return DBResult::Err(
+                        "UpdateById: unable to start transaction");
+            }
+
+            std::string old_document;
+            status = mutation.ReadDocumentForUpdate(
+                    doc_id,
+                    old_document);
+
+            if (status.IsNotFound()) {
+                return DBResult::Err("Document not found: " + doc_id);
+            }
+
+            if (!status.ok()) {
+                return RocksFailure("UpdateById document read", status);
+            }
+
+            const std::string new_document =
+                    ApplyUpdate(old_document, update_spec);
+
+            if (!metadata.schema.fields.empty()) {
+                std::string validation_error;
+                if (!ValidateDocument(
+                        new_document,
+                        metadata.schema,
+                        validation_error)) {
+                    return DBResult::Err(
+                            "Schema validation failed: " +
+                            validation_error);
+                }
+            }
+
+            std::string validation_error;
+            status = ValidateForeignKeysChecked(
+                    metadata.foreign_keys,
+                    new_document,
+                    validation_error);
+
+            if (!status.ok()) {
+                if (!validation_error.empty()) {
+                    return DBResult::Err(validation_error);
+                }
+                return RocksFailure(
+                        "UpdateById foreign-key validation",
+                        status);
+            }
+
+            status = mutation.ReplaceDocument(
+                    doc_id,
+                    old_document,
+                    new_document);
+
+            if (!status.ok()) {
+                return RocksFailure(
+                        "UpdateById document/index staging",
+                        status);
+            }
+
+            status = mutation.Commit();
+            if (!status.ok()) {
+                return RocksFailure("UpdateById commit", status);
+            }
+
             return DBResult::Ok("1");
         }
 
         DBResult DocEngine::UpdateMany(const std::string&               collection_name,
                                        const nexora::query::Condition&  condition,
                                        const nexora::query::UpdateSpec& update_spec) {
-            if (IsReservedCollectionName(collection_name))
+            if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
-            if (!CollectionExists(collection_name))
-                return DBResult::Err("Collection '" + collection_name + "' does not exist");
+            }
 
-            std::string data_prefix = std::string(keys::kData) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
 
-            rocksdb::WriteBatch batch;
-            uint64_t updated = 0;
+            if (status.IsNotFound()) {
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            }
+            if (!status.ok()) {
+                return RocksFailure("UpdateMany metadata", status);
+            }
 
-            for (it->Seek(data_prefix);
-                 it->Valid() && it->key().starts_with(data_prefix); it->Next()) {
-                std::string bson = it->value().ToString();
-                if (!MatchesCondition(bson, condition)) continue;
-                std::string new_bson = ApplyUpdate(bson, update_spec);
-                batch.Put(it->key(), new_bson);
+            MutationBuilder mutation(
+                    *this,
+                    collection_name,
+                    metadata.indexes);
+            if (!mutation.IsValid()) {
+                return DBResult::Err(
+                        "UpdateMany: unable to start transaction");
+            }
+
+            const std::string data_prefix =
+                    std::string(keys::kData) + collection_name + ":";
+            std::vector<std::string> candidate_ids;
+
+            {
+                auto iterator = mutation.NewIterator(read_options_);
+                for (iterator->Seek(data_prefix);
+                     iterator->Valid() &&
+                     iterator->key().starts_with(data_prefix);
+                     iterator->Next()) {
+                    const std::string document =
+                            iterator->value().ToString();
+                    if (MatchesCondition(document, condition)) {
+                        candidate_ids.push_back(
+                                iterator->key().ToString().substr(
+                                        data_prefix.size()));
+                    }
+                }
+
+                status = iterator->status();
+                if (!status.ok()) {
+                    return RocksFailure("UpdateMany scan", status);
+                }
+            }
+
+            std::uint64_t updated = 0;
+            for (const auto& doc_id : candidate_ids) {
+                std::string old_document;
+                status = mutation.ReadDocumentForUpdate(
+                        doc_id,
+                        old_document);
+
+                if (status.IsNotFound()) {
+                    continue;
+                }
+                if (!status.ok()) {
+                    return RocksFailure(
+                            "UpdateMany document read",
+                            status);
+                }
+                if (!MatchesCondition(old_document, condition)) {
+                    continue;
+                }
+
+                const std::string new_document =
+                        ApplyUpdate(old_document, update_spec);
+
+                if (!metadata.schema.fields.empty()) {
+                    std::string validation_error;
+                    if (!ValidateDocument(
+                            new_document,
+                            metadata.schema,
+                            validation_error)) {
+                        return DBResult::Err(
+                                "Schema validation failed: " +
+                                validation_error);
+                    }
+                }
+
+                std::string validation_error;
+                status = ValidateForeignKeysChecked(
+                        metadata.foreign_keys,
+                        new_document,
+                        validation_error);
+                if (!status.ok()) {
+                    if (!validation_error.empty()) {
+                        return DBResult::Err(validation_error);
+                    }
+                    return RocksFailure(
+                            "UpdateMany foreign-key validation",
+                            status);
+                }
+
+                status = mutation.ReplaceDocument(
+                        doc_id,
+                        old_document,
+                        new_document);
+                if (!status.ok()) {
+                    return RocksFailure(
+                            "UpdateMany document/index staging",
+                            status);
+                }
                 ++updated;
             }
 
-            rocksdb::Status s = txn_db_->Write(write_options_, &batch);
-            ROCKS_CHECK(s, "UpdateMany");
+            status = mutation.Commit();
+            if (!status.ok()) {
+                return RocksFailure("UpdateMany commit", status);
+            }
+
             return DBResult::Ok(std::to_string(updated));
+        }
+
+        BulkWriteResult DocEngine::UpdateManyBulk(
+                const std::string& collection_name,
+                const nexora::query::Condition& condition,
+                const nexora::query::UpdateSpec& update_spec,
+                const BulkWriteOptions& options) {
+            BulkWriteResult result;
+            if (options.mode == BulkWriteMode::Atomic) {
+                const DBResult atomic = UpdateMany(
+                        collection_name,
+                        condition,
+                        update_spec);
+                result.success = atomic.success;
+                result.last_error = atomic.error_msg;
+                if (atomic.success) {
+                    result.modified = std::stoull(atomic.data);
+                    result.processed = result.modified;
+                    result.committed_chunks = 1;
+                }
+                return result;
+            }
+            if (options.max_operations_per_chunk == 0 ||
+                options.max_bytes_per_chunk == 0) {
+                result.last_error =
+                        "Bulk chunk limits must be greater than zero";
+                return result;
+            }
+            if (!CollectionExists(collection_name)) {
+                result.last_error =
+                        "Collection '" + collection_name +
+                        "' does not exist";
+                return result;
+            }
+
+            const std::string prefix =
+                    std::string(keys::kData) + collection_name + ":";
+            std::vector<std::pair<std::string, std::size_t>> candidates;
+            auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                    txn_db_->NewIterator(read_options_));
+            for (iterator->Seek(prefix);
+                 iterator->Valid() && iterator->key().starts_with(prefix);
+                 iterator->Next()) {
+                const std::string document = iterator->value().ToString();
+                if (MatchesCondition(document, condition)) {
+                    candidates.emplace_back(
+                            iterator->key().ToString().substr(prefix.size()),
+                            iterator->key().size() + document.size());
+                }
+            }
+            if (!iterator->status().ok()) {
+                result.last_error = RocksFailure(
+                        "UpdateManyBulk scan",
+                        iterator->status()).error_msg;
+                return result;
+            }
+
+            std::size_t offset = 0;
+            while (offset < candidates.size()) {
+                auto transaction = BeginTransaction();
+                if (!transaction) {
+                    result.last_error =
+                            "UpdateManyBulk: unable to start transaction";
+                    return result;
+                }
+                std::size_t chunk_operations = 0;
+                std::size_t chunk_bytes = 0;
+                std::uint64_t chunk_modified = 0;
+                while (offset < candidates.size() &&
+                       chunk_operations < options.max_operations_per_chunk) {
+                    const std::size_t operation_bytes = candidates[offset].second;
+                    if (chunk_operations > 0 &&
+                        chunk_bytes + operation_bytes >
+                                options.max_bytes_per_chunk) {
+                        break;
+                    }
+                    const DBResult updated = UpdateByIdTx(
+                            *transaction,
+                            collection_name,
+                            candidates[offset].first,
+                            update_spec);
+                    ++result.processed;
+                    if (!updated.success) {
+                        const DBResult rollback =
+                                RollbackTransaction(*transaction);
+                        result.last_error = updated.error_msg;
+                        if (!rollback.success) {
+                            result.last_error +=
+                                    "; rollback failed: " +
+                                    rollback.error_msg;
+                        }
+                        return result;
+                    }
+                    if (updated.data == "1") ++chunk_modified;
+                    ++offset;
+                    ++chunk_operations;
+                    chunk_bytes += operation_bytes;
+                }
+                const DBResult committed =
+                        CommitTransaction(*transaction);
+                if (!committed.success) {
+                    result.last_error = committed.error_msg;
+                    return result;
+                }
+                result.modified += chunk_modified;
+                ++result.committed_chunks;
+            }
+            result.success = true;
+            return result;
         }
 
 // ══════════════════════════════════════════════════════════════
 // §12  CRUD - Delete
 // ══════════════════════════════════════════════════════════════
 
-        DBResult DocEngine::DeleteById(const std::string& collection_name,
-                                       const std::string& doc_id) {
-            if (IsReservedCollectionName(collection_name))
+        DBResult DocEngine::DeleteById(
+                const std::string& collection_name,
+                const std::string& doc_id) {
+            if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
-            std::string doc_key = MakeDocKey(collection_name, doc_id);
-            std::string bson;
-            rocksdb::Status s = txn_db_->Get(read_options_, doc_key, &bson);
-            if (s.IsNotFound()) return DBResult::Ok("0");
-            ROCKS_CHECK(s, "DeleteById read");
+            }
 
-            CleanIndexesOnDelete(collection_name, doc_id, bson);
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
 
-            s = txn_db_->Delete(write_options_, doc_key);
-            ROCKS_CHECK(s, "DeleteById");
+            if (status.IsNotFound()) {
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            }
 
-            // به‌روزرسانی شمارنده
-            std::string seq_key = std::string(keys::kSeq) + collection_name;
-            std::string seq_val;
-            txn_db_->Get(read_options_, seq_key, &seq_val);
-            if (!seq_val.empty()) {
-                int64_t cnt = std::max(0LL, std::stoll(seq_val) - 1);
-                txn_db_->Put(write_options_, seq_key, std::to_string(cnt));
+            if (!status.ok()) {
+                return RocksFailure("DeleteById metadata", status);
+            }
+
+            MutationBuilder mutation(
+                    *this,
+                    collection_name,
+                    metadata.indexes);
+
+            if (!mutation.IsValid()) {
+                return DBResult::Err(
+                        "DeleteById: unable to start transaction");
+            }
+
+            std::string old_document;
+            status = mutation.ReadDocumentForUpdate(
+                    doc_id,
+                    old_document);
+
+            if (status.IsNotFound()) {
+                status = mutation.Rollback();
+                if (!status.ok()) {
+                    return RocksFailure(
+                            "DeleteById rollback",
+                            status);
+                }
+                return DBResult::Ok("0");
+            }
+
+            if (!status.ok()) {
+                return RocksFailure("DeleteById document read", status);
+            }
+
+            status = mutation.DeleteDocument(
+                    doc_id,
+                    old_document);
+
+            if (!status.ok()) {
+                return RocksFailure(
+                        "DeleteById document/index staging",
+                        status);
+            }
+
+            status = mutation.AdjustCounter(-1);
+            if (!status.ok()) {
+                return RocksFailure(
+                        "DeleteById counter staging",
+                        status);
+            }
+
+            status = mutation.Commit();
+            if (!status.ok()) {
+                return RocksFailure("DeleteById commit", status);
             }
 
             return DBResult::Ok("1");
@@ -983,34 +2005,208 @@ namespace nexora {
 
         DBResult DocEngine::DeleteMany(const std::string&              collection_name,
                                        const nexora::query::Condition& condition) {
-            if (IsReservedCollectionName(collection_name))
+            if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
-            if (!CollectionExists(collection_name))
-                return DBResult::Err("Collection '" + collection_name + "' does not exist");
-
-            std::string data_prefix = std::string(keys::kData) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-
-            // جمع‌آوری اسناد هدف قبل از حذف
-            std::vector<std::pair<std::string, std::string>> to_delete;
-            for (it->Seek(data_prefix);
-                 it->Valid() && it->key().starts_with(data_prefix); it->Next()) {
-                std::string bson = it->value().ToString();
-                if (MatchesCondition(bson, condition))
-                    to_delete.emplace_back(it->key().ToString(), bson);
             }
 
-            rocksdb::WriteBatch batch;
-            for (const auto& [key, bson] : to_delete) {
-                batch.Delete(key);
-                CleanIndexesOnDelete(collection_name,
-                                     key.substr(data_prefix.size()), bson);
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
+
+            if (status.IsNotFound()) {
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            }
+            if (!status.ok()) {
+                return RocksFailure("DeleteMany metadata", status);
             }
 
-            rocksdb::Status s = txn_db_->Write(write_options_, &batch);
-            ROCKS_CHECK(s, "DeleteMany");
-            return DBResult::Ok(std::to_string(to_delete.size()));
+            MutationBuilder mutation(
+                    *this,
+                    collection_name,
+                    metadata.indexes);
+            if (!mutation.IsValid()) {
+                return DBResult::Err(
+                        "DeleteMany: unable to start transaction");
+            }
+
+            const std::string data_prefix =
+                    std::string(keys::kData) + collection_name + ":";
+            std::vector<std::string> candidate_ids;
+
+            {
+                auto iterator = mutation.NewIterator(read_options_);
+                for (iterator->Seek(data_prefix);
+                     iterator->Valid() &&
+                     iterator->key().starts_with(data_prefix);
+                     iterator->Next()) {
+                    const std::string document =
+                            iterator->value().ToString();
+                    if (MatchesCondition(document, condition)) {
+                        candidate_ids.push_back(
+                                iterator->key().ToString().substr(
+                                        data_prefix.size()));
+                    }
+                }
+
+                status = iterator->status();
+                if (!status.ok()) {
+                    return RocksFailure("DeleteMany scan", status);
+                }
+            }
+
+            std::uint64_t deleted = 0;
+            for (const auto& doc_id : candidate_ids) {
+                std::string old_document;
+                status = mutation.ReadDocumentForUpdate(
+                        doc_id,
+                        old_document);
+
+                if (status.IsNotFound()) {
+                    continue;
+                }
+                if (!status.ok()) {
+                    return RocksFailure(
+                            "DeleteMany document read",
+                            status);
+                }
+                if (!MatchesCondition(old_document, condition)) {
+                    continue;
+                }
+
+                status = mutation.DeleteDocument(
+                        doc_id,
+                        old_document);
+                if (!status.ok()) {
+                    return RocksFailure(
+                            "DeleteMany document/index staging",
+                            status);
+                }
+                ++deleted;
+            }
+
+            if (deleted > 0) {
+                status = mutation.AdjustCounter(
+                        -static_cast<std::int64_t>(deleted));
+                if (!status.ok()) {
+                    return RocksFailure(
+                            "DeleteMany counter staging",
+                            status);
+                }
+            }
+
+            status = mutation.Commit();
+            if (!status.ok()) {
+                return RocksFailure("DeleteMany commit", status);
+            }
+
+            return DBResult::Ok(std::to_string(deleted));
+        }
+
+        BulkWriteResult DocEngine::DeleteManyBulk(
+                const std::string& collection_name,
+                const nexora::query::Condition& condition,
+                const BulkWriteOptions& options) {
+            BulkWriteResult result;
+            if (options.mode == BulkWriteMode::Atomic) {
+                const DBResult atomic = DeleteMany(collection_name, condition);
+                result.success = atomic.success;
+                result.last_error = atomic.error_msg;
+                if (atomic.success) {
+                    result.modified = std::stoull(atomic.data);
+                    result.processed = result.modified;
+                    result.committed_chunks = 1;
+                }
+                return result;
+            }
+            if (options.max_operations_per_chunk == 0 ||
+                options.max_bytes_per_chunk == 0) {
+                result.last_error =
+                        "Bulk chunk limits must be greater than zero";
+                return result;
+            }
+            if (!CollectionExists(collection_name)) {
+                result.last_error =
+                        "Collection '" + collection_name +
+                        "' does not exist";
+                return result;
+            }
+
+            const std::string prefix =
+                    std::string(keys::kData) + collection_name + ":";
+            std::vector<std::pair<std::string, std::size_t>> candidates;
+            auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                    txn_db_->NewIterator(read_options_));
+            for (iterator->Seek(prefix);
+                 iterator->Valid() && iterator->key().starts_with(prefix);
+                 iterator->Next()) {
+                const std::string document = iterator->value().ToString();
+                if (MatchesCondition(document, condition)) {
+                    candidates.emplace_back(
+                            iterator->key().ToString().substr(prefix.size()),
+                            iterator->key().size() + document.size());
+                }
+            }
+            if (!iterator->status().ok()) {
+                result.last_error = RocksFailure(
+                        "DeleteManyBulk scan",
+                        iterator->status()).error_msg;
+                return result;
+            }
+
+            std::size_t offset = 0;
+            while (offset < candidates.size()) {
+                auto transaction = BeginTransaction();
+                if (!transaction) {
+                    result.last_error =
+                            "DeleteManyBulk: unable to start transaction";
+                    return result;
+                }
+                std::size_t chunk_operations = 0;
+                std::size_t chunk_bytes = 0;
+                std::uint64_t chunk_modified = 0;
+                while (offset < candidates.size() &&
+                       chunk_operations < options.max_operations_per_chunk) {
+                    const std::size_t operation_bytes = candidates[offset].second;
+                    if (chunk_operations > 0 &&
+                        chunk_bytes + operation_bytes >
+                                options.max_bytes_per_chunk) {
+                        break;
+                    }
+                    const DBResult deleted = DeleteByIdTx(
+                            *transaction,
+                            collection_name,
+                            candidates[offset].first);
+                    ++result.processed;
+                    if (!deleted.success) {
+                        const DBResult rollback =
+                                RollbackTransaction(*transaction);
+                        result.last_error = deleted.error_msg;
+                        if (!rollback.success) {
+                            result.last_error +=
+                                    "; rollback failed: " +
+                                    rollback.error_msg;
+                        }
+                        return result;
+                    }
+                    if (deleted.data == "1") ++chunk_modified;
+                    ++offset;
+                    ++chunk_operations;
+                    chunk_bytes += operation_bytes;
+                }
+                const DBResult committed =
+                        CommitTransaction(*transaction);
+                if (!committed.success) {
+                    result.last_error = committed.error_msg;
+                    return result;
+                }
+                result.modified += chunk_modified;
+                ++result.committed_chunks;
+            }
+            result.success = true;
+            return result;
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -1058,6 +2254,84 @@ namespace nexora {
             rocksdb::Status s = txn_db_->Get(read_options_, seq_key, &val);
             if (!s.ok() || val.empty()) return -1;
             try { return std::stoll(val); } catch (...) { return -1; }
+        }
+
+        DBResult DocEngine::ReconcileCollectionCounter(
+                const std::string& collection_name) {
+            if (IsReservedCollectionName(collection_name))
+                return DBResult::Err("reserved collection name");
+
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
+            if (status.IsNotFound())
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            if (!status.ok())
+                return RocksFailure(
+                        "ReconcileCollectionCounter metadata",
+                        status);
+
+            std::unique_ptr<rocksdb::Transaction> transaction(
+                    txn_db_->BeginTransaction(write_options_));
+            if (!transaction)
+                return DBResult::Err(
+                        "ReconcileCollectionCounter: unable to start transaction");
+
+            const std::string counter_key =
+                    std::string(keys::kSeq) + collection_name;
+            std::string old_counter;
+            status = transaction->GetForUpdate(
+                    read_options_,
+                    counter_key,
+                    &old_counter);
+            if (!status.ok() && !status.IsNotFound())
+                return RocksFailure(
+                        "ReconcileCollectionCounter counter lock",
+                        status);
+
+            const std::string data_prefix =
+                    std::string(keys::kData) + collection_name + ":";
+            const rocksdb::Slice prefix_slice(data_prefix);
+            std::uint64_t document_count = 0;
+
+            auto iterator = std::unique_ptr<rocksdb::Iterator>(
+                    transaction->GetIterator(read_options_));
+            for (iterator->Seek(data_prefix);
+                 iterator->Valid() &&
+                 iterator->key().starts_with(prefix_slice);
+                 iterator->Next()) {
+                if (document_count ==
+                    static_cast<std::uint64_t>(
+                            std::numeric_limits<std::int64_t>::max()))
+                    return DBResult::Err(
+                            "Collection counter exceeds int64 range");
+                ++document_count;
+            }
+
+            status = iterator->status();
+            if (!status.ok())
+                return RocksFailure(
+                        "ReconcileCollectionCounter data scan",
+                        status);
+
+            status = transaction->Put(
+                    counter_key,
+                    std::to_string(document_count));
+            if (!status.ok())
+                return RocksFailure(
+                        "ReconcileCollectionCounter counter write",
+                        status);
+
+            status = transaction->Commit();
+            if (!status.ok())
+                return RocksFailure(
+                        "ReconcileCollectionCounter commit",
+                        status);
+
+            return DBResult::Ok(std::to_string(document_count));
         }
 
         std::vector<std::pair<std::string, std::string>>
@@ -1166,7 +2440,9 @@ namespace nexora {
         std::unique_ptr<TxHandle> DocEngine::BeginTransaction() {
             rocksdb::WriteOptions wo;
             wo.sync = false;
-            rocksdb::Transaction* tx = txn_db_->BeginTransaction(wo);
+            rocksdb::Transaction* tx = txn_db_->BeginTransaction(
+                    wo,
+                    transaction_options_);
             if (!tx) {
                 NX_LOG("BeginTransaction: failed");
                 return nullptr;
@@ -1178,7 +2454,10 @@ namespace nexora {
             if (!tx_handle.IsValid())
                 return DBResult::Err("Invalid transaction handle");
             rocksdb::Status s = tx_handle.Get()->Commit();
-            ROCKS_CHECK(s, "CommitTransaction");
+            if (!s.ok()) {
+                tx_handle.Reset();
+                return RocksFailure("CommitTransaction", s);
+            }
             tx_handle.Reset();
             return DBResult::Ok("Transaction committed");
         }
@@ -1187,7 +2466,10 @@ namespace nexora {
             if (!tx_handle.IsValid())
                 return DBResult::Err("Invalid transaction handle");
             rocksdb::Status s = tx_handle.Get()->Rollback();
-            ROCKS_CHECK(s, "RollbackTransaction");
+            if (!s.ok()) {
+                tx_handle.Reset();
+                return RocksFailure("RollbackTransaction", s);
+            }
             tx_handle.Reset();
             return DBResult::Ok("Transaction rolled back");
         }
@@ -1198,23 +2480,78 @@ namespace nexora {
             if (!tx_handle.IsValid()) return DBResult::Err("Invalid transaction");
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
-            if (!CollectionExists(collection_name))
-                return DBResult::Err("Collection '" + collection_name + "' does not exist");
+
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
+            if (status.IsNotFound())
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            if (!status.ok())
+                return RocksFailure("InsertOneTx metadata", status);
+
+            if (!metadata.schema.fields.empty()) {
+                std::string validation_error;
+                if (!ValidateDocument(
+                        bson_document,
+                        metadata.schema,
+                        validation_error))
+                    return DBResult::Err(
+                            "Schema validation failed: " +
+                            validation_error);
+            }
+
+            std::string validation_error;
+            status = ValidateForeignKeysChecked(
+                    metadata.foreign_keys,
+                    bson_document,
+                    validation_error,
+                    tx_handle.Get());
+            if (!status.ok()) {
+                if (!validation_error.empty())
+                    return DBResult::Err(validation_error);
+                return RocksFailure(
+                        "InsertOneTx foreign-key validation",
+                        status);
+            }
 
             std::string doc_id = ExtractField(bson_document, "_id");
             if (doc_id.empty()) doc_id = GenerateDocId();
 
-            rocksdb::Status s = tx_handle.Get()->Put(
-                    MakeDocKey(collection_name, doc_id), bson_document);
-            ROCKS_CHECK(s, "InsertOneTx");
+            MutationBuilder mutation(
+                    *this,
+                    *tx_handle.Get(),
+                    collection_name,
+                    metadata.indexes);
 
-            std::string seq_key = std::string(keys::kSeq) + collection_name;
-            std::string seq_val;
-            s = tx_handle.Get()->Get(read_options_, seq_key, &seq_val);
-            if (!s.ok() && !s.IsNotFound()) ROCKS_CHECK(s, "InsertOneTx seq read");
-            int64_t cnt = seq_val.empty() ? 1 : std::stoll(seq_val) + 1;
-            s = tx_handle.Get()->Put(seq_key, std::to_string(cnt));
-            ROCKS_CHECK(s, "InsertOneTx seq write");
+            std::string old_document;
+            status = mutation.ReadDocumentForUpdate(
+                    doc_id,
+                    old_document);
+            if (status.ok())
+                return DBResult::Err(
+                        "Duplicate document _id: " + doc_id);
+
+            if (!status.IsNotFound())
+                return RocksFailure("InsertOneTx document lookup", status);
+
+            status = mutation.PutDocument(doc_id, bson_document);
+            if (!status.ok())
+                return RocksFailure(
+                        "InsertOneTx document/index staging",
+                        status);
+
+            status = mutation.AdjustCounter(1);
+            if (!status.ok())
+                return RocksFailure(
+                        "InsertOneTx counter staging",
+                        status);
+
+            status = mutation.Commit();
+            if (!status.ok())
+                return RocksFailure("InsertOneTx savepoint", status);
 
             return DBResult::Ok(doc_id);
         }
@@ -1227,15 +2564,73 @@ namespace nexora {
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
 
-            std::string doc_key = MakeDocKey(collection_name, doc_id);
-            std::string bson;
-            rocksdb::Status s = tx_handle.Get()->GetForUpdate(read_options_, doc_key, &bson);
-            if (s.IsNotFound()) return DBResult::Err("Document not found: " + doc_id);
-            ROCKS_CHECK(s, "UpdateByIdTx read");
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
+            if (status.IsNotFound())
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            if (!status.ok())
+                return RocksFailure("UpdateByIdTx metadata", status);
 
-            std::string new_bson = ApplyUpdate(bson, update_spec);
-            s = tx_handle.Get()->Put(doc_key, new_bson);
-            ROCKS_CHECK(s, "UpdateByIdTx write");
+            MutationBuilder mutation(
+                    *this,
+                    *tx_handle.Get(),
+                    collection_name,
+                    metadata.indexes);
+
+            std::string old_document;
+            status = mutation.ReadDocumentForUpdate(
+                    doc_id,
+                    old_document);
+            if (status.IsNotFound())
+                return DBResult::Err("Document not found: " + doc_id);
+            if (!status.ok())
+                return RocksFailure("UpdateByIdTx document read", status);
+
+            const std::string new_document =
+                    ApplyUpdate(old_document, update_spec);
+
+            if (!metadata.schema.fields.empty()) {
+                std::string validation_error;
+                if (!ValidateDocument(
+                        new_document,
+                        metadata.schema,
+                        validation_error))
+                    return DBResult::Err(
+                            "Schema validation failed: " +
+                            validation_error);
+            }
+
+            std::string validation_error;
+            status = ValidateForeignKeysChecked(
+                    metadata.foreign_keys,
+                    new_document,
+                    validation_error,
+                    tx_handle.Get());
+            if (!status.ok()) {
+                if (!validation_error.empty())
+                    return DBResult::Err(validation_error);
+                return RocksFailure(
+                        "UpdateByIdTx foreign-key validation",
+                        status);
+            }
+
+            status = mutation.ReplaceDocument(
+                    doc_id,
+                    old_document,
+                    new_document);
+            if (!status.ok())
+                return RocksFailure(
+                        "UpdateByIdTx document/index staging",
+                        status);
+
+            status = mutation.Commit();
+            if (!status.ok())
+                return RocksFailure("UpdateByIdTx savepoint", status);
+
             return DBResult::Ok("1");
         }
 
@@ -1246,24 +2641,53 @@ namespace nexora {
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
 
-            std::string doc_key = MakeDocKey(collection_name, doc_id);
-            std::string bson;
-            rocksdb::Status s = tx_handle.Get()->GetForUpdate(read_options_, doc_key, &bson);
-            if (s.IsNotFound()) return DBResult::Ok("0");
-            ROCKS_CHECK(s, "DeleteByIdTx read");
+            MutationMetadata metadata;
+            rocksdb::Status status = LoadMutationMetadata(
+                    collection_name,
+                    metadata);
+            if (status.IsNotFound())
+                return DBResult::Err(
+                        "Collection '" + collection_name +
+                        "' does not exist");
+            if (!status.ok())
+                return RocksFailure("DeleteByIdTx metadata", status);
 
-            s = tx_handle.Get()->Delete(doc_key);
-            ROCKS_CHECK(s, "DeleteByIdTx delete");
+            MutationBuilder mutation(
+                    *this,
+                    *tx_handle.Get(),
+                    collection_name,
+                    metadata.indexes);
 
-            std::string seq_key = std::string(keys::kSeq) + collection_name;
-            std::string seq_val;
-            s = tx_handle.Get()->Get(read_options_, seq_key, &seq_val);
-            if (!s.ok() && !s.IsNotFound()) ROCKS_CHECK(s, "DeleteByIdTx seq read");
-            if (!seq_val.empty()) {
-                int64_t cnt = std::max(0LL, std::stoll(seq_val) - 1);
-                s = tx_handle.Get()->Put(seq_key, std::to_string(cnt));
-                ROCKS_CHECK(s, "DeleteByIdTx seq write");
+            std::string old_document;
+            status = mutation.ReadDocumentForUpdate(
+                    doc_id,
+                    old_document);
+            if (status.IsNotFound()) {
+                status = mutation.Rollback();
+                if (!status.ok())
+                    return RocksFailure("DeleteByIdTx savepoint rollback", status);
+                return DBResult::Ok("0");
             }
+            if (!status.ok())
+                return RocksFailure("DeleteByIdTx document read", status);
+
+            status = mutation.DeleteDocument(
+                    doc_id,
+                    old_document);
+            if (!status.ok())
+                return RocksFailure(
+                        "DeleteByIdTx document/index staging",
+                        status);
+
+            status = mutation.AdjustCounter(-1);
+            if (!status.ok())
+                return RocksFailure(
+                        "DeleteByIdTx counter staging",
+                        status);
+
+            status = mutation.Commit();
+            if (!status.ok())
+                return RocksFailure("DeleteByIdTx savepoint", status);
 
             return DBResult::Ok("1");
         }
