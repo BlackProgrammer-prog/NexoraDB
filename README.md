@@ -147,7 +147,7 @@ pip install NexoraDataBase
 To install this exact release instead of the latest available version:
 
 ```bash
-pip install NexoraDataBase==0.2.0
+pip install NexoraDataBase==0.2.1
 ```
 
 The PyPI project is named `NexoraDataBase`, while the Python import name is

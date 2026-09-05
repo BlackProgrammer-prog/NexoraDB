@@ -235,7 +235,7 @@ PYTHONPATH="$(pwd)/build/release:$(pwd)/NexoraDB/src" \
 Verify that CMake, vcpkg, and Python package versions agree:
 
 ```bash
-python3.10 scripts/check_release_version.py --expected 0.2.0
+python3.10 scripts/check_release_version.py --expected 0.2.1
 ```
 
 Build and validate the Python wheel without uploading it:
@@ -246,14 +246,14 @@ python3.10 -m venv .release-venv
 .release-venv/bin/python -m build --wheel --outdir dist NexoraDB
 .release-venv/bin/python -m twine check dist/*.whl
 .release-venv/bin/python -m pip install dist/*.whl
-.release-venv/bin/python scripts/verify_installed_package.py --expected 0.2.0
+.release-venv/bin/python scripts/verify_installed_package.py --expected 0.2.1
 ```
 
 Inspect the resulting artifact and its metadata:
 
 ```bash
 ls -lh dist/
-unzip -p dist/*0.2.0*.whl \
+unzip -p dist/*0.2.1*.whl \
   '*/METADATA' | grep -E '^(Name|Version|Requires-Python):'
 ```
 
