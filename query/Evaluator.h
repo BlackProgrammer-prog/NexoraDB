@@ -214,14 +214,6 @@ namespace nexora {
                                     const std::string& old_field,
                                     const std::string& new_field) const override;
 
-        private:
-            // متدهای کمکی داخلی
-            static std::string  EncodeValue(const std::string& val, UpdateValueType vt);
-            static FieldValue   DetectType(const std::string& raw_val);
-            static bool         CompareValues(const FieldValue& a,
-                                              const std::string& b_raw,
-                                              ValueType          b_type,
-                                              Op                 op);
         };
 
 // ══════════════════════════════════════════════════════════════
@@ -388,16 +380,6 @@ namespace nexora {
 
         private:
             std::unique_ptr<IBsonAdapter> adapter_;
-
-            // متدهای کمکی داخلی
-            bool MatchLeaf(const std::string& bson_doc,
-                           const Condition&   condition) const;
-
-            bool MatchComposite(const std::string& bson_doc,
-                                const Condition&   condition) const;
-
-            std::string ApplyOperation(const std::string&       bson_doc,
-                                       const UpdateOperation&   op) const;
         };
 
     } // namespace query
