@@ -42,7 +42,6 @@
 // ─── QueryLayer (باید قبل از هر چیز دیگری include شود) ───
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
-#include "query/Evaluator.h"
 
 // ─── RocksDB ───
 #include <rocksdb/db.h>
@@ -1096,16 +1095,12 @@ namespace nexora {
                                             const std::string& field_name);
 
             /**
-             * @brief تطابق سند با Condition — به Evaluator::Match واگذار می‌شود
-             */
-            static bool MatchesCondition(const std::string&              bson,
-                                         const nexora::query::Condition& condition);
-
-            /**
              * @brief اعمال UpdateSpec روی سند — به Evaluator::Apply واگذار می‌شود
              */
-            static std::string ApplyUpdate(const std::string&               bson,
-                                           const nexora::query::UpdateSpec& spec);
+            static rocksdb::Status ApplyUpdate(
+                    const std::string& bson,
+                    const nexora::query::UpdateSpec& spec,
+                    std::string& updated_document);
 
             static std::string SerializeSchema(const SchemaDefinition& schema);
             static std::optional<SchemaDefinition> DeserializeSchema(const std::string& bytes);
