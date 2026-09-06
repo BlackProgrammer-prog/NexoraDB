@@ -179,6 +179,8 @@ namespace nexora {
 
             /// برای IN / NIN — لیست مقادیر (جایگزین بهتر از encode در value)
             std::vector<std::string> values;
+            /// نوع هر عضو IN/NIN؛ خالی یعنی استفاده از value_type مشترک.
+            std::vector<ValueType> value_types;
 
             // ── شرط ترکیبی (composite) ──
             LogicOp                  logic = LogicOp::AND; ///< عملگر ترکیب
@@ -241,11 +243,14 @@ namespace nexora {
              */
             static Condition In(const std::string&              field,
                                 std::vector<std::string>        vals,
-                                bool                            negate = false) {
+                                bool                            negate = false,
+                                ValueType                       vt = ValueType::String) {
                 Condition c;
-                c.field  = field;
-                c.op     = negate ? Op::NIN : Op::IN;
-                c.values = std::move(vals);
+                c.field      = field;
+                c.op         = negate ? Op::NIN : Op::IN;
+                c.values     = std::move(vals);
+                c.value_type = vt;
+                c.value_types.assign(c.values.size(), vt);
                 return c;
             }
 
