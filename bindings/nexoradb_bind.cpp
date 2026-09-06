@@ -34,6 +34,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/stl_bind.h>
 #include <pybind11/functional.h>
+#include <bson/bson.h>
 
 // ── DocEngine ──
 #include "core/DocEngine.h"
@@ -86,6 +87,7 @@ static py::dict build_info_dict() {
     info["processor"]        = NEXORA_SYSTEM_PROCESSOR;
     info["cpp_standard"]     = 20;
     info["rocksdb_version"]  = NEXORA_ROCKSDB_VERSION;
+    info["libbson_version"]  = bson_get_version();
     info["fmt_version"]      = NEXORA_FMT_VERSION;
     info["pybind11_version"] = NEXORA_PYBIND11_VERSION;
     info["python_version"]   = NEXORA_PYTHON_VERSION;
@@ -783,6 +785,18 @@ PYBIND11_MODULE(nexoradb, m) {
                  },
                  py::arg("collection"),
                  "بازسازی اتمیک شمارنده collection از روی اسناد واقعی")
+
+            .def("migrate_legacy_documents",
+                 [](DocEngine& e, std::size_t max_documents,
+                    std::size_t max_bytes) {
+                     py::gil_scoped_release rel;
+                     return e.MigrateLegacyDocuments(
+                             max_documents, max_bytes);
+                 },
+                 py::arg("max_documents") = 1000,
+                 py::arg("max_bytes") = 4U * 1024U * 1024U,
+                 "اجرای دستی یک chunk از migration JSON legacy به BSON؛ "
+                 "در حالت عادی worker زمان بیکاری این کار را انجام می‌دهد")
 
             .def("get_ram_usage_bytes", &DocEngine::GetRamUsageBytes,
                  "RAM فعلی مصرف‌شده توسط process دیتابیس، بر حسب byte")
