@@ -1,5 +1,9 @@
 #include "core/DocEngine.h"
+#include "core/DocumentCodec.h"
+#include "query/CompiledQuery.h"
 #include "query/Condition.h"
+#include "query/DocumentView.h"
+#include "query/Evaluator.h"
 #include "query/UpdateSpec.h"
 
 #ifdef NEXORA_BUILD_GRAPH
@@ -69,6 +73,47 @@ namespace {
 
     constexpr std::uint64_t kSeed = 0xC0FFEEULL;
     constexpr std::size_t kBatchSize = 4096;
+
+    void BM_CompiledBsonPredicate(benchmark::State& state) {
+        const std::string json =
+                R"({"_id":"bench","profile":{"age":42,"name":"Alice ✓"},"active":true})";
+        const auto encoded = nexora::core::DocumentCodec::EncodeJson(json);
+        if (!encoded.success) {
+            state.SkipWithError(encoded.error.c_str());
+            return;
+        }
+        const nexora::query::DocumentView view(
+                std::string_view(encoded.value).substr(
+                        nexora::core::DocumentCodec::kEnvelopeSize));
+        const nexora::query::CompiledQuery query(Condition::And({
+                Condition::Leaf("profile.age", Op::GTE, "40", ValueType::Int64),
+                Condition::Leaf("profile.name", Op::STARTS, "Ali"),
+                Condition::Leaf("active", Op::EQ, "true", ValueType::Bool)}));
+        if (!view.valid() || !query.valid()) {
+            state.SkipWithError("unable to prepare BSON predicate benchmark");
+            return;
+        }
+        for (auto _ : state) benchmark::DoNotOptimize(query.Match(view));
+        state.SetItemsProcessed(state.iterations());
+        state.counters["predicates"] = 3;
+        state.counters["bson_bytes"] =
+                static_cast<double>(encoded.value.size());
+    }
+
+    void BM_JsonCompatibilityPredicate(benchmark::State& state) {
+        const std::string json =
+                R"({"_id":"bench","profile":{"age":42,"name":"Alice ✓"},"active":true})";
+        const Condition condition = Condition::And({
+                Condition::Leaf("profile.age", Op::GTE, "40", ValueType::Int64),
+                Condition::Leaf("profile.name", Op::STARTS, "Ali"),
+                Condition::Leaf("active", Op::EQ, "true", ValueType::Bool)});
+        nexora::query::Evaluator evaluator;
+        for (auto _ : state)
+            benchmark::DoNotOptimize(evaluator.Match(json, condition));
+        state.SetItemsProcessed(state.iterations());
+        state.counters["predicates"] = 3;
+        state.counters["json_bytes"] = static_cast<double>(json.size());
+    }
 
     std::atomic<std::uint64_t> g_path_sequence{0};
 
@@ -1008,6 +1053,9 @@ namespace {
     }
 
 #endif
+
+    BENCHMARK(BM_CompiledBsonPredicate);
+    BENCHMARK(BM_JsonCompatibilityPredicate);
 
     BENCHMARK(BM_DocumentPointRead)
             ->Apply(standardDatasetSizes)
