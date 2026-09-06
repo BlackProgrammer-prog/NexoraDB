@@ -1,4 +1,5 @@
 #include "IndexCodec.h"
+#include "DocumentCodec.h"
 
 #include <bit>
 #include <cstring>
@@ -73,11 +74,26 @@ bool AppendValue(std::string& out, const query::FieldValue& value) {
 std::optional<std::string> EncodeTuple(
         const std::string& document,
         const std::vector<std::string>& fields) {
+    std::string decoded_document;
+    const std::string* logical_document = &document;
+    switch (DocumentCodec::Detect(document)) {
+        case DocumentCodec::Format::LegacyJson:
+            break;
+        case DocumentCodec::Format::BsonV1: {
+            auto decoded = DocumentCodec::DecodeToJson(document);
+            if (!decoded.success) return std::nullopt;
+            decoded_document = std::move(decoded.value);
+            logical_document = &decoded_document;
+            break;
+        }
+        case DocumentCodec::Format::UnknownEnvelope:
+            return std::nullopt;
+    }
     query::Evaluator evaluator;
     std::vector<query::FieldValue> values;
     values.reserve(fields.size());
     for (const auto& field : fields) {
-        values.push_back(evaluator.ExtractField(document, field));
+        values.push_back(evaluator.ExtractField(*logical_document, field));
     }
     return EncodeValues(values);
 }
