@@ -291,6 +291,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .value("Bool",    UpdateValueType::Bool)
             .value("Null",    UpdateValueType::Null)
             .value("Array",   UpdateValueType::Array)
+            .value("Object",  UpdateValueType::Object)
             .export_values();
 
     // ──────────────────────────────────────────────────────────
@@ -402,6 +403,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_readwrite("value",          &Condition::value)
             .def_readwrite("value_type",     &Condition::value_type)
             .def_readwrite("values",         &Condition::values)
+            .def_readwrite("value_types",    &Condition::value_types)
             .def_readwrite("logic",          &Condition::logic)
             .def_readwrite("sub_conditions", &Condition::sub_conditions)
             .def("is_empty",     &Condition::IsEmpty)
@@ -427,8 +429,26 @@ PYBIND11_MODULE(nexoradb, m) {
                             return Condition::Nor(std::move(subs));
                         }, py::arg("conditions"))
             .def_static("in_", &Condition::In,
-                        py::arg("field"), py::arg("values"), py::arg("negate") = false,
-                        "شرط IN یا NOT IN");
+                        py::arg("field"), py::arg("values"),
+                        py::arg("negate") = false,
+                        py::arg("value_type") = ValueType::String,
+                        "شرط IN یا NOT IN")
+            .def_static("in_typed",
+                        [](const std::string& field,
+                           std::vector<std::string> values,
+                           std::vector<ValueType> value_types,
+                           bool negate) {
+                            if (values.size() != value_types.size()) {
+                                throw py::value_error(
+                                        "values and value_types must have equal length");
+                            }
+                            Condition condition = Condition::In(
+                                    field, std::move(values), negate);
+                            condition.value_types = std::move(value_types);
+                            return condition;
+                        }, py::arg("field"), py::arg("values"),
+                        py::arg("value_types"), py::arg("negate") = false,
+                        "Typed IN/NIN supporting heterogeneous scalar constants");
 
     // ──────────────────────────────────────────────────────────
     // §6  UpdateSpec
@@ -473,6 +493,29 @@ PYBIND11_MODULE(nexoradb, m) {
                  }, py::arg("field"), py::arg("delta"),
                  py::arg("value_type") = UpdateValueType::Int64,
                  py::return_value_policy::reference_internal)
+            .def("mul", [](UpdateSpec& s, const std::string& f, const std::string& v,
+                           UpdateValueType vt) -> UpdateSpec& {
+                     return s.Mul(f, v, vt);
+                 }, py::arg("field"), py::arg("factor"),
+                 py::arg("value_type") = UpdateValueType::Int64,
+                 py::return_value_policy::reference_internal)
+            .def("min", [](UpdateSpec& s, const std::string& f, const std::string& v,
+                           UpdateValueType vt) -> UpdateSpec& {
+                     return s.Min(f, v, vt);
+                 }, py::arg("field"), py::arg("value"),
+                 py::arg("value_type") = UpdateValueType::Int64,
+                 py::return_value_policy::reference_internal)
+            .def("max", [](UpdateSpec& s, const std::string& f, const std::string& v,
+                           UpdateValueType vt) -> UpdateSpec& {
+                     return s.Max(f, v, vt);
+                 }, py::arg("field"), py::arg("value"),
+                 py::arg("value_type") = UpdateValueType::Int64,
+                 py::return_value_policy::reference_internal)
+            .def("rename", [](UpdateSpec& s, const std::string& f,
+                              const std::string& new_field) -> UpdateSpec& {
+                     return s.Rename(f, new_field);
+                 }, py::arg("field"), py::arg("new_field"),
+                 py::return_value_policy::reference_internal)
             .def("push", [](UpdateSpec& s, const std::string& f, const std::string& v,
                             UpdateValueType vt) -> UpdateSpec& {
                      return s.Push(f, v, vt);
@@ -484,6 +527,32 @@ PYBIND11_MODULE(nexoradb, m) {
                      return s.Pull(f, v, vt);
                  }, py::arg("field"), py::arg("element"),
                  py::arg("value_type") = UpdateValueType::String,
+                 py::return_value_policy::reference_internal)
+            .def("push_all", [](UpdateSpec& s, const std::string& f,
+                                std::vector<std::string> values,
+                                UpdateValueType vt) -> UpdateSpec& {
+                     return s.PushAll(f, std::move(values), vt);
+                 }, py::arg("field"), py::arg("values"),
+                 py::arg("value_type") = UpdateValueType::String,
+                 py::return_value_policy::reference_internal)
+            .def("pull_all", [](UpdateSpec& s, const std::string& f,
+                                std::vector<std::string> values,
+                                UpdateValueType vt) -> UpdateSpec& {
+                     return s.PullAll(f, std::move(values), vt);
+                 }, py::arg("field"), py::arg("values"),
+                 py::arg("value_type") = UpdateValueType::String,
+                 py::return_value_policy::reference_internal)
+            .def("add_to_set", [](UpdateSpec& s, const std::string& f,
+                                  const std::string& v,
+                                  UpdateValueType vt) -> UpdateSpec& {
+                     return s.AddToSet(f, v, vt);
+                 }, py::arg("field"), py::arg("element"),
+                 py::arg("value_type") = UpdateValueType::String,
+                 py::return_value_policy::reference_internal)
+            .def("pop", [](UpdateSpec& s, const std::string& f,
+                           bool first) -> UpdateSpec& {
+                     return s.Pop(f, first);
+                 }, py::arg("field"), py::arg("first") = false,
                  py::return_value_policy::reference_internal)
             .def("touch_date", [](UpdateSpec& s, const std::string& f) -> UpdateSpec& {
                 return s.TouchDate(f);
