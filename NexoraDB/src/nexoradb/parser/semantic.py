@@ -273,8 +273,13 @@ def build_condition(node: N.ConditionNode):
         return nx.Condition.leaf(node.field, op, raw, vt)
 
     if isinstance(node, N.InCmp):
-        vals = [str(v) for v in node.values]
-        return nx.Condition.in_(node.field, vals, node.negate)
+        typed = [_value_type(nx, value) for value in node.values]
+        return nx.Condition.in_typed(
+            node.field,
+            [raw for raw, _ in typed],
+            [value_type for _, value_type in typed],
+            node.negate,
+        )
 
     if isinstance(node, N.ExistsCmp):
         return nx.Condition.leaf(
@@ -302,6 +307,12 @@ def _update_value_type(nx, val):
         return (str(val), nx.UpdateValueType.Float64)
     if val is None:
         return ("", nx.UpdateValueType.Null)
+    if isinstance(val, list):
+        return (json.dumps(val, ensure_ascii=False, separators=(",", ":")),
+                nx.UpdateValueType.Array)
+    if isinstance(val, dict):
+        return (json.dumps(val, ensure_ascii=False, separators=(",", ":")),
+                nx.UpdateValueType.Object)
     return (str(val), nx.UpdateValueType.String)
 
 
@@ -328,17 +339,14 @@ def build_update_spec(ops: list[N.UpdateOpItem]):
             raw, vt = _update_value_type(nx, op.value)
             spec.pull(op.field, raw, vt)
         elif op.op == "add_to_set":
-            # MVP: binding فقط push دارد — add_to_set = push
-            # (تکراری بودن در سطح C++ Evaluator با AddToSet چک می‌شود
-            #  اگر binding آن اضافه شود اینجا عوض کنید)
             raw, vt = _update_value_type(nx, op.value)
-            spec.push(op.field, raw, vt)
+            spec.add_to_set(op.field, raw, vt)
         elif op.op == "mul":
-            raise NexoraQLUnsupportedError(
-                "MULTIPLY not exposed in pybind MVP — add 'mul' to UpdateSpec binding")
+            raw, vt = _update_value_type(nx, op.value)
+            spec.mul(op.field, raw, vt)
         elif op.op in ("min", "max"):
-            raise NexoraQLUnsupportedError(
-                f"SET {op.op.upper()} not exposed in pybind MVP")
+            raw, vt = _update_value_type(nx, op.value)
+            getattr(spec, op.op)(op.field, raw, vt)
         else:
             raise NexoraQLSemanticError(f"Unknown update op: {op.op}")
 
