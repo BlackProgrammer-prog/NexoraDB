@@ -110,6 +110,7 @@ class FakeUpdateValueType:
     Bool = "Bool"
     Null = "Null"
     Array = "Array"
+    Object = "Object"
 
 
 class SchemaField:
@@ -190,8 +191,16 @@ class Condition:
         return Condition("leaf", field=field, op=op, value=value, value_type=value_type)
 
     @staticmethod
-    def in_(field: str, values: list[str], negate: bool = False):
-        return Condition("in", field=field, values=values, negate=negate)
+    def in_(field: str, values: list[str], negate: bool = False,
+            value_type: str = FakeValueType.String):
+        return Condition("in", field=field, values=values, negate=negate,
+                         value_type=value_type)
+
+    @staticmethod
+    def in_typed(field: str, values: list[str], value_types: list[str],
+                 negate: bool = False):
+        return Condition("in", field=field, values=values, negate=negate,
+                         value_types=value_types)
 
     @staticmethod
     def and_(conditions: list["Condition"]):
@@ -223,12 +232,29 @@ class UpdateSpec:
         self.operations.append(("inc", field, delta, value_type))
         return self
 
+    def mul(self, field: str, factor: str, value_type: str = FakeUpdateValueType.Int64):
+        self.operations.append(("mul", field, factor, value_type))
+        return self
+
+    def min(self, field: str, value: str, value_type: str = FakeUpdateValueType.Int64):
+        self.operations.append(("min", field, value, value_type))
+        return self
+
+    def max(self, field: str, value: str, value_type: str = FakeUpdateValueType.Int64):
+        self.operations.append(("max", field, value, value_type))
+        return self
+
     def push(self, field: str, element: str, value_type: str = FakeUpdateValueType.String):
         self.operations.append(("push", field, element, value_type))
         return self
 
     def pull(self, field: str, element: str, value_type: str = FakeUpdateValueType.String):
         self.operations.append(("pull", field, element, value_type))
+        return self
+
+    def add_to_set(self, field: str, element: str,
+                   value_type: str = FakeUpdateValueType.String):
+        self.operations.append(("add_to_set", field, element, value_type))
         return self
 
     def touch_date(self, field: str):
@@ -309,7 +335,10 @@ def match_condition(doc: dict, cond: Condition) -> bool:
             return not any(subs)
     if cond.kind == "in":
         actual = get_path(doc, cond.field)
-        ok = str(actual) in set(cond.values)
+        common_type = getattr(cond, "value_type", FakeValueType.String)
+        types = getattr(cond, "value_types", [common_type] * len(cond.values))
+        ok = actual in {coerce(value, value_type)
+                        for value, value_type in zip(cond.values, types)}
         return not ok if cond.negate else ok
 
     actual = get_path(doc, cond.field)
@@ -368,6 +397,16 @@ def apply_update(doc: dict, spec: UpdateSpec) -> dict:
             current = get_path(out, field) or 0
             delta = float(raw) if value_type == FakeUpdateValueType.Float64 else int(raw)
             set_path(out, field, current + delta)
+        elif name == "mul":
+            _, field, raw, value_type = op
+            factor = float(raw) if value_type == FakeUpdateValueType.Float64 else int(raw)
+            set_path(out, field, (get_path(out, field) or 1) * factor)
+        elif name in ("min", "max"):
+            _, field, raw, value_type = op
+            value = coerce(raw, value_type)
+            current = get_path(out, field)
+            set_path(out, field, value if current is None else
+                     (min(current, value) if name == "min" else max(current, value)))
         elif name == "push":
             _, field, raw, value_type = op
             arr = list(get_path(out, field) or [])
@@ -377,6 +416,13 @@ def apply_update(doc: dict, spec: UpdateSpec) -> dict:
             _, field, raw, value_type = op
             value = coerce(raw, value_type)
             arr = [item for item in list(get_path(out, field) or []) if item != value]
+            set_path(out, field, arr)
+        elif name == "add_to_set":
+            _, field, raw, value_type = op
+            value = coerce(raw, value_type)
+            arr = list(get_path(out, field) or [])
+            if value not in arr:
+                arr.append(value)
             set_path(out, field, arr)
         elif name == "touch_date":
             _, field = op

@@ -4,6 +4,8 @@
 #include "core/DocumentCodec.h"
 #include "core/IndexCodec.h"
 #include "query/Condition.h"
+#include "query/CompiledQuery.h"
+#include "query/DocumentView.h"
 #include "query/UpdateSpec.h"
 
 #include <gtest/gtest.h>
@@ -71,6 +73,97 @@ namespace {
         EXPECT_FALSE(DocumentCodec::DecodeToJson(unknown).success);
         EXPECT_EQ(DocumentCodec::Detect(json),
                   DocumentCodec::Format::LegacyJson);
+    }
+
+    TEST(CompiledBsonQuery, EvaluatesNestedTypedPredicatesWithoutJsonParsing) {
+        const auto encoded = DocumentCodec::EncodeJson(
+                R"({"profile":{"name":"A, \"B\" \\ {✓}","age":42},"active":true,"tags":["a,b",{"nested":1}]})");
+        ASSERT_TRUE(encoded.success) << encoded.error;
+        const nexora::query::DocumentView view(
+                std::string_view(encoded.value).substr(
+                        DocumentCodec::kEnvelopeSize));
+        ASSERT_TRUE(view.valid());
+
+        const auto condition = Condition::And({
+                Condition::Leaf("profile.age", Op::GTE, "40",
+                                ValueType::Int64),
+                Condition::Leaf("profile.name", Op::REGEX, "^A,.*✓.*$"),
+                Condition::Leaf("profile.name", Op::CONTAINS, R"(\ {)"),
+                Condition::In("profile.age", {"7", "42", "99"}, false,
+                              ValueType::Int64),
+                Condition::Leaf("active", Op::EQ, "true",
+                                ValueType::Bool)});
+        const nexora::query::CompiledQuery compiled(condition);
+        ASSERT_TRUE(compiled.valid()) << compiled.error();
+        EXPECT_TRUE(compiled.Match(view));
+
+        Condition mixed = Condition::In("profile.age", {"forty-two", "42"});
+        mixed.value_types = {ValueType::String, ValueType::Int64};
+        const nexora::query::CompiledQuery mixed_compiled(mixed);
+        ASSERT_TRUE(mixed_compiled.valid()) << mixed_compiled.error();
+        EXPECT_TRUE(mixed_compiled.Match(view));
+
+        const nexora::query::CompiledQuery invalid_regex(
+                Condition::Leaf("profile.name", Op::REGEX, "["));
+        EXPECT_FALSE(invalid_regex.valid());
+    }
+
+    TEST(CompiledUpdate, PreservesNestedObjectsArraysAndCommaValues) {
+        TestTempDir temp("nexora_compiled_update");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "items",
+                R"({"_id":"one","score":3,"tags":["old"],"profile":{"name":"before"}})").success);
+
+        UpdateSpec update;
+        update.Set("profile.details",
+                   R"({"label":"x,y","unicode":"سلام","nested":[1,{"ok":true}]})",
+                   UpdateValueType::Object)
+              .Mul("score", "4", UpdateValueType::Int64)
+              .Push("tags", "a,b")
+              .AddToSet("tags", "a,b")
+              .Set("matrix", R"([[1,2],[3,4]])", UpdateValueType::Array);
+        const auto changed = engine.UpdateById("items", "one", update);
+        ASSERT_TRUE(changed.success) << changed.error_msg;
+
+        const auto found = engine.FindById("items", "one");
+        ASSERT_TRUE(found.success) << found.error_msg;
+        EXPECT_NE(found.data.find(R"("score":12)"), std::string::npos);
+        EXPECT_NE(found.data.find(R"("tags":["old","a,b"])"),
+                  std::string::npos);
+        EXPECT_NE(found.data.find(R"("label":"x,y")"), std::string::npos);
+        EXPECT_NE(found.data.find(R"("nested":[1,{"ok":true}])"),
+                  std::string::npos);
+        EXPECT_NE(found.data.find(R"("matrix":[[1,2],[3,4]])"),
+                  std::string::npos);
+    }
+
+    TEST(CompiledUpdate, RejectsNumericOverflowWithoutMutatingDocument) {
+        TestTempDir temp("nexora_compiled_update_overflow");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "items",
+                R"({"_id":"one","value":9223372036854775807})").success);
+
+        UpdateSpec update;
+        update.Inc("value", "1", UpdateValueType::Int64);
+        const auto changed = engine.UpdateById("items", "one", update);
+        EXPECT_FALSE(changed.success);
+        const auto found = engine.FindById("items", "one");
+        ASSERT_TRUE(found.success);
+        EXPECT_NE(found.data.find("9223372036854775807"), std::string::npos);
+
+        const nexora::query::CompiledQuery invalid_float(
+                Condition::Leaf("value", Op::EQ, "NaN",
+                                ValueType::Float64));
+        EXPECT_FALSE(invalid_float.valid());
+        const nexora::query::CompiledQuery infinite_float(
+                Condition::Leaf("value", Op::EQ, "Infinity",
+                                ValueType::Float64));
+        EXPECT_FALSE(infinite_float.valid());
+        EXPECT_FALSE(DocumentCodec::EncodeJson(R"({"value":NaN})").success);
     }
 
     TEST(DocumentMigration, ConvertsLegacyJsonAndRemainsApiCompatible) {
