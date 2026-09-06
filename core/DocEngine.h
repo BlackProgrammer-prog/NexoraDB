@@ -64,6 +64,7 @@
 #include <optional>
 #include <string>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -83,7 +84,7 @@ namespace nexora {
  * @brief خروجی استاندارد تمام توابع عمومی DocEngine
  *
  * @field success   آیا عملیات موفق بود؟
- * @field data      خروجی BSON/JSON به صورت رشته (در صورت موفقیت)
+ * @field data      خروجی JSON یا scalar متنی (در صورت موفقیت)
  * @field error_msg پیام خطا (در صورت شکست)
  *
  * @example استفاده در Cython:
@@ -95,7 +96,7 @@ namespace nexora {
  */
         struct DBResult {
             bool        success   = false;
-            std::string data      = "";  ///< BSON hex یا JSON string
+            std::string data      = "";  ///< JSON یا scalar متنی در API عمومی
             std::string error_msg = "";
 
             /// سازنده‌های کمکی برای راحتی ساخت نتیجه
@@ -263,7 +264,7 @@ namespace nexora {
  * این callback توسط GraphEngine در هنگام Startup برای ساخت گراف استفاده می‌شود.
  * پارامترها:
  *   - doc_id:    شناسه سند
- *   - bson_data: محتوای BSON باینری سند
+ *   - bson_data: محتوای JSON سازگار با API (نام پارامتر legacy است)
  *
  * اگر callback مقدار false برگرداند، iteration متوقف می‌شود (early exit).
  *
@@ -351,7 +352,7 @@ namespace nexora {
  *  1. **Thread-safe نیست** — هر thread باید instance جداگانه داشته باشد
  *     یا از locking خارجی استفاده شود (Cython layer مسئول این است).
  *  2. **Internal API** برای GraphEngine از طریق `IterateCollection` فراهم است.
- *  3. تمام داده‌ها BSON باینری هستند ولی API رشته BSON hex یا raw bytes می‌پذیرد.
+ *  3. داده‌ها روی دیسک BSON باینری هستند؛ API سازگار فعلی JSON UTF-8 می‌پذیرد.
  *  4. منطق تطابق (Match) و به‌روزرسانی (Apply) به nexora::query::Evaluator
  *     واگذار شده است — DocEngine فقط ذخیره‌سازی و iteration را مدیریت می‌کند.
  *
@@ -536,7 +537,7 @@ namespace nexora {
             /**
              * @brief یک سند جدید درج می‌کند
              * @param collection_name نام Collection
-             * @param bson_document   محتوای سند به فرمت BSON باینری
+             * @param bson_document   سند JSON UTF-8 (نام پارامتر برای سازگاری حفظ شده)
              * @return DBResult با data برابر doc_id سند ایجاد شده
              *
              * @details
@@ -586,7 +587,7 @@ namespace nexora {
              * @brief یک سند را بر اساس ID بازیابی می‌کند
              * @param collection_name نام Collection
              * @param doc_id          شناسه سند
-             * @return DBResult با data برابر محتوای BSON سند
+             * @return DBResult با data برابر JSON فشرده سند
              *
              * @details O(1) — مستقیماً از RocksDB با key می‌خواند.
              */
@@ -929,6 +930,16 @@ namespace nexora {
              */
             uint64_t GetDiskUsageBytes() const;
 
+            /**
+             * Convert legacy JSON values to the current BSON envelope in bounded
+             * transactions. The operation is idempotent and crash-resumable.
+             * Normal applications do not need to call it: an idle worker invokes
+             * it automatically. It is public for maintenance and diagnostics.
+             */
+            DBResult MigrateLegacyDocuments(
+                    std::size_t max_documents = 1000,
+                    std::size_t max_bytes = 4U * 1024U * 1024U);
+
             // ──────────────────────────────────────────────────────────
             // 6.15  Internal database users (system collection)
             // ──────────────────────────────────────────────────────────
@@ -986,6 +997,9 @@ namespace nexora {
             std::atomic<MutationFaultPoint> mutation_fault_point_{
                     MutationFaultPoint::None};
             std::atomic<std::uint32_t> pause_index_build_chunks_{0};
+            mutable std::atomic<std::int64_t> last_user_activity_ns_{0};
+            std::mutex document_migration_mutex_;
+            std::jthread document_migration_worker_;
 
             struct PageSession {
                 const rocksdb::Snapshot* snapshot = nullptr;
@@ -1022,6 +1036,20 @@ namespace nexora {
 
             rocksdb::Status InjectMutationFaultIfRequested(
                     MutationFaultPoint point) noexcept;
+
+            static rocksdb::Status EncodeDocumentForStorage(
+                    const std::string& json_document,
+                    std::string& stored_document);
+            static rocksdb::Status DecodeStoredDocument(
+                    const std::string& stored_document,
+                    std::string& json_document);
+            rocksdb::Status MigrateLegacyDocumentsChunk(
+                    std::size_t max_documents,
+                    std::size_t max_bytes,
+                    std::size_t& migrated,
+                    bool& complete);
+            void RunDocumentMigrationWorker(std::stop_token stop_token);
+            void TouchUserActivity() const noexcept;
 
             // ─── متدهای کمکی خصوصی ───
 
