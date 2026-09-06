@@ -87,3 +87,29 @@ vgcore.*
 *~
 .DS_Store
 Thumbs.db
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Additional Python packaging artifacts
+*.whl
+pip-wheel-metadata/
+__pypackages__/
+.tox/
+.nox/
+
+# Native shared objects and CMake/Ninja user state
+*.so
+CMakeUserPresets.json
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# Tool caches and Windows download metadata
+.cache/
+.vs/
+*:Zone.Identifier
