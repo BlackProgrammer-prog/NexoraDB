@@ -3,6 +3,7 @@
 #include <bson/bson.h>
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <unordered_set>
 
@@ -52,6 +53,11 @@ bool ValidateDepth(const bson_t& document,
         }
         if (!field_names.insert(field_name).second) {
             error = "duplicate field name: " + std::string(field_name);
+            return false;
+        }
+        if (BSON_ITER_HOLDS_DOUBLE(&iterator) &&
+            !std::isfinite(bson_iter_double(&iterator))) {
+            error = "NaN and Infinity are not supported in documents";
             return false;
         }
         if (!BSON_ITER_HOLDS_DOCUMENT(&iterator) &&
