@@ -9,6 +9,7 @@
 #endif
 
 #include <benchmark/benchmark.h>
+#include <bson/bson.h>
 
 #include <atomic>
 #include <chrono>
@@ -1098,6 +1099,8 @@ int main(int argc, char** argv) {
                                 NEXORA_BENCH_COMPILER_VERSION);
     benchmark::AddCustomContext("rocksdb_version",
                                 NEXORA_BENCH_ROCKSDB_VERSION);
+    benchmark::AddCustomContext("libbson_version",
+                                bson_get_version());
     benchmark::AddCustomContext("system",
                                 NEXORA_BENCH_SYSTEM);
     benchmark::AddCustomContext("dataset_seed",

@@ -1,14 +1,17 @@
 #include "TestTempDir.h"
 
 #include "core/DocEngine.h"
+#include "core/DocumentCodec.h"
 #include "core/IndexCodec.h"
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
 
 #include <gtest/gtest.h>
+#include <rocksdb/db.h>
 
 #include <atomic>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,6 +19,7 @@
 namespace {
 
     using nexora::core::DocEngine;
+    using nexora::core::DocumentCodec;
     using nexora::core::BulkWriteMode;
     using nexora::core::BulkWriteOptions;
     using nexora::core::FieldType;
@@ -32,6 +36,129 @@ namespace {
     using nexora::query::UpdateSpec;
     using nexora::query::UpdateValueType;
     using nexora::query::ValueType;
+
+    TEST(DocumentCodec, StoresVersionedBsonAndPreservesJsonApi) {
+        const std::string json =
+                R"({"text":"space : unicode \u06f1","empty":"","null":null,"nested":{"ok":true}})";
+        const auto encoded = DocumentCodec::EncodeJson(json);
+        ASSERT_TRUE(encoded.success) << encoded.error;
+        EXPECT_EQ(DocumentCodec::Detect(encoded.value),
+                  DocumentCodec::Format::BsonV1);
+        EXPECT_EQ(encoded.value.substr(0, 4), "NXD1");
+        EXPECT_NE(encoded.value.find('\0'), std::string::npos);
+
+        const auto decoded = DocumentCodec::DecodeToJson(encoded.value);
+        ASSERT_TRUE(decoded.success) << decoded.error;
+        EXPECT_NE(decoded.value.find("\"empty\":\"\""), std::string::npos);
+        EXPECT_NE(decoded.value.find("\"null\":null"), std::string::npos);
+        EXPECT_NE(decoded.value.find("\"nested\":{\"ok\":true}"),
+                  std::string::npos);
+
+        EXPECT_FALSE(DocumentCodec::EncodeJson("not-json").success);
+        EXPECT_FALSE(DocumentCodec::EncodeJson(
+                R"({"duplicate":1,"duplicate":2})").success);
+
+        std::string too_deep;
+        for (std::size_t i = 0; i < 101; ++i) too_deep += R"({"x":)";
+        too_deep += "0";
+        for (std::size_t i = 0; i < 101; ++i) too_deep += "}";
+        EXPECT_FALSE(DocumentCodec::EncodeJson(too_deep).success);
+
+        std::string unknown = encoded.value;
+        unknown[3] = '9';
+        EXPECT_EQ(DocumentCodec::Detect(unknown),
+                  DocumentCodec::Format::UnknownEnvelope);
+        EXPECT_FALSE(DocumentCodec::DecodeToJson(unknown).success);
+        EXPECT_EQ(DocumentCodec::Detect(json),
+                  DocumentCodec::Format::LegacyJson);
+    }
+
+    TEST(DocumentMigration, ConvertsLegacyJsonAndRemainsApiCompatible) {
+        TestTempDir temp("nexora_document_migration");
+        const auto database_path = temp.path() / "db";
+
+        {
+            DocEngine engine(database_path.string());
+            ASSERT_TRUE(engine.CreateCollection("users").success);
+        }
+
+        {
+            rocksdb::Options options;
+            options.create_if_missing = false;
+            rocksdb::DB* raw = nullptr;
+            ASSERT_TRUE(rocksdb::DB::Open(
+                    options, database_path.string(), &raw).ok());
+            std::unique_ptr<rocksdb::DB> database(raw);
+            ASSERT_TRUE(database->Put(
+                    rocksdb::WriteOptions{},
+                    "data:users:legacy",
+                    R"({"_id":"legacy","name":"old"})").ok());
+            ASSERT_TRUE(database->Put(
+                    rocksdb::WriteOptions{}, "seq:users", "1").ok());
+        }
+
+        {
+            DocEngine engine(database_path.string());
+            const auto before = engine.FindById("users", "legacy");
+            ASSERT_TRUE(before.success) << before.error_msg;
+            EXPECT_EQ(before.data,
+                      R"({"_id":"legacy","name":"old"})");
+
+            const auto migration = engine.MigrateLegacyDocuments();
+            ASSERT_TRUE(migration.success) << migration.error_msg;
+            EXPECT_NE(migration.data.find("\"migrated\":1"),
+                      std::string::npos);
+
+            const auto after = engine.FindById("users", "legacy");
+            ASSERT_TRUE(after.success) << after.error_msg;
+            EXPECT_EQ(after.data,
+                      R"({"_id":"legacy","name":"old"})");
+            ASSERT_TRUE(engine.InsertOne(
+                    "users", R"({"_id":"new","name":"bson"})").success);
+        }
+
+        {
+            rocksdb::Options options;
+            options.create_if_missing = false;
+            rocksdb::DB* raw = nullptr;
+            ASSERT_TRUE(rocksdb::DB::Open(
+                    options, database_path.string(), &raw).ok());
+            std::unique_ptr<rocksdb::DB> database(raw);
+            std::string stored;
+            ASSERT_TRUE(database->Get(
+                    rocksdb::ReadOptions{},
+                    "data:users:legacy",
+                    &stored).ok());
+            EXPECT_EQ(DocumentCodec::Detect(stored),
+                      DocumentCodec::Format::BsonV1);
+            ASSERT_TRUE(database->Get(
+                    rocksdb::ReadOptions{},
+                    "data:users:new",
+                    &stored).ok());
+            EXPECT_EQ(DocumentCodec::Detect(stored),
+                      DocumentCodec::Format::BsonV1);
+        }
+    }
+
+    TEST(DocumentMigration, RejectsAFormatWrittenByANewerBinary) {
+        TestTempDir temp("nexora_future_document_format");
+        const auto database_path = temp.path() / "db";
+        rocksdb::Options options;
+        options.create_if_missing = true;
+        rocksdb::DB* raw = nullptr;
+        ASSERT_TRUE(rocksdb::DB::Open(
+                options, database_path.string(), &raw).ok());
+        std::unique_ptr<rocksdb::DB> database(raw);
+        ASSERT_TRUE(database->Put(
+                rocksdb::WriteOptions{},
+                "meta:format:documents",
+                "999").ok());
+        database.reset();
+
+        EXPECT_THROW(
+                DocEngine engine(database_path.string()),
+                std::runtime_error);
+    }
 
     TEST(DocEngineSmoke, OpensClosesAndReopensDatabase) {
         TestTempDir temp("nexora_doc_smoke");
