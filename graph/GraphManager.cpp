@@ -8,7 +8,8 @@
  */
 
 #include "GraphManager.h"
-#include "../query/Evaluator.h"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -49,30 +50,55 @@ namespace nexora {
 
         std::string GraphManager::extractField(const std::string& bson,
                                                const std::string& path) {
-            thread_local nexora::query::Evaluator eval;
-            auto fv = eval.ExtractField(bson, path);
-            return fv.found ? fv.raw : "";
+            const auto document = nlohmann::json::parse(bson, nullptr, false);
+            if (document.is_discarded()) return {};
+            const nlohmann::json* value = &document;
+            std::size_t start = 0;
+            while (start <= path.size()) {
+                const std::size_t separator = path.find('.', start);
+                const std::string component = path.substr(
+                        start, separator == std::string::npos
+                                ? std::string::npos : separator - start);
+                if (!value->is_object()) return {};
+                const auto found = value->find(component);
+                if (found == value->end()) return {};
+                value = &*found;
+                if (separator == std::string::npos) break;
+                start = separator + 1;
+            }
+            if (value->is_string()) return value->get<std::string>();
+            if (value->is_boolean()) return value->get<bool>() ? "true" : "false";
+            if (value->is_number()) return value->dump();
+            return {};
         }
 
         std::vector<std::string> GraphManager::extractArrayField(
                 const std::string& bson, const std::string& path)
         {
-            // پارس JSON array ساده
-            thread_local nexora::query::Evaluator eval;
-            auto fv = eval.ExtractField(bson, path);
-            if (!fv.found || fv.raw.empty() || fv.raw[0] != '[') return {};
-
+            const auto document = nlohmann::json::parse(bson, nullptr, false);
+            if (document.is_discarded()) return {};
+            const nlohmann::json* value = &document;
+            std::size_t start = 0;
+            while (start <= path.size()) {
+                const std::size_t separator = path.find('.', start);
+                const std::string component = path.substr(
+                        start, separator == std::string::npos
+                                ? std::string::npos : separator - start);
+                if (!value->is_object()) return {};
+                const auto found = value->find(component);
+                if (found == value->end()) return {};
+                value = &*found;
+                if (separator == std::string::npos) break;
+                start = separator + 1;
+            }
+            if (!value->is_array()) return {};
             std::vector<std::string> result;
-            std::string inner = fv.raw.substr(1, fv.raw.size() > 2 ? fv.raw.size() - 2 : 0);
-            std::istringstream ss(inner);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                // trim و حذف کوتیشن
-                while (!token.empty() && (token.front() == ' ' || token.front() == '"'))
-                    token.erase(token.begin());
-                while (!token.empty() && (token.back() == ' ' || token.back() == '"'))
-                    token.pop_back();
-                if (!token.empty()) result.push_back(token);
+            result.reserve(value->size());
+            for (const auto& item : *value) {
+                if (item.is_string()) result.push_back(item.get<std::string>());
+                else if (item.is_boolean())
+                    result.emplace_back(item.get<bool>() ? "true" : "false");
+                else if (item.is_number()) result.push_back(item.dump());
             }
             return result;
         }
