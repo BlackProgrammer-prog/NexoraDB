@@ -105,24 +105,25 @@ class NexoraQLSession:
         self.gm = None
         if graph_dir is not None and getattr(nexoradb, "GRAPH_ENABLED", False):
             self.gm = nexoradb.GraphManager(self.engine, graph_dir)
-            self.gm.startup()
+            if not self.gm.startup():
+                self.gm.shutdown()
+                raise RuntimeError("Graph recovery failed; session is not ready")
 
         self.executor = Executor(self.engine, self.gm)
 
-    def execute(self, text: str) -> list[dict]:
+    def execute(self, text: str, parameters: dict | None = None) -> list[dict]:
         """اجرای یک یا چند دستور NexoraQL → لیست نتایج."""
-        return self.executor.execute_text(text)
+        return self.executor.execute_text(text, parameters)
 
-    def execute_one(self, text: str) -> dict:
+    def execute_one(self, text: str, parameters: dict | None = None) -> dict:
         """اجرای یک دستور واحد → یک نتیجه."""
-        results = self.execute(
-            text if text.rstrip().endswith(";") else text + ";")
-        return results[0] if results else {"success": False, "error": "empty"}
+        return self.executor.execute(parse_one(text, parameters))
 
     def register_algorithm(self, name: str, fn) -> None:
         """ثبت runner پایتونی برای الگوریتم (تا زمان binding مستقیم C++)."""
         self.executor.register_algorithm(name, fn)
 
     def close(self) -> None:
+        self.executor.abort_transaction()
         if self.gm is not None:
             self.gm.shutdown()
