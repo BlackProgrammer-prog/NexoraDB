@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <string_view>
+#include <stdexcept>
 
 namespace nexora::query {
 namespace {
@@ -71,9 +72,10 @@ std::string ApplyOne(const std::string& document, UpdateOperation operation) {
     UpdateSpec spec;
     spec.Add(std::move(operation));
     const CompiledUpdate compiled(spec);
-    if (!compiled.valid()) return document;
+    if (!compiled.valid()) throw std::invalid_argument(compiled.error());
     auto result = compiled.ApplyJson(document);
-    return result.success ? std::move(result.document) : document;
+    if (!result.success) throw std::invalid_argument(result.error);
+    return std::move(result.document);
 }
 
 // libbson annotates bson_t with an alignment attribute that GCC warns about
@@ -176,7 +178,7 @@ Evaluator::Evaluator(std::unique_ptr<IBsonAdapter> adapter)
 bool Evaluator::Match(const std::string& document,
                       const Condition& condition) const {
     const CompiledQuery compiled(condition);
-    if (!compiled.valid()) return false;
+    if (!compiled.valid()) throw std::invalid_argument(compiled.error());
 
     if (document.size() >= 8 &&
         std::string_view(document).substr(0, 4) == "NXD1") {
@@ -188,7 +190,13 @@ bool Evaluator::Match(const std::string& document,
     const DocumentView view(std::string_view(
             reinterpret_cast<const char*>(bson_get_data(bson)),
             bson->len));
-    const bool matched = view.valid() && compiled.Match(view);
+    bool matched;
+    try {
+        matched = view.valid() && compiled.Match(view);
+    } catch (...) {
+        bson_destroy(bson);
+        throw;
+    }
     bson_destroy(bson);
     return matched;
 }
@@ -196,9 +204,10 @@ bool Evaluator::Match(const std::string& document,
 std::string Evaluator::Apply(const std::string& document,
                              const UpdateSpec& update_spec) const {
     const CompiledUpdate compiled(update_spec);
-    if (!compiled.valid()) return document;
+    if (!compiled.valid()) throw std::invalid_argument(compiled.error());
     auto result = compiled.ApplyJson(document);
-    return result.success ? std::move(result.document) : document;
+    if (!result.success) throw std::invalid_argument(result.error);
+    return std::move(result.document);
 }
 
 std::string Evaluator::ApplyProjection(const std::string& document,
