@@ -8,6 +8,7 @@
  */
 
 #include "GraphManager.h"
+#include "DurableFile.h"
 
 #include <nlohmann/json.hpp>
 
@@ -118,43 +119,71 @@ namespace nexora {
 
 // Serialization ساده برای GraphDefinition
             std::string serializeDef(const GraphDefinition& def) {
-                std::ostringstream ss;
-                ss << "name=" << def.name << "\n"
-                   << "mode=" << (def.mode == GraphMode::Live ? "live" : "static") << "\n"
-                   << "directed=" << (def.directed ? "1" : "0") << "\n"
-                   << "heterogeneous=" << (def.heterogeneous ? "1" : "0") << "\n"
-                   << "auto_build=" << (def.auto_build_on_startup ? "1" : "0") << "\n";
-
+                nlohmann::json document = {
+                    {"format_version", 2}, {"name", def.name},
+                    {"mode", def.mode == GraphMode::Live ? "live" : "static"},
+                    {"directed", def.directed}, {"heterogeneous", def.heterogeneous},
+                    {"auto_build", def.auto_build_on_startup},
+                    {"nodes", nlohmann::json::array()}, {"edges", nlohmann::json::array()}};
                 for (const auto& nm : def.node_mappings) {
-                    ss << "NODE:" << nm.node_type << "|" << nm.collection << "|"
-                       << nm.key_path << "|";
-                    for (size_t i = 0; i < nm.properties.size(); ++i) {
-                        if (i) ss << ",";
-                        ss << nm.properties[i];
-                    }
-                    ss << "|" << nm.filter_expr << "\n";
+                    document["nodes"].push_back({{"type", nm.node_type}, {"collection", nm.collection},
+                        {"key", nm.key_path}, {"properties", nm.properties}, {"filter", nm.filter_expr}});
                 }
-
                 for (const auto& em : def.edge_mappings) {
-                    ss << "EDGE:" << em.edge_type << "|" << em.collection << "|"
-                       << em.source_path << "|" << em.source_node_type << "|"
-                       << em.target_path << "|" << em.target_node_type << "|"
-                       << (em.directed ? "1" : "0") << "|";
-                    for (size_t i = 0; i < em.properties.size(); ++i) {
-                        if (i) ss << ",";
-                        ss << em.properties[i];
-                    }
-                    ss << "|";
-                    if (em.unwind) {
-                        ss << em.unwind->array_path << "," << em.unwind->alias;
-                    }
-                    ss << "\n";
+                    nlohmann::json edge = {{"type", em.edge_type}, {"collection", em.collection},
+                        {"source", em.source_path}, {"source_type", em.source_node_type},
+                        {"target", em.target_path}, {"target_type", em.target_node_type},
+                        {"directed", em.directed}, {"properties", em.properties}};
+                    if (em.unwind)
+                        edge["unwind"] = {{"path", em.unwind->array_path}, {"alias", em.unwind->alias}};
+                    document["edges"].push_back(std::move(edge));
                 }
-                return ss.str();
+                return document.dump();
             }
 
             std::optional<GraphDefinition> deserializeDef(const std::string& data) {
                 GraphDefinition def;
+                const auto first = data.find_first_not_of(" \t\r\n");
+                if (first != std::string::npos && data[first] == '{') {
+                    try {
+                        const auto document = nlohmann::json::parse(data);
+                        if (document.at("format_version") != 2) return std::nullopt;
+                        def.name = document.at("name").get<std::string>();
+                        const auto mode = document.at("mode").get<std::string>();
+                        if (mode != "live" && mode != "static") return std::nullopt;
+                        def.mode = mode == "live" ? GraphMode::Live : GraphMode::Static;
+                        def.directed = document.at("directed").get<bool>();
+                        def.heterogeneous = document.at("heterogeneous").get<bool>();
+                        def.auto_build_on_startup = document.at("auto_build").get<bool>();
+                        if (!document.at("nodes").is_array() || !document.at("edges").is_array())
+                            return std::nullopt;
+                        for (const auto& node : document.at("nodes")) {
+                            NodeMappingDef nm;
+                            nm.node_type = node.at("type").get<std::string>();
+                            nm.collection = node.at("collection").get<std::string>();
+                            nm.key_path = node.at("key").get<std::string>();
+                            nm.properties = node.at("properties").get<std::vector<std::string>>();
+                            nm.filter_expr = node.at("filter").get<std::string>();
+                            def.node_mappings.push_back(std::move(nm));
+                        }
+                        for (const auto& edge : document.at("edges")) {
+                            EdgeMappingDef em;
+                            em.edge_type = edge.at("type").get<std::string>();
+                            em.collection = edge.at("collection").get<std::string>();
+                            em.source_path = edge.at("source").get<std::string>();
+                            em.source_node_type = edge.at("source_type").get<std::string>();
+                            em.target_path = edge.at("target").get<std::string>();
+                            em.target_node_type = edge.at("target_type").get<std::string>();
+                            em.directed = edge.at("directed").get<bool>();
+                            em.properties = edge.at("properties").get<std::vector<std::string>>();
+                            if (edge.contains("unwind"))
+                                em.unwind = UnwindConfig{edge.at("unwind").at("path").get<std::string>(),
+                                                         edge.at("unwind").at("alias").get<std::string>()};
+                            def.edge_mappings.push_back(std::move(em));
+                        }
+                        return def;
+                    } catch (const nlohmann::json::exception&) { return std::nullopt; }
+                }
                 std::istringstream ss(data);
                 std::string line;
                 while (std::getline(ss, line)) {
@@ -230,21 +259,19 @@ namespace nexora {
         } // anonymous namespace
 
         bool GraphManager::persistDefinition(const GraphDefinition& def) {
-            if (!doc_engine_) return false;
+            if (!doc_engine_ || !detail::ValidGraphName(def.name)) return false;
             // از RocksDB مستقیم DocEngine استفاده نمی‌کنیم — از یک key مخفی استفاده می‌کنیم
             // DocEngine::InsertOne را نمی‌توانیم استفاده کنیم چون این metadata است نه document
             // در عوض از GraphIdStore ذخیره می‌کنیم
             // (در این MVP از فایل ساده استفاده می‌کنیم)
             auto def_path = graph_dir_ / (def.name + ".graphdef");
-            std::ofstream f(def_path);
-            if (!f) return false;
-            f << serializeDef(def);
-            return true;
+            return detail::AtomicWriteFile(def_path, serializeDef(def));
         }
 
         std::optional<GraphDefinition> GraphManager::loadDefinition(
                 const std::string& name) const
         {
+            if (!detail::ValidGraphName(name)) return std::nullopt;
             auto def_path = graph_dir_ / (name + ".graphdef");
             if (!std::filesystem::exists(def_path)) return std::nullopt;
             std::ifstream f(def_path);
@@ -260,7 +287,9 @@ namespace nexora {
                 if (entry.path().extension() != ".graphdef") continue;
                 std::string name = entry.path().stem().string();
                 auto def = loadDefinition(name);
-                if (def) result.push_back(*def);
+                if (!def || def->name != name)
+                    throw std::runtime_error("Invalid graph definition: " + entry.path().string());
+                result.push_back(*def);
             }
             return result;
         }
@@ -272,6 +301,7 @@ namespace nexora {
         std::unique_ptr<GraphHandle> GraphManager::makeHandle(
                 const GraphDefinition& def)
         {
+            if (!detail::ValidGraphName(def.name)) return nullptr;
             auto h = std::make_unique<GraphHandle>();
             h->definition = def;
 
@@ -311,7 +341,7 @@ namespace nexora {
 
             for (const auto& def : defs) {
                 auto handle = makeHandle(def);
-                if (!handle) continue;
+                if (!handle) return false;
 
                 if (def.auto_build_on_startup && handle->live_graph) {
                     // بررسی meta
@@ -319,12 +349,15 @@ namespace nexora {
 
                     if (!meta_ok) {
                         // rebuild از DocEngine
-                        std::lock_guard<std::mutex> lock(registry_mutex_);
-                        graphs_[def.name] = std::move(handle);
-                        buildGraph(def.name);
+                        {
+                            std::lock_guard<std::mutex> lock(registry_mutex_);
+                            graphs_[def.name] = std::move(handle);
+                        }
+                        // buildGraph acquires registry_mutex_ itself.
+                        if (!buildGraph(def.name).success) return false;
                     } else {
                         // بارگذاری از فایل
-                        handle->live_graph->loadFromDisk();
+                        if (!handle->live_graph->loadFromDisk()) return false;
                         handle->live_graph->replayWAL();
 
                         std::lock_guard<std::mutex> lock(registry_mutex_);
@@ -344,7 +377,7 @@ namespace nexora {
 // ══════════════════════════════════════════════════════════════
 
         bool GraphManager::createGraph(const GraphDefinition& def) {
-            if (def.name.empty()) return false;
+            if (!detail::ValidGraphName(def.name)) return false;
 
             std::lock_guard<std::mutex> lock(registry_mutex_);
             if (graphs_.count(def.name)) return false;  // از قبل وجود دارد
@@ -364,8 +397,12 @@ namespace nexora {
             auto it = graphs_.find(graph_name);
             if (it == graphs_.end()) return false;
 
-            it->second->definition.node_mappings.push_back(mapping);
-            return persistDefinition(it->second->definition);
+            auto updated = it->second->definition;
+            updated.node_mappings.push_back(mapping);
+            if (!persistDefinition(updated)) return false;
+            it->second->definition = std::move(updated);
+            it->second->built = false;
+            return true;
         }
 
         bool GraphManager::addEdgeMapping(const std::string& graph_name,
@@ -374,8 +411,12 @@ namespace nexora {
             auto it = graphs_.find(graph_name);
             if (it == graphs_.end()) return false;
 
-            it->second->definition.edge_mappings.push_back(mapping);
-            return persistDefinition(it->second->definition);
+            auto updated = it->second->definition;
+            updated.edge_mappings.push_back(mapping);
+            if (!persistDefinition(updated)) return false;
+            it->second->definition = std::move(updated);
+            it->second->built = false;
+            return true;
         }
 
         bool GraphManager::dropGraph(const std::string& graph_name) {
@@ -518,13 +559,18 @@ namespace nexora {
                         handle->storage.get(), handle->wal.get(), graph_name);
 
             // clear + set dirty
-            handle->storage->updateMetaState(GraphState::Building);
+            handle->built = false;
+            if (!handle->storage->updateMetaState(GraphState::Building)) {
+                result.error_msg = "Unable to persist graph Building state";
+                return result;
+            }
             handle->live_graph->clear();
 
             const GraphDefinition& def = handle->definition;
             LiveGraph& graph = *handle->live_graph;
 
             // ── مرحله ۱: ساخت nodes از collections ──
+            try {
             for (const auto& nm : def.node_mappings) {
                 doc_engine_->IterateCollection(
                         nm.collection,
@@ -547,6 +593,10 @@ namespace nexora {
                         }
                 );
             }
+            } catch (const std::exception& error) {
+                result.error_msg = std::string("Graph source scan failed: ") + error.what();
+                return result;
+            }
 
             // ── مرحله ۳: به‌روزرسانی meta ──
             GraphMeta meta{};
@@ -560,7 +610,10 @@ namespace nexora {
                     std::chrono::system_clock::now().time_since_epoch()).count();
             std::strncpy(meta.graph_name, graph_name.c_str(),
                          sizeof(meta.graph_name) - 1);
-            handle->storage->writeMeta(meta);
+            if (!handle->storage->writeMeta(meta)) {
+                result.error_msg = "Unable to persist graph metadata";
+                return result;
+            }
 
             handle->built = true;
 
@@ -575,7 +628,8 @@ namespace nexora {
             auto it = graphs_.find(graph_name);
             if (it == graphs_.end() || !it->second->live_graph) return false;
 
-            it->second->live_graph->loadFromDisk();
+            it->second->built = false;
+            if (!it->second->live_graph->loadFromDisk()) return false;
             it->second->live_graph->replayWAL();
             it->second->built = true;
             return true;

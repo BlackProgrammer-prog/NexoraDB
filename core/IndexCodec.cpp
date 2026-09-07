@@ -39,7 +39,7 @@ void AppendEscapedString(std::string& out, std::string_view value) {
 }
 
 bool AppendValue(std::string& out, const query::FieldValue& value) {
-    if (!value.found || value.raw == "null") return false;
+    if (!value.found || value.type == query::ValueType::Null) return false;
     query::ValueType type = value.type;
     if (value.raw.empty()) type = query::ValueType::String;
     out.push_back(static_cast<char>(type));
