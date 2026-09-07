@@ -1419,4 +1419,95 @@ namespace {
         EXPECT_FALSE(missing.has_value());
     }
 
+    TEST(CompiledQueryNumericContract, PreservesInt64OrderingAndMixedEquality) {
+        using nexora::query::CompiledQuery;
+        using nexora::query::DocumentView;
+        const auto encoded = DocumentCodec::EncodeJson(
+                R"({"n":9007199254740993,"max":9223372036854775807})");
+        ASSERT_TRUE(encoded.success) << encoded.error;
+        const DocumentView view(std::string_view(encoded.value).substr(DocumentCodec::kEnvelopeSize));
+        EXPECT_TRUE(CompiledQuery(Condition::Leaf("n", Op::GT,
+                "9007199254740992", ValueType::Int64)).Match(view));
+        EXPECT_FALSE(CompiledQuery(Condition::Leaf("n", Op::EQ,
+                "9007199254740992", ValueType::Float64)).Match(view));
+        EXPECT_TRUE(CompiledQuery(Condition::Leaf("max", Op::LT,
+                "9223372036854775808", ValueType::Float64)).Match(view));
+        EXPECT_FALSE(CompiledQuery(Condition::In("n",
+                {"9007199254740992"}, false, ValueType::Float64)).Match(view));
+    }
+
+    TEST(IndexCodecV2, StringNullIsNotNull) {
+        using nexora::core::indexv2::EncodeValues;
+        using nexora::query::FieldValue;
+        EXPECT_TRUE(EncodeValues({FieldValue{"null", ValueType::String, true}}).has_value());
+        EXPECT_FALSE(EncodeValues({FieldValue{"null", ValueType::Null, true}}).has_value());
+    }
+
+    TEST(DocEngineSchemaContract, DefaultsTypesStrictAndTransactions) {
+        TestTempDir temp("schema_contract");
+        DocEngine engine((temp.path() / "db").string());
+        SchemaDefinition schema;
+        schema.strict = true;
+        SchemaField age;
+        age.name = "age";
+        age.type = FieldType::Int32;
+        age.required = true;
+        age.default_val = "18";
+        schema.fields.push_back(age);
+        ASSERT_TRUE(engine.CreateCollection("users", schema).success);
+        ASSERT_TRUE(engine.InsertOne("users", R"({"_id":"one"})").success);
+        EXPECT_NE(engine.FindById("users", "one").data.find("\"age\":18"), std::string::npos);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","age":"18"})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","age":2147483648})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","other":1})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","age":null})").success);
+        auto tx = engine.BeginTransaction();
+        ASSERT_NE(tx, nullptr);
+        ASSERT_TRUE(engine.InsertOneTx(*tx, "users", R"({"_id":"tx"})").success);
+        EXPECT_NE(engine.FindByIdTx(*tx, "users", "tx").data.find("\"age\":18"), std::string::npos);
+        ASSERT_TRUE(engine.RollbackTransaction(*tx).success);
+        EXPECT_EQ(engine.Count("users", Condition{}).data, "1");
+        const auto generated = engine.InsertOne("users", "{}");
+        ASSERT_TRUE(generated.success) << generated.error_msg;
+        EXPECT_NE(engine.FindById("users", generated.data).data.find(generated.data), std::string::npos);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":null})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"dupe","age":1,"age":2})").success);
+    }
+
+    TEST(DocEngineUpdateContract, InvalidUpdatesPreserveDocument) {
+        TestTempDir temp("update_contract");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne("items", R"({"_id":"1","data":"keep"})").success);
+        const auto before = engine.FindById("items", "1").data;
+        UpdateSpec nested;
+        nested.Set("data.nested", "oops");
+        EXPECT_FALSE(engine.UpdateById("items", "1", nested).success);
+        UpdateSpec array;
+        array.Push("data", "oops");
+        EXPECT_FALSE(engine.UpdateById("items", "1", array).success);
+        UpdateSpec identity;
+        identity.Set("_id", "changed");
+        EXPECT_FALSE(engine.UpdateById("items", "1", identity).success);
+        EXPECT_EQ(engine.FindById("items", "1").data, before);
+        EXPECT_EQ(engine.FindById("items", "missing").error_code, "not_found");
+    }
+
+    TEST(DocEngineJoinContract, UsesV2TargetIndexAndPreservesEmptyString) {
+        TestTempDir temp("join_contract");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("source").success);
+        ASSERT_TRUE(engine.CreateCollection("target").success);
+        ASSERT_TRUE(engine.InsertOne("source", R"({"_id":"s","ref":""})").success);
+        ASSERT_TRUE(engine.InsertOne("target", R"({"_id":"t","key":""})").success);
+        IndexDefinition index;
+        index.index_name = "by_key";
+        index.fields = {"key"};
+        ASSERT_TRUE(engine.CreateIndex("target", index).success);
+        const auto joined = engine.LookupJoin("source", "ref", "target", "key", Condition{}, 10);
+        ASSERT_TRUE(joined.success) << joined.error_msg;
+        ASSERT_EQ(joined.records.size(), 1U);
+        EXPECT_NE(joined.records.front().find("\"_id\":\"t\""), std::string::npos);
+    }
+
 } // namespace

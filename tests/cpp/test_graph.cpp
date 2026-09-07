@@ -1,4 +1,6 @@
 #include "TestTempDir.h"
+#include "graph/DurableFile.h"
+#include <fstream>
 
 #include "graph/Graphstorage.h"
 #include "graph/Graphwal.h"
@@ -172,6 +174,20 @@ namespace {
         });
 
         EXPECT_TRUE(inspected_edge);
+    }
+
+    TEST(GraphMetadataContract, AtomicReplacementAndPathValidation) {
+        TestTempDir temp("graph_metadata_contract");
+        const auto target = temp.path() / "definition.graphdef";
+        ASSERT_TRUE(nexora::graph::detail::AtomicWriteFile(target, "old"));
+        ASSERT_TRUE(nexora::graph::detail::AtomicWriteFile(target, "new"));
+        std::ifstream input(target);
+        std::string value;
+        input >> value;
+        EXPECT_EQ(value, "new");
+        EXPECT_FALSE(nexora::graph::detail::ValidGraphName("../outside"));
+        EXPECT_FALSE(nexora::graph::detail::ValidGraphName("a/b"));
+        EXPECT_TRUE(nexora::graph::detail::ValidGraphName("social_1"));
     }
 
 } // namespace
