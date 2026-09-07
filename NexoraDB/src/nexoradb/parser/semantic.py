@@ -257,6 +257,8 @@ def _value_type(nx, val) -> tuple[str, Any]:
         return (str(val), nx.ValueType.Float64)
     if val is None:
         return ("", nx.ValueType.Null)
+    if not isinstance(val, str):
+        raise NexoraQLUnsupportedError("Object/array predicate equality is not supported")
     return (str(val), nx.ValueType.String)
 
 
@@ -355,8 +357,9 @@ def build_update_spec(ops: list[N.UpdateOpItem]):
 
 def _extract_id_eq(node: N.ConditionNode) -> Optional[str]:
     """اگر شرط دقیقاً «_id = X» باشد، X را برمی‌گرداند (برای مسیر O(1))."""
-    if isinstance(node, N.Cmp) and node.field == "_id" and node.op == "EQ":
-        return str(node.value)
+    if (isinstance(node, N.Cmp) and node.field == "_id" and node.op == "EQ"
+            and isinstance(node.value, str)):
+        return node.value
     return None
 
 
@@ -407,18 +410,58 @@ class Executor:
         وقتی binding مستقیم C++ (run_lock/submit_job با string) موجود نیست."""
         self._algo_runners[name] = fn
 
-    def execute_text(self, text: str) -> list[dict]:
+    def execute_text(self, text: str, parameters: dict | None = None) -> list[dict]:
         """parse + validate + execute یک متن کامل NexoraQL."""
         from .parser import parse
+        return self.execute_statements(parse(text, parameters))
+
+    def execute_statements(self, statements: list) -> list[dict]:
+        """Execute an already parsed and authorized statement list."""
         results = []
-        for stmt in parse(text):
-            results.append(self.execute(stmt))
+        try:
+            for stmt in statements:
+                result = self.execute(stmt)
+                results.append(result)
+                if result.get("success") is False:
+                    self.abort_transaction()
+                    break
+        except BaseException:
+            self.abort_transaction()
+            raise
         return results
 
+    def abort_transaction(self) -> None:
+        """Release an active transaction on failure or request teardown."""
+        if self._tx is not None:
+            tx, self._tx = self._tx, None
+            result = self.engine.rollback_transaction(tx)
+            if not result.success:
+                raise NexoraQLExecutionError(result.error_msg or "Rollback failed")
+
     def execute(self, stmt) -> dict:
+        try:
+            result = self._execute(stmt)
+            if result.get("success") is False:
+                self.abort_transaction()
+            return result
+        except BaseException:
+            self.abort_transaction()
+            raise
+
+    def _execute(self, stmt) -> dict:
         """اجرای یک AST statement → dict نتیجه."""
         self.validator.validate(stmt)
         t = type(stmt).__name__
+        if self._tx is not None:
+            allowed = {"Insert", "InsertBatch", "Select", "Update", "Delete",
+                       "CommitTx", "RollbackTx"}
+            if t not in allowed:
+                raise NexoraQLUnsupportedError(
+                    f"{t} is not supported inside a transaction")
+            if t in {"Insert", "InsertBatch", "Update", "Delete"} and self.gm is not None:
+                raise NexoraQLUnsupportedError(
+                    "Transactional graph projection is not yet supported; "
+                    "the write was not executed")
         fn = getattr(self, f"_x_{t}", None)
         if fn is None:
             raise NexoraQLUnsupportedError(f"Statement not supported: {t}")
@@ -435,7 +478,8 @@ class Executor:
     @staticmethod
     def _res(r) -> dict:
         """DBResult → dict"""
-        return {"success": r.success, "data": r.data, "error": r.error_msg}
+        return {"success": r.success, "data": r.data, "error": r.error_msg,
+                "error_code": getattr(r, "error_code", "")}
 
     def _require_gm(self):
         if self.gm is None:
@@ -449,7 +493,7 @@ class Executor:
 
     def _x_CreateCollection(self, s: N.CreateCollection) -> dict:
         nx = _nx()
-        if not s.fields:
+        if not s.fields and not s.strict:
             return self._res(self.engine.create_collection(s.name))
 
         schema = nx.SchemaDefinition()
@@ -467,6 +511,8 @@ class Executor:
             sf.type = type_map.get(f.dtype, nx.FieldType.String)
             sf.required = f.required
             sf.unique = f.unique
+            if f.has_default:
+                sf.default_val = json.dumps(f.default, ensure_ascii=False, allow_nan=False)
             py_fields.append(sf)
         # bind_vector: assign یکجا (append روی کپی کار می‌کند)
         try:
@@ -494,6 +540,8 @@ class Executor:
             sf.type = type_map.get(f.dtype, nx.FieldType.String)
             sf.required = f.required
             sf.unique = f.unique
+            if f.has_default:
+                sf.default_val = json.dumps(f.default, ensure_ascii=False, allow_nan=False)
             py_fields.append(sf)
         try:
             schema.fields = nx.SchemaFieldList(py_fields)
@@ -602,6 +650,14 @@ class Executor:
                 json.loads(doc)
             except json.JSONDecodeError as e:
                 raise NexoraQLSemanticError(f"Invalid JSON at item {i}: {e}")
+        if self._tx is not None:
+            ids = []
+            for doc in s.json_docs:
+                r = self.engine.insert_one_tx(self._tx, s.collection, doc)
+                if not r.success:
+                    return self._res(r)
+                ids.append(r.data)
+            return {"success": True, "data": json.dumps(ids), "error": ""}
         r = self.engine.insert_many(s.collection, list(s.json_docs))
         if r.success and self.gm is not None:
             for doc in s.json_docs:
@@ -613,6 +669,18 @@ class Executor:
     # ══════════════════════════════════════════════════════════
 
     def _x_Select(self, s: N.Select) -> dict:
+        if self._tx is not None:
+            doc_id = _extract_id_eq(s.where)
+            if s.joins or doc_id is None:
+                raise NexoraQLUnsupportedError(
+                    "Transactional SELECT currently requires an exact _id predicate")
+            r = self.engine.find_by_id_tx(self._tx, s.collection, doc_id)
+            if not r.success:
+                if getattr(r, "error_code", "") == "not_found":
+                    return {"success": True, "count": 0, "documents": []}
+                return self._res(r)
+            docs = [] if s.skip else self._project([json.loads(r.data)], s.projection)
+            return {"success": True, "count": len(docs), "documents": docs}
         # ── LOOKUP JOIN ──
         if s.joins:
             if len(s.joins) > 1:
@@ -620,11 +688,15 @@ class Executor:
                     "Multiple LOOKUP JOINs not supported in MVP (engine does one per call)")
             to_col, from_field, to_field = s.joins[0]
             cond = build_condition(s.where)
+            if s.limit and s.limit + s.skip > 0xffffffff:
+                raise NexoraQLSemanticError("JOIN LIMIT + SKIP exceeds uint32")
             jr = self.engine.lookup_join(
-                s.collection, from_field, to_col, to_field, cond, s.limit)
+                s.collection, from_field, to_col, to_field, cond,
+                s.limit + s.skip if s.limit else 0)
             if not jr["success"]:
                 return {"success": False, "error": jr["error_msg"]}
             docs = [json.loads(rec) for rec in jr["records"]]
+            docs = docs[s.skip:]
             docs = self._project(docs, s.projection)
             return {"success": True, "count": len(docs), "documents": docs}
 
@@ -633,9 +705,11 @@ class Executor:
         if doc_id is not None:
             r = self.engine.find_by_id(s.collection, doc_id)
             if not r.success:
-                return {"success": True, "count": 0, "documents": []}
-            docs = self._project([json.loads(r.data)], s.projection)
-            return {"success": True, "count": 1, "documents": docs}
+                if getattr(r, "error_code", "") == "not_found":
+                    return {"success": True, "count": 0, "documents": []}
+                return self._res(r)
+            docs = [] if s.skip else self._project([json.loads(r.data)], s.projection)
+            return {"success": True, "count": len(docs), "documents": docs}
 
         # ── FindMany عادی ──
         cond = build_condition(s.where)
@@ -651,11 +725,26 @@ class Executor:
         """اعمال projection در سمت Python (MVP — engine projection ندارد)."""
         if projection is None:
             return docs
-        keep = set(projection) | {"_id"}
-        out = []
-        for d in docs:
-            out.append({k: v for k, v in d.items() if k in keep})
-        return out
+        tree: dict = {}
+        for path in sorted(set(projection) | {"_id"}, key=lambda p: (p.count("."), p)):
+            branch = tree
+            parts = path.split(".")
+            for part in parts[:-1]:
+                if part in branch and branch[part] is None:
+                    break  # A parent projection already includes this path.
+                branch = branch.setdefault(part, {})
+            else:
+                branch[parts[-1]] = None
+
+        def select(value, fields):
+            if isinstance(value, list):
+                return [select(item, fields) for item in value]
+            if not isinstance(value, dict):
+                return value
+            return {key: (value[key] if children is None else select(value[key], children))
+                    for key, children in fields.items() if key in value}
+
+        return [select(document, tree) for document in docs]
 
     def _x_Count(self, s: N.Count) -> dict:
         cond = build_condition(s.where)
@@ -678,6 +767,14 @@ class Executor:
     def _x_Update(self, s: N.Update) -> dict:
         spec = build_update_spec(s.ops)
 
+        if self._tx is not None:
+            doc_id = _extract_id_eq(s.where)
+            if doc_id is None or s.many:
+                raise NexoraQLUnsupportedError(
+                    "Transactional UPDATE currently requires an exact _id predicate")
+            return self._res(self.engine.update_by_id_tx(
+                self._tx, s.collection, doc_id, spec))
+
         # مسیر O(1): WHERE _id = 'x' (و MANY نبود)
         doc_id = _extract_id_eq(s.where)
         if doc_id is not None and not s.many:
@@ -697,6 +794,12 @@ class Executor:
 
     def _x_Delete(self, s: N.Delete) -> dict:
         doc_id = _extract_id_eq(s.where)
+        if self._tx is not None:
+            if doc_id is None:
+                raise NexoraQLUnsupportedError(
+                    "Transactional DELETE currently requires an exact _id predicate")
+            return self._res(self.engine.delete_by_id_tx(
+                self._tx, s.collection, doc_id))
         if doc_id is not None:
             old = self.engine.find_by_id(s.collection, doc_id)
             r = self.engine.delete_by_id(s.collection, doc_id)

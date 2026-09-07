@@ -10,6 +10,8 @@ Lark به‌طور خودکار children را به متد pass می‌کند.
 from __future__ import annotations
 
 import ast
+import json
+import math
 
 from lark import Token, Transformer
 
@@ -39,6 +41,54 @@ class NexoraQLTransformer(Transformer):
     # ریشه
     # ══════════════════════════════════════════════════════════
 
+    def __init__(self, parameters=None):
+        super().__init__()
+        self.parameters = parameters or {}
+
+    def parameter(self, ch):
+        name = str(ch[0])
+        if name not in self.parameters:
+            raise ValueError(f"Missing query parameter: {name}")
+        return self.parameters[name]
+
+    def array_value(self, values):
+        return list(values)
+
+    def object_pair(self, values):
+        return tuple(values)
+
+    def object_value(self, pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate object key: {key}")
+            result[key] = value
+        return result
+
+    def document_input(self, values):
+        value = values[0]
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        if not isinstance(value, str):
+            raise ValueError("INSERT requires an object or a JSON document string")
+        return value
+
+    @staticmethod
+    def _integer(value):
+        if isinstance(value, Token):
+            value = int(value)
+        if type(value) is not int or not 0 <= value <= 0xffffffff:
+            raise ValueError("LIMIT/SKIP requires an unsigned 32-bit integer")
+        return value
+
+    @staticmethod
+    def _numeric(value):
+        if isinstance(value, Token):
+            value = _num(str(value))
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("Arithmetic operands must be finite numbers")
+        return value
+
     def start(self, stmts):
         return list(stmts)
 
@@ -48,6 +98,15 @@ class NexoraQLTransformer(Transformer):
 
     def string(self, ch):
         return _unquote(_tok(ch[0]))
+
+    def string_arg(self, ch):
+        if not isinstance(ch[0], str):
+            raise ValueError("Expected a string parameter")
+        return ch[0]
+
+    def edge_exists_sql(self, ch):
+        return N.EdgeExists(src_type=str(ch[0]), src_id=ch[1],
+                            dst_type=str(ch[2]), dst_id=ch[3], edge_type=str(ch[4]))
 
     def number(self, ch):
         s = _tok(ch[0])
@@ -94,6 +153,8 @@ class NexoraQLTransformer(Transformer):
         for flag in ch[2:]:
             k, v = flag
             setattr(fd, k, v)
+            if k == "default":
+                fd.has_default = True
         return fd
 
     def schema_body(self, fields):
@@ -191,15 +252,13 @@ class NexoraQLTransformer(Transformer):
         to_col = _tok(ch[0])
         from_path = ch[1]   # "posts.author_id"
         to_path = ch[2]     # "users._id"
-        from_field = from_path.split(".", 1)[1] if "." in from_path else from_path
-        to_field = to_path.split(".", 1)[1] if "." in to_path else to_path
-        return (to_col, from_field, to_field)
+        return ("join", to_col, from_path, to_path)
 
     def limit_clause(self, ch):
-        return ("limit", int(_tok(ch[0])))
+        return ("limit", self._integer(ch[0]))
 
     def skip_clause(self, ch):
-        return ("skip", int(_tok(ch[0])))
+        return ("skip", self._integer(ch[0]))
 
     def where_clause(self, ch):
         return ("where", ch[0])
@@ -217,8 +276,24 @@ class NexoraQLTransformer(Transformer):
                     limit = item[1]
                 elif item[0] == "skip":
                     skip = item[1]
-                elif len(item) == 3:      # join tuple
-                    joins.append(item)
+                elif item[0] == "join":
+                    _, to_col, source_path, target_path = item
+                    joins.append((to_col, source_path.removeprefix(collection + "."),
+                                  target_path.removeprefix(to_col + ".")))
+        def normalize_condition(node):
+            if isinstance(node, (N.Cmp, N.InCmp, N.ExistsCmp)):
+                if any(node.field.startswith(target + ".") for target, _, _ in joins
+                       if target != collection):
+                    raise ValueError("JOIN target predicates are not yet supported")
+                node.field = node.field.removeprefix(collection + ".")
+            elif isinstance(node, (N.And, N.Or)):
+                for child in node.subs:
+                    normalize_condition(child)
+            elif isinstance(node, N.Not):
+                normalize_condition(node.sub)
+        normalize_condition(where)
+        if projection is not None:
+            projection = [path.removeprefix(collection + ".") for path in projection]
         return N.Select(collection=collection, projection=projection,
                         joins=joins, where=where, limit=limit, skip=skip)
 
@@ -253,7 +328,7 @@ class NexoraQLTransformer(Transformer):
         return list(items)
 
     def inc_pair(self, ch):
-        return N.UpdateOpItem(op="inc", field=ch[0], value=_num(_tok(ch[1])))
+        return N.UpdateOpItem(op="inc", field=ch[0], value=self._numeric(ch[1]))
 
     def inc_op(self, pairs):
         return list(pairs)
@@ -271,7 +346,7 @@ class NexoraQLTransformer(Transformer):
         return [N.UpdateOpItem(op="add_to_set", field=ch[0], value=ch[1])]
 
     def mul_pair(self, ch):
-        return N.UpdateOpItem(op="mul", field=ch[0], value=_num(_tok(ch[1])))
+        return N.UpdateOpItem(op="mul", field=ch[0], value=self._numeric(ch[1]))
 
     def mul_op(self, pairs):
         return list(pairs)
@@ -515,8 +590,8 @@ class NexoraQLTransformer(Transformer):
         node_id = ch[1]
         direction = ch[2]
         edge_type = ch[3]
-        depth = int(_tok(ch[4]))
-        limit = int(_tok(ch[5])) if len(ch) > 5 else 100
+        depth = self._integer(ch[4])
+        limit = self._integer(ch[5]) if len(ch) > 5 else 100
         return N.Traverse(node_type=node_type, node_id=node_id,
                           direction=direction, edge_type=edge_type,
                           depth=depth, limit=limit)
@@ -548,8 +623,8 @@ class NexoraQLTransformer(Transformer):
         for item in ch[2:]:
             if isinstance(item, tuple) and item[0] == "with":
                 params = item[1]
-            elif isinstance(item, Token):
-                limit = int(_tok(item))
+            else:
+                limit = self._integer(item)
         return N.RunLock(algo=algo, graph=graph, params=params, limit=limit)
 
     def run_job(self, ch):
@@ -559,8 +634,8 @@ class NexoraQLTransformer(Transformer):
         for item in ch[2:]:
             if isinstance(item, tuple) and item[0] == "with":
                 params = item[1]
-            elif isinstance(item, Token):
-                top = int(_tok(item))
+            else:
+                top = self._integer(item)
         return N.RunJob(algo=algo, graph=graph, params=params, returns_top=top)
 
     def job_status(self, ch):
