@@ -5,8 +5,8 @@
 namespace nexora::query {
 
 CompiledFieldPath::CompiledFieldPath(std::string_view path) {
-    if (path.empty()) {
-        error_ = "field path is empty";
+    if (path.empty() || path.find('\0') != std::string_view::npos) {
+        error_ = "field path is empty or contains NUL";
         return;
     }
     std::size_t start = 0;

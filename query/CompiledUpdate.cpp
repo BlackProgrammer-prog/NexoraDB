@@ -1,4 +1,5 @@
 #include "CompiledUpdate.h"
+#include "NumericCompare.h"
 
 #include <nlohmann/json.hpp>
 
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <limits>
 #include <system_error>
+#include <stdexcept>
 
 namespace nexora::query {
 namespace {
@@ -114,7 +116,7 @@ Json* ResolveParent(Json& root, const std::vector<std::string>& components,
     for (std::size_t i = 0; i + 1 < components.size(); ++i) {
         if (!current->is_object()) {
             if (!create) return nullptr;
-            *current = Json::object();
+            throw std::invalid_argument("Update path traverses a non-object");
         }
         auto found = current->find(components[i]);
         if (found == current->end()) {
@@ -123,7 +125,7 @@ Json* ResolveParent(Json& root, const std::vector<std::string>& components,
         }
         if (!found->is_object()) {
             if (!create) return nullptr;
-            *found = Json::object();
+            throw std::invalid_argument("Update path traverses a non-object");
         }
         current = &*found;
     }
@@ -170,11 +172,21 @@ CompiledUpdate::CompiledUpdate(const UpdateSpec& spec) {
             error_ = operation.path.error();
             return;
         }
+        if (operation.path.components().front() == "_id") {
+            error_ = "Document _id is immutable";
+            return;
+        }
 
         if (source.op == UpdateOp::Rename) {
             operation.rename_path = CompiledFieldPath(source.value);
             if (!operation.rename_path.valid()) {
                 error_ = operation.rename_path.error();
+                return;
+            }
+            if (operation.rename_path.components().front() == "_id" ||
+                source.value == source.field || source.value.starts_with(source.field + ".") ||
+                source.field.starts_with(source.value + ".")) {
+                error_ = "Invalid overlapping or immutable rename path";
                 return;
             }
         } else if (source.op != UpdateOp::Unset &&
@@ -183,6 +195,12 @@ CompiledUpdate::CompiledUpdate(const UpdateSpec& spec) {
                    source.op != UpdateOp::PullAll) {
             if (!ParseValue(source.value, source.value_type,
                             operation.value, error_)) return;
+        }
+        if ((source.op == UpdateOp::Inc || source.op == UpdateOp::Mul ||
+             source.op == UpdateOp::Min || source.op == UpdateOp::Max) &&
+            !operation.value.is_number()) {
+            error_ = "Numeric update requires a numeric operand";
+            return;
         }
 
         if (source.op == UpdateOp::PushAll ||
@@ -202,6 +220,7 @@ CompiledUpdate::CompiledUpdate(const UpdateSpec& spec) {
 CompiledUpdate::Result CompiledUpdate::ApplyJson(
         std::string_view json_document) const {
     if (!valid()) return {false, {}, error_};
+    try {
     Json document = Json::parse(json_document, nullptr, false);
     if (document.is_discarded() || !document.is_object()) {
         return {false, {}, "update input is not a valid JSON object"};
@@ -230,6 +249,12 @@ CompiledUpdate::Result CompiledUpdate::ApplyJson(
             case UpdateOp::Inc:
             case UpdateOp::Mul: {
                 Json* current = FindValue(document, path);
+                if (current && !current->is_number())
+                    return {false, {}, "Numeric update target is not a number"};
+                if (current && current->is_number_unsigned() &&
+                    current->get<std::uint64_t>() > static_cast<std::uint64_t>(
+                            std::numeric_limits<std::int64_t>::max()))
+                    return {false, {}, "Numeric update target exceeds Int64"};
                 const bool integer_result = operation.value.is_number_integer() &&
                         (!current || current->is_number_integer());
                 if (integer_result) {
@@ -263,15 +288,32 @@ CompiledUpdate::Result CompiledUpdate::ApplyJson(
             case UpdateOp::Min:
             case UpdateOp::Max: {
                 Json* current = FindValue(document, path);
+                if (current && !current->is_number())
+                    return {false, {}, "MIN/MAX target is not a number"};
                 if (!current || !current->is_number() ||
                     !operation.value.is_number()) {
                     if (!current) SetValue(document, path, operation.value);
                     break;
                 }
-                const double existing = current->get<double>();
-                const double candidate = operation.value.get<double>();
-                if ((operation.op == UpdateOp::Min && candidate < existing) ||
-                    (operation.op == UpdateOp::Max && candidate > existing)) {
+                if (current->is_number_unsigned() && current->get<std::uint64_t>() >
+                    static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                    return {false, {}, "MIN/MAX target exceeds Int64"};
+                int order = 0; // candidate relative to existing
+                if (current->is_number_integer() && operation.value.is_number_integer()) {
+                    const auto existing = current->get<std::int64_t>();
+                    const auto candidate = operation.value.get<std::int64_t>();
+                    order = candidate < existing ? -1 : (candidate > existing ? 1 : 0);
+                } else if (current->is_number_integer()) {
+                    order = -CompareIntDouble(current->get<std::int64_t>(), operation.value.get<double>());
+                } else if (operation.value.is_number_integer()) {
+                    order = CompareIntDouble(operation.value.get<std::int64_t>(), current->get<double>());
+                } else {
+                    const auto existing = current->get<double>();
+                    const auto candidate = operation.value.get<double>();
+                    order = candidate < existing ? -1 : (candidate > existing ? 1 : 0);
+                }
+                if ((operation.op == UpdateOp::Min && order < 0) ||
+                    (operation.op == UpdateOp::Max && order > 0)) {
                     SetValue(document, path, operation.value);
                 }
                 break;
@@ -287,7 +329,9 @@ CompiledUpdate::Result CompiledUpdate::ApplyJson(
             case UpdateOp::Push:
             case UpdateOp::AddToSet: {
                 Json* array = FindValue(document, path);
-                if (!array || !array->is_array()) {
+                if (array && !array->is_array())
+                    return {false, {}, "Array update target is not an array"};
+                if (!array) {
                     SetValue(document, path, Json::array());
                     array = FindValue(document, path);
                 }
@@ -300,7 +344,9 @@ CompiledUpdate::Result CompiledUpdate::ApplyJson(
             }
             case UpdateOp::PushAll: {
                 Json* array = FindValue(document, path);
-                if (!array || !array->is_array()) {
+                if (array && !array->is_array())
+                    return {false, {}, "Array update target is not an array"};
+                if (!array) {
                     SetValue(document, path, Json::array());
                     array = FindValue(document, path);
                 }
@@ -311,7 +357,9 @@ CompiledUpdate::Result CompiledUpdate::ApplyJson(
             case UpdateOp::Pull:
             case UpdateOp::PullAll: {
                 Json* array = FindValue(document, path);
-                if (!array || !array->is_array()) break;
+                if (array && !array->is_array())
+                    return {false, {}, "Array update target is not an array"};
+                if (!array) break;
                 array->erase(std::remove_if(
                         array->begin(), array->end(),
                         [&](const Json& item) {
@@ -325,7 +373,9 @@ CompiledUpdate::Result CompiledUpdate::ApplyJson(
             }
             case UpdateOp::Pop: {
                 Json* array = FindValue(document, path);
-                if (!array || !array->is_array() || array->empty()) break;
+                if (array && !array->is_array())
+                    return {false, {}, "Array update target is not an array"};
+                if (!array || array->empty()) break;
                 const bool from_end = operation.value.is_number_integer()
                         ? operation.value.get<std::int64_t>() != -1 : true;
                 if (from_end) array->erase(array->end() - 1);
@@ -336,6 +386,9 @@ CompiledUpdate::Result CompiledUpdate::ApplyJson(
     }
 
     return {true, document.dump(), {}};
+    } catch (const std::exception& exception) {
+        return {false, {}, std::string("Invalid update: ") + exception.what()};
+    }
 }
 
 } // namespace nexora::query
