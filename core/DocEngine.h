@@ -97,13 +97,14 @@ namespace nexora {
             bool        success   = false;
             std::string data      = "";  ///< JSON یا scalar متنی در API عمومی
             std::string error_msg = "";
+            std::string error_code = "";
 
             /// سازنده‌های کمکی برای راحتی ساخت نتیجه
             static DBResult Ok(std::string payload = "") {
-                return {true, std::move(payload), ""};
+                return {true, std::move(payload), "", ""};
             }
-            static DBResult Err(std::string msg) {
-                return {false, "", std::move(msg)};
+            static DBResult Err(std::string msg, std::string code = "operation_failed") {
+                return {false, "", std::move(msg), std::move(code)};
             }
         };
 
@@ -1083,6 +1084,8 @@ namespace nexora {
                                               std::string&       username_out,
                                               std::string&       error_out) const;
 
+            bool ApplyInsertDefaults(std::string& document, const SchemaDefinition& schema,
+                                     std::string& error) const;
             bool ValidateDocument(const std::string&      bson_document,
                                   const SchemaDefinition& schema,
                                   std::string&            error_out) const;

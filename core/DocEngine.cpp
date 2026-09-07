@@ -23,6 +23,7 @@
 #include "query/CompiledQuery.h"
 #include "query/CompiledUpdate.h"
 #include "query/DocumentView.h"
+#include <nlohmann/json.hpp>
 
 // RocksDB
 #include <rocksdb/db.h>
@@ -127,7 +128,11 @@ namespace nexora {
                 if (!view.valid()) {
                     return rocksdb::Status::Corruption("invalid BSON document");
                 }
-                matched = query.Match(view);
+                try {
+                    matched = query.Match(view);
+                } catch (const std::exception& exception) {
+                    return rocksdb::Status::Aborted("Query evaluation failed", exception.what());
+                }
                 return rocksdb::Status::OK();
             }
 
@@ -2038,6 +2043,64 @@ namespace nexora {
 // §8  متدهای کمکی Validation
 // ══════════════════════════════════════════════════════════════
 
+        bool DocEngine::ApplyInsertDefaults(std::string& document,
+                                           const SchemaDefinition& schema,
+                                           std::string& error) const {
+            const auto validated = DocumentCodec::EncodeJson(document);
+            if (!validated.success) {
+                error = validated.error;
+                return false;
+            }
+            const query::DocumentView view(std::string_view(validated.value).substr(DocumentCodec::kEnvelopeSize));
+            const auto identity = view.Get(query::CompiledFieldPath("_id"));
+            if (identity.found() && (identity.type != query::DocumentValueType::String ||
+                                    identity.string_value.empty() || identity.string_value.size() > 1024)) {
+                error = "Document _id must be a nonempty string of at most 1 KiB";
+                return false;
+            }
+            if (identity.found() && std::none_of(schema.fields.begin(), schema.fields.end(),
+                            [](const SchemaField& field) { return field.default_val.has_value(); }))
+                return true;
+            auto parsed = nlohmann::ordered_json::parse(document, nullptr, false);
+            if (!parsed.is_object()) {
+                error = "Default input must be a JSON object";
+                return false;
+            }
+            for (const auto& field : schema.fields) {
+                if (!field.default_val) continue;
+                const query::CompiledFieldPath path(field.name);
+                if (!path.valid()) { error = path.error(); return false; }
+                auto* parent = &parsed;
+                const auto& components = path.components();
+                for (std::size_t i = 0; i + 1 < components.size(); ++i) {
+                    if (!parent->contains(components[i]))
+                        (*parent)[components[i]] = nlohmann::ordered_json::object();
+                    parent = &(*parent)[components[i]];
+                    if (!parent->is_object()) {
+                        error = "Default path traverses a non-object: " + field.name;
+                        return false;
+                    }
+                }
+                if (parent->contains(components.back())) continue; // Null is not missing.
+                auto value = nlohmann::ordered_json::parse(*field.default_val, nullptr, false);
+                if (value.is_discarded()) {
+                    if (field.type != FieldType::String) {
+                        error = "Invalid JSON schema default: " + field.name;
+                        return false;
+                    }
+                    value = *field.default_val; // Legacy native plain-string default.
+                }
+                (*parent)[components.back()] = std::move(value);
+            }
+            if (!parsed.contains("_id")) parsed["_id"] = GenerateDocId();
+            if (!parsed["_id"].is_string() || parsed["_id"].get_ref<const std::string&>().empty()) {
+                error = "Default _id must be a nonempty string";
+                return false;
+            }
+            document = parsed.dump();
+            return true;
+        }
+
         bool DocEngine::ValidateDocument(const std::string&      bson_document,
                                          const SchemaDefinition& schema,
                                          std::string&            error_out) const {
@@ -2059,9 +2122,54 @@ namespace nexora {
                     error_out = path.error();
                     return false;
                 }
-                if (field.required && !document_view.Get(path).found()) {
+                const auto value = document_view.Get(path);
+                if (field.required && !value.found()) {
                     error_out = "Required field '" + field.name + "' is missing";
                     return false;
+                }
+                if (!value.found()) continue;
+                using Type = query::DocumentValueType;
+                bool compatible = false;
+                switch (field.type) {
+                    case FieldType::String: compatible = value.type == Type::String; break;
+                    case FieldType::Int32:
+                        compatible = value.type == Type::Int64 &&
+                                     value.int_value >= std::numeric_limits<std::int32_t>::min() &&
+                                     value.int_value <= std::numeric_limits<std::int32_t>::max();
+                        break;
+                    case FieldType::Int64: compatible = value.type == Type::Int64; break;
+                    case FieldType::Float64: compatible = value.type == Type::Float64; break;
+                    case FieldType::Bool: compatible = value.type == Type::Bool; break;
+                    case FieldType::Array: compatible = value.type == Type::Array; break;
+                    case FieldType::Object: compatible = value.type == Type::Document; break;
+                    case FieldType::Binary: compatible = value.type == Type::Binary; break;
+                    case FieldType::Null: compatible = value.type == Type::Null; break;
+                }
+                if (!compatible) {
+                    error_out = "Schema type mismatch for field '" + field.name + "'";
+                    return false;
+                }
+            }
+            if (schema.strict) {
+                bson_t document;
+                const auto payload = std::string_view(encoded_document.value).substr(DocumentCodec::kEnvelopeSize);
+                if (!bson_init_static(&document, reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size())) {
+                    error_out = "Invalid BSON schema input";
+                    return false;
+                }
+                bson_iter_t iterator;
+                bson_iter_init(&iterator, &document);
+                while (bson_iter_next(&iterator)) {
+                    const std::string_view key(bson_iter_key(&iterator));
+                    if (key == "_id") continue;
+                    const bool known = std::any_of(schema.fields.begin(), schema.fields.end(),
+                            [&](const SchemaField& field) {
+                                return key == std::string_view(field.name).substr(0, field.name.find('.'));
+                            });
+                    if (!known) {
+                        error_out = "Unknown field in strict schema: " + std::string(key);
+                        return false;
+                    }
                 }
             }
             return true;
@@ -2073,7 +2181,8 @@ namespace nexora {
 
         DBResult DocEngine::InsertOne(
                 const std::string& collection_name,
-                const std::string& bson_document) {
+                const std::string& input_document) {
+            std::string bson_document = input_document;
             TouchUserActivity();
             std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name)) {
@@ -2099,7 +2208,11 @@ namespace nexora {
                         status);
             }
 
-            if (!metadata.schema.fields.empty()) {
+            std::string default_error;
+            if (!ApplyInsertDefaults(bson_document, metadata.schema, default_error))
+                return DBResult::Err(default_error, "validation_failed");
+
+            if (metadata.schema.strict || !metadata.schema.fields.empty()) {
                 std::string validation_error;
 
                 if (!ValidateDocument(
@@ -2232,8 +2345,11 @@ namespace nexora {
             std::vector<std::string> created_ids;
             created_ids.reserve(bson_documents.size());
 
-            for (const auto& bson : bson_documents) {
-                if (!metadata.schema.fields.empty()) {
+            for (auto bson : bson_documents) {
+                std::string default_error;
+                if (!ApplyInsertDefaults(bson, metadata.schema, default_error))
+                    return DBResult::Err(default_error, "validation_failed");
+                if (metadata.schema.strict || !metadata.schema.fields.empty()) {
                     std::string validation_error;
                     if (!ValidateDocument(
                             bson,
@@ -2422,7 +2538,7 @@ namespace nexora {
                                              &bson);
             if (s.IsNotFound())
                 return DBResult::Err("Document '" + doc_id + "' not found in '" +
-                                     collection_name + "'");
+                                     collection_name + "'", "not_found");
             ROCKS_CHECK(s, "FindById");
             std::string json;
             s = DecodeStoredDocument(bson, json);
@@ -2506,7 +2622,12 @@ namespace nexora {
                     return true;
                 }
                 ++execution.scanned_documents;
-                if (!compiled_query.Match(document_view)) return false;
+                try {
+                    if (!compiled_query.Match(document_view)) return false;
+                } catch (const std::exception& exception) {
+                    decode_status = rocksdb::Status::Aborted("Query evaluation failed", exception.what());
+                    return true;
+                }
                 ++execution.matched_documents;
                 if (skipped < skip) { ++skipped; return false; }
                 std::string document;
@@ -2839,7 +2960,7 @@ namespace nexora {
             if (!status.ok())
                 return RocksFailure("UpdateById apply update", status);
 
-            if (!metadata.schema.fields.empty()) {
+            if (metadata.schema.strict || !metadata.schema.fields.empty()) {
                 std::string validation_error;
                 if (!ValidateDocument(
                         new_document,
@@ -2987,7 +3108,7 @@ namespace nexora {
                 if (!status.ok())
                     return RocksFailure("UpdateMany apply update", status);
 
-                if (!metadata.schema.fields.empty()) {
+                if (metadata.schema.strict || !metadata.schema.fields.empty()) {
                     std::string validation_error;
                     if (!ValidateDocument(
                             new_document,
@@ -3500,12 +3621,10 @@ namespace nexora {
                                           const DocumentCallback& callback,
                                           uint32_t                batch_size) const {
             if (IsReservedCollectionName(collection_name)) {
-                NX_LOG("IterateCollection: reserved collection name");
-                return;
+                throw std::runtime_error("IterateCollection: reserved collection name");
             }
             if (!CollectionExists(collection_name)) {
-                NX_LOG("IterateCollection: '" << collection_name << "' not found");
-                return;
+                throw std::runtime_error("IterateCollection: collection not found: " + collection_name);
             }
 
             std::string data_prefix = std::string(keys::kData) + collection_name + ":";
@@ -3514,6 +3633,9 @@ namespace nexora {
             rocksdb::ReadOptions ro;
             ro.fill_cache       = false;
             ro.total_order_seek = true;
+            const std::string upper_value = PrefixUpperBound(data_prefix);
+            const rocksdb::Slice upper_bound(upper_value);
+            ro.iterate_upper_bound = &upper_bound;
 
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
 
@@ -3525,13 +3647,13 @@ namespace nexora {
                 const rocksdb::Status decode_status = DecodeStoredDocument(
                         it->value().ToString(), bson_data);
                 if (!decode_status.ok()) {
-                    NX_LOG("IterateCollection decode failed: "
-                           << decode_status.ToString());
-                    break;
+                    throw std::runtime_error("IterateCollection decode: " + decode_status.ToString());
                 }
 
                 if (!callback(doc_id, bson_data)) break;  // early exit
             }
+            if (!it->status().ok())
+                throw std::runtime_error("IterateCollection scan: " + it->status().ToString());
 
             // batch_size برای آینده (yield/throttle) نگه داشته شده
             (void)batch_size;
@@ -3687,6 +3809,10 @@ namespace nexora {
 
             std::string data_prefix = std::string(keys::kData) + from_collection + ":";
             rocksdb::ReadOptions ro;
+            ro.fill_cache = false;
+            const std::string upper_value = PrefixUpperBound(data_prefix);
+            const rocksdb::Slice upper_bound(upper_value);
+            ro.iterate_upper_bound = &upper_bound;
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
             uint32_t count = 0;
 
@@ -3708,48 +3834,76 @@ namespace nexora {
                     result.error_msg = decode_status.ToString();
                     return result;
                 }
-                std::string join_val = ExtractField(from_bson, from_field);
-                if (join_val.empty()) continue;
-
-                std::string to_bson;
+                const auto encoded = DocumentCodec::EncodeJson(from_bson);
+                if (!encoded.success) {
+                    result.error_msg = encoded.error;
+                    return result;
+                }
+                const query::DocumentView source_view(std::string_view(encoded.value).substr(
+                        DocumentCodec::kEnvelopeSize));
+                const query::CompiledFieldPath path(from_field);
+                if (!path.valid()) {
+                    result.error_msg = path.error();
+                    return result;
+                }
+                const auto value = source_view.Get(path);
+                query::ValueType value_type;
+                switch (value.type) {
+                    case query::DocumentValueType::String: value_type = query::ValueType::String; break;
+                    case query::DocumentValueType::Int64: value_type = query::ValueType::Int64; break;
+                    case query::DocumentValueType::Float64: value_type = query::ValueType::Float64; break;
+                    case query::DocumentValueType::Bool: value_type = query::ValueType::Bool; break;
+                    default: continue; // Null/missing/containers do not join.
+                }
+                const std::string join_val = ScalarToString(value);
+                std::string to_json;
                 if (to_field == "_id") {
+                    if (value_type != query::ValueType::String) continue;
+                    std::string to_bson;
                     rocksdb::Status s = txn_db_->Get(read_options_,
                                                      MakeDocKey(to_collection, join_val),
                                                      &to_bson);
-                    if (!s.ok()) continue;
+                    if (s.IsNotFound()) continue;
+                    if (!s.ok()) {
+                        result.error_msg = s.ToString();
+                        return result;
+                    }
+                    decode_status = DecodeStoredDocument(to_bson, to_json);
+                    if (!decode_status.ok()) {
+                        result.error_msg = decode_status.ToString();
+                        return result;
+                    }
                 } else {
-                    std::string idx_prefix = std::string(keys::kIdx) + to_collection +
-                                             ":" + to_field + ":" + join_val + ":";
-                    rocksdb::ReadOptions ro2;
-                    auto it2 = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro2));
-                    it2->Seek(idx_prefix);
-                    if (!it2->Valid() || !it2->key().starts_with(idx_prefix)) continue;
-                    std::string ref_id = it2->value().ToString();
-                    rocksdb::Status s = txn_db_->Get(read_options_,
-                                                     MakeDocKey(to_collection, ref_id),
-                                                     &to_bson);
-                    if (!s.ok()) continue;
+                    const auto joined = FindMany(to_collection, query::Condition::Leaf(
+                            to_field, query::Op::EQ, join_val, value_type), 1, 0);
+                    if (!joined.success) {
+                        result.error_msg = joined.error_msg;
+                        return result;
+                    }
+                    const auto rows = nlohmann::ordered_json::parse(joined.data, nullptr, false);
+                    if (!rows.is_array()) {
+                        result.error_msg = "Invalid JOIN result representation";
+                        return result;
+                    }
+                    if (rows.empty()) continue;
+                    to_json = rows.front().dump();
                 }
-
-                std::string to_json;
-                decode_status = DecodeStoredDocument(to_bson, to_json);
-                if (!decode_status.ok()) {
-                    result.error_msg = decode_status.ToString();
+                auto merged = nlohmann::ordered_json::parse(from_bson, nullptr, false);
+                const auto target = nlohmann::ordered_json::parse(to_json, nullptr, false);
+                if (!merged.is_object() || !target.is_object()) {
+                    result.error_msg = "Invalid JOIN document representation";
                     return result;
                 }
-                to_bson = std::move(to_json);
-
-                // Merge: from_bson + field "__joined__"
-                std::string merged = from_bson;
-                if (!merged.empty() && merged.back() == '}') {
-                    merged.pop_back();
-                    merged += ",\"__joined__\":" + to_bson + "}";
-                }
-                result.records.push_back(std::move(merged));
+                merged["__joined__"] = target;
+                result.records.push_back(merged.dump());
                 ++count;
                 if (limit > 0 && count >= limit) break;
             }
 
+            if (!it->status().ok()) {
+                result.error_msg = it->status().ToString();
+                return result;
+            }
             result.success = true;
             return result;
         }
@@ -3798,7 +3952,8 @@ namespace nexora {
 
         DBResult DocEngine::InsertOneTx(TxHandle&          tx_handle,
                                         const std::string& collection_name,
-                                        const std::string& bson_document) {
+                                        const std::string& input_document) {
+            std::string bson_document = input_document;
             if (!tx_handle.IsValid()) return DBResult::Err("Invalid transaction");
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
@@ -3814,7 +3969,11 @@ namespace nexora {
             if (!status.ok())
                 return RocksFailure("InsertOneTx metadata", status);
 
-            if (!metadata.schema.fields.empty()) {
+            std::string default_error;
+            if (!ApplyInsertDefaults(bson_document, metadata.schema, default_error))
+                return DBResult::Err(default_error, "validation_failed");
+
+            if (metadata.schema.strict || !metadata.schema.fields.empty()) {
                 std::string validation_error;
                 if (!ValidateDocument(
                         bson_document,
@@ -3921,7 +4080,7 @@ namespace nexora {
             if (!status.ok())
                 return RocksFailure("UpdateByIdTx apply update", status);
 
-            if (!metadata.schema.fields.empty()) {
+            if (metadata.schema.strict || !metadata.schema.fields.empty()) {
                 std::string validation_error;
                 if (!ValidateDocument(
                         new_document,
@@ -4030,7 +4189,7 @@ namespace nexora {
             std::string doc_key = MakeDocKey(collection_name, doc_id);
             std::string bson;
             rocksdb::Status s = tx_handle.Get()->Get(read_options_, doc_key, &bson);
-            if (s.IsNotFound()) return DBResult::Err("Document not found: " + doc_id);
+            if (s.IsNotFound()) return DBResult::Err("Document not found: " + doc_id, "not_found");
             ROCKS_CHECK(s, "FindByIdTx");
             std::string json;
             s = DecodeStoredDocument(bson, json);
