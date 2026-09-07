@@ -1,4 +1,5 @@
 #include "CompiledQuery.h"
+#include "NumericCompare.h"
 
 #include <algorithm>
 #include <charconv>
@@ -17,19 +18,6 @@ bool ParseNumber(std::string_view text, Number& output) noexcept {
     return result.ec == std::errc{} && result.ptr == end;
 }
 
-double NumericValue(const DocumentValueView& value) noexcept {
-    return value.type == DocumentValueType::Int64
-            ? static_cast<double>(value.int_value) : value.double_value;
-}
-
-double NumericConstant(const std::variant<std::monostate, std::string,
-                                          std::int64_t, double, bool>& value) noexcept {
-    if (const auto* integer = std::get_if<std::int64_t>(&value))
-        return static_cast<double>(*integer);
-    if (const auto* floating = std::get_if<double>(&value)) return *floating;
-    return 0.0;
-}
-
 } // namespace
 
 CompiledQuery::CompiledQuery(const Condition& condition) {
@@ -37,7 +25,7 @@ CompiledQuery::CompiledQuery(const Condition& condition) {
 }
 
 CompiledQuery::Constant CompiledQuery::ParseConstant(
-        std::string_view value, ValueType type, bool& valid) noexcept {
+        std::string_view value, ValueType type, bool& valid) {
     valid = true;
     switch (type) {
         case ValueType::String:
@@ -64,8 +52,12 @@ CompiledQuery::Constant CompiledQuery::ParseConstant(
     return std::monostate{};
 }
 
-CompiledQuery::Node CompiledQuery::Compile(const Condition& condition) {
+CompiledQuery::Node CompiledQuery::Compile(const Condition& condition, std::size_t depth) {
     Node node;
+    if (depth > 64 || ++compiled_nodes_ > 4096) {
+        error_ = "Query complexity limit exceeded";
+        return node;
+    }
     if (condition.IsEmpty()) {
         node.empty = true;
         return node;
@@ -73,8 +65,10 @@ CompiledQuery::Node CompiledQuery::Compile(const Condition& condition) {
     if (condition.IsComposite()) {
         node.logic = condition.logic;
         node.children.reserve(condition.sub_conditions.size());
-        for (const auto& child : condition.sub_conditions)
-            node.children.push_back(Compile(child));
+        for (const auto& child : condition.sub_conditions) {
+            node.children.push_back(Compile(child, depth + 1));
+            if (!error_.empty()) return node;
+        }
         if (node.logic == LogicOp::AND) {
             std::stable_sort(node.children.begin(), node.children.end(),
                              [](const Node& left, const Node& right) {
@@ -190,14 +184,18 @@ bool CompiledQuery::Equal(const DocumentValueView& value,
         if (const auto* integer = std::get_if<std::int64_t>(&constant)) {
             if (value.type == DocumentValueType::Int64)
                 return value.int_value == *integer;
+            return std::isfinite(value.double_value) &&
+                   CompareIntDouble(*integer, value.double_value) == 0;
         }
-        return NumericValue(value) == NumericConstant(constant);
+        if (value.type == DocumentValueType::Int64)
+            return CompareIntDouble(value.int_value, std::get<double>(constant)) == 0;
+        return value.double_value == std::get<double>(constant);
     }
     return false;
 }
 
 bool CompiledQuery::MatchLeaf(const Node& node,
-                              const DocumentValueView& value) noexcept {
+                              const DocumentValueView& value) {
     if (node.op == Op::EXISTS) {
         const bool expected = std::get_if<bool>(&node.constant)
                 ? std::get<bool>(node.constant) : false;
@@ -212,9 +210,10 @@ bool CompiledQuery::MatchLeaf(const Node& node,
             contained = node.string_set.contains(value.string_value);
         } else if (value.type == DocumentValueType::Int64 &&
                    (!node.integer_set.empty() || !node.floating_set.empty())) {
-            contained = node.integer_set.contains(value.int_value) ||
-                    node.floating_set.contains(
-                            static_cast<double>(value.int_value));
+            contained = node.integer_set.contains(value.int_value);
+            const double rounded = static_cast<double>(value.int_value);
+            if (!contained && CompareIntDouble(value.int_value, rounded) == 0)
+                contained = node.floating_set.contains(rounded);
         } else if (value.type == DocumentValueType::Float64 &&
                    (!node.floating_set.empty() || !node.integer_set.empty())) {
             contained = node.floating_set.contains(value.double_value);
@@ -258,9 +257,21 @@ bool CompiledQuery::MatchLeaf(const Node& node,
     if (value.is_number() &&
         (std::holds_alternative<std::int64_t>(node.constant) ||
          std::holds_alternative<double>(node.constant))) {
-        const double left = NumericValue(value);
-        const double right = NumericConstant(node.constant);
-        ordering = left < right ? -1 : (left > right ? 1 : 0);
+        if (value.type == DocumentValueType::Int64) {
+            if (const auto* right = std::get_if<std::int64_t>(&node.constant))
+                ordering = value.int_value < *right ? -1 : (value.int_value > *right ? 1 : 0);
+            else
+                ordering = CompareIntDouble(value.int_value, std::get<double>(node.constant));
+        } else {
+            if (!std::isfinite(value.double_value)) return false;
+            if (const auto* right = std::get_if<std::int64_t>(&node.constant))
+                ordering = -CompareIntDouble(*right, value.double_value);
+            else {
+                const double right_float = std::get<double>(node.constant);
+                ordering = value.double_value < right_float ? -1 :
+                           (value.double_value > right_float ? 1 : 0);
+            }
+        }
     } else if (value.type == DocumentValueType::String) {
         const auto* right = std::get_if<std::string>(&node.constant);
         if (!right) return false;
@@ -280,7 +291,7 @@ bool CompiledQuery::MatchLeaf(const Node& node,
 }
 
 bool CompiledQuery::MatchNode(const Node& node,
-                              const DocumentView& document) noexcept {
+                              const DocumentView& document) {
     if (node.empty) return true;
     if (node.leaf) return MatchLeaf(node, document.Get(node.path));
     switch (node.logic) {
@@ -306,7 +317,7 @@ bool CompiledQuery::MatchNode(const Node& node,
     return false;
 }
 
-bool CompiledQuery::Match(const DocumentView& document) const noexcept {
+bool CompiledQuery::Match(const DocumentView& document) const {
     return valid() && document.valid() && MatchNode(root_, document);
 }
 

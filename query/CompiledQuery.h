@@ -22,7 +22,7 @@ public:
 
     [[nodiscard]] bool valid() const noexcept { return error_.empty(); }
     [[nodiscard]] const std::string& error() const noexcept { return error_; }
-    [[nodiscard]] bool Match(const DocumentView& document) const noexcept;
+    [[nodiscard]] bool Match(const DocumentView& document) const;
 
 private:
     struct TransparentStringHash {
@@ -57,18 +57,19 @@ private:
         std::uint8_t estimated_selectivity = 50;
     };
 
-    Node Compile(const Condition& condition);
+    Node Compile(const Condition& condition, std::size_t depth = 0);
     static Constant ParseConstant(std::string_view value, ValueType type,
-                                  bool& valid) noexcept;
+                                  bool& valid);
     static bool MatchNode(const Node& node,
-                          const DocumentView& document) noexcept;
+                          const DocumentView& document);
     static bool MatchLeaf(const Node& node,
-                          const DocumentValueView& value) noexcept;
+                          const DocumentValueView& value);
     static bool Equal(const DocumentValueView& value,
                       const Constant& constant) noexcept;
 
     Node root_;
     std::string error_;
+    std::size_t compiled_nodes_ = 0;
 };
 
 } // namespace nexora::query
