@@ -156,6 +156,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_readonly("success",   &DBResult::success)
             .def_readonly("data",      &DBResult::data)
             .def_readonly("error_msg", &DBResult::error_msg)
+            .def_readonly("error_code", &DBResult::error_code)
             .def("to_dict", &result_to_dict,
                  "تبدیل به Python dict")
             .def("__bool__", [](const DBResult& r) { return r.success; })
@@ -305,6 +306,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_readwrite("type",        &SchemaField::type)
             .def_readwrite("required",    &SchemaField::required)
             .def_readwrite("unique",      &SchemaField::unique)
+            .def_readwrite("default_val", &SchemaField::default_val)
             .def("__repr__", [](const SchemaField& f) {
                 return "<SchemaField name='" + f.name +
                        "' required=" + (f.required ? "True" : "False") + ">";
