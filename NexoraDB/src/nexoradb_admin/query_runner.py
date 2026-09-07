@@ -14,10 +14,57 @@ from pydantic import BaseModel, Field
 
 _PARSER_PACKAGE_ALIAS = "_nexoradb_admin_nexoraql"
 _MAX_QUERY_LENGTH = 200_000
+_MAX_STATEMENTS = 256
+
+# An application execution scope is not permission to execute arbitrary DDL.
+# Unknown statement types are denied until their access requirements are defined.
+_STATEMENT_SCOPES = {
+    **dict.fromkeys(("Select", "Count", "ExistsStmt"), ("documents:read",)),
+    **dict.fromkeys(("Insert", "InsertBatch", "Update", "Delete"), ("documents:write",)),
+    **dict.fromkeys(("ShowCollections", "CollectionExists", "DescribeCollection",
+                     "ShowIndexes", "ShowForeignKeys"), ("collections:read",)),
+    **dict.fromkeys(("CreateCollection", "DropCollection", "AlterCollection",
+                     "CreateIndex", "DropIndex", "AddForeignKey", "DropForeignKey"),
+                   ("collections:write",)),
+    **dict.fromkeys(("UseGraph", "ShowGraphs", "DescribeGraph", "GraphStatus",
+                     "GraphStats", "Traverse", "GetNode", "EdgeExists", "RunLock"),
+                   ("graphs:read",)),
+    **dict.fromkeys(("CreateGraph", "DropGraph", "BuildGraph", "RenderGraph",
+                     "RefreshGraph"), ("graphs:write", "documents:read")),
+    **dict.fromkeys(("MapNode", "MapEdge"), ("graphs:write", "documents:read")),
+    **dict.fromkeys(("BeginTx", "CommitTx", "RollbackTx"), ()),
+    **dict.fromkeys(("SystemStatus", "SystemInfo"), ("monitoring:read",)),
+}
+
+
+def _authorize_statements(statements: list, granted_scopes: frozenset[str]) -> None:
+    for statement in statements:
+        name = type(statement).__name__
+        required = _STATEMENT_SCOPES.get(name)
+        if required is None or not set(required).issubset(granted_scopes):
+            raise HTTPException(status_code=403, detail={
+                "message": f"Application token is not authorized for {name}"})
+
+
+def _validate_transaction_blocks(statements: list) -> None:
+    active = False
+    for statement in statements:
+        name = type(statement).__name__
+        if name == "BeginTx":
+            if active:
+                raise HTTPException(status_code=400, detail="Nested transactions are not supported")
+            active = True
+        elif name in {"CommitTx", "RollbackTx"}:
+            if not active:
+                raise HTTPException(status_code=400, detail="No active transaction")
+            active = False
+    if active:
+        raise HTTPException(status_code=400, detail="Transactions must finish in the same HTTP request")
 
 
 class QueryExecuteRequest(BaseModel):
     query: str = Field(min_length=1, max_length=_MAX_QUERY_LENGTH)
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class QueryExecuteResponse(BaseModel):
@@ -55,6 +102,7 @@ def execute_query(
     engine: Any,
     graph_manager: Any | None,
     payload: QueryExecuteRequest,
+    granted_scopes: frozenset[str] | None = None,
 ) -> QueryExecuteResponse:
     query = _normalize_query(payload.query)
     nexoraql = _load_nexoraql_package()
@@ -62,9 +110,17 @@ def execute_query(
 
     started_at = time.perf_counter()
     try:
-        statement_results = executor.execute_text(query)
+        statements = nexoraql.parse(query, payload.parameters)
+        if len(statements) > _MAX_STATEMENTS:
+            raise HTTPException(status_code=400, detail="Too many query statements")
+        _validate_transaction_blocks(statements)
+        if granted_scopes is not None:
+            _authorize_statements(statements, granted_scopes)
+        statement_results = executor.execute_statements(statements)
     except Exception as exc:
         _raise_query_error(exc, nexoraql)
+    finally:
+        executor.abort_transaction()
     execution_time_ms = max(0, round((time.perf_counter() - started_at) * 1000))
 
     rows = _rows_from_results(statement_results)
