@@ -1001,7 +1001,10 @@ class NexoraQLScenarioTests(unittest.TestCase):
         self.assertEqual(joined_posts["documents"][0]["__joined__"][0]["_id"], "u1")
 
         # Query TCL: commit a transaction and verify the inserted document is visible.
-        tx_commit = self.execute("""
+        # Transactional graph projection is deliberately rejected until the
+        # durable change-stream integration exists. Exercise document-only Tx.
+        tx_executor = Executor(self.engine)
+        tx_commit = tx_executor.execute_text("""
             BEGIN TRANSACTION;
             INSERT INTO posts VALUES ('{"_id":"p_tx_commit","title":"Committed","author_id":"u1","likes":0}');
             COMMIT;
@@ -1012,7 +1015,7 @@ class NexoraQLScenarioTests(unittest.TestCase):
         self.assertTrue(committed_exists["exists"])
 
         # Query TCL: rollback a transaction and verify the inserted document is gone.
-        tx_rollback = self.execute("""
+        tx_rollback = tx_executor.execute_text("""
             BEGIN TRANSACTION;
             INSERT INTO posts VALUES ('{"_id":"p_tx_rollback","title":"Rolled back","author_id":"u1","likes":0}');
             ROLLBACK;
