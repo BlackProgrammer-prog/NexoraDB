@@ -37,6 +37,10 @@ void BulkGraphBuilder::flush() {
     std::unique_lock lock(graph_.mutex_); // Exactly one graph lock per batch.
     auto& g=graph_;
     if (g.bulk_failed_) throw std::runtime_error("graph requires reopen after failed bulk ingestion");
+    size_t text=0;
+    for (const auto& node:nodes_) text+=node.id.size()+node.type.size();
+    for (const auto& edge:edges_) text+=edge.src.size()+edge.dst.size()+edge.type.size();
+    g.admitMemory(nodes_.size()+2*edges_.size(),edges_.size(),text);
     try {
         std::vector<WalRecord> redo;
         std::vector<GraphStorage::Identity> identities;
