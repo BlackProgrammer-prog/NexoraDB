@@ -43,6 +43,9 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <memory>
+#include <utility>
+#include "SmallAdjVector.h"
 
 namespace nexora {
     namespace graph {
@@ -262,18 +265,36 @@ namespace nexora {
             bool in_heavy  = false;
 
             // normal mode
-            std::vector<AdjEntry> out_edges;  ///< یال‌های خروجی (sorted by neighbor)
-            std::vector<AdjEntry> in_edges;   ///< یال‌های ورودی
+            SmallAdjVector<AdjEntry> out_edges;
+            SmallAdjVector<AdjEntry> in_edges;
 
             // heavy mode
-            ChunkedSortedVector heavy_out;
-            ChunkedSortedVector heavy_in;
+            std::unique_ptr<ChunkedSortedVector> heavy_out;
+            std::unique_ptr<ChunkedSortedVector> heavy_in;
+            NodeAdj()=default;
+            NodeAdj(NodeAdj&& rhs) noexcept:
+                out_heavy(std::exchange(rhs.out_heavy,false)),in_heavy(std::exchange(rhs.in_heavy,false)),
+                out_edges(std::move(rhs.out_edges)),in_edges(std::move(rhs.in_edges)),
+                heavy_out(std::move(rhs.heavy_out)),heavy_in(std::move(rhs.heavy_in)) {}
+            NodeAdj& operator=(NodeAdj&& rhs) noexcept {
+                if (this!=&rhs) {
+                    out_heavy=std::exchange(rhs.out_heavy,false); in_heavy=std::exchange(rhs.in_heavy,false);
+                    out_edges=std::move(rhs.out_edges); in_edges=std::move(rhs.in_edges);
+                    heavy_out=std::move(rhs.heavy_out); heavy_in=std::move(rhs.heavy_in);
+                }
+                return *this;
+            }
+            NodeAdj(const NodeAdj& rhs):out_heavy(rhs.out_heavy),in_heavy(rhs.in_heavy),
+                out_edges(rhs.out_edges),in_edges(rhs.in_edges),
+                heavy_out(rhs.heavy_out ? std::make_unique<ChunkedSortedVector>(*rhs.heavy_out) : nullptr),
+                heavy_in(rhs.heavy_in ? std::make_unique<ChunkedSortedVector>(*rhs.heavy_in) : nullptr) {}
+            NodeAdj& operator=(const NodeAdj& rhs) { if (this!=&rhs) { NodeAdj copy(rhs); *this=std::move(copy); } return *this; }
 
             size_t out_degree() const noexcept {
-                return out_heavy ? heavy_out.size() : out_edges.size();
+                return out_heavy ? heavy_out->size() : out_edges.size();
             }
             size_t in_degree() const noexcept {
-                return in_heavy ? heavy_in.size() : in_edges.size();
+                return in_heavy ? heavy_in->size() : in_edges.size();
             }
 
             void addOut(const AdjEntry& e);
