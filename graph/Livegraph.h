@@ -40,6 +40,7 @@
 
 namespace nexora {
     namespace graph {
+        class BulkGraphBuilder;
 
 /**
  * @class DenseIdMap
@@ -132,6 +133,7 @@ namespace nexora {
              * @return تعداد entries replay شده
              */
             size_t replayWAL();
+            bool checkpointWAL();
 
             // ──────────────────────────────────────────────────────────
             // §2  CRUD — Node
@@ -323,6 +325,8 @@ namespace nexora {
             void clear();
 
         private:
+            friend class BulkGraphBuilder;
+            bool bulk_failed_=false;
             std::string    name_;
             GraphStorage*  storage_;  ///< owned by GraphManager
             GraphWAL*      wal_;      ///< owned by GraphManager
@@ -369,6 +373,10 @@ namespace nexora {
             /// دیسک: نوشتن NodeRecord (اگر storage_ وجود دارد)
             void persistNode(const NodeRecord& rec);
             void persistEdge(const EdgeRecord& rec);
+            void finishWal(uint64_t seq);
+            uint64_t appendWal(WalOpType op, uint64_t id, uint64_t src = 0,
+                               uint64_t dst = 0, uint32_t type = 0, uint32_t flags = 0);
+            void rebuildReplayState();
 
             /// حذف edges مرتبط با یک node (برای cascade delete)
             void removeAllEdgesOfNode(DenseId dense_id);
