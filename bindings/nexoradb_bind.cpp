@@ -1369,6 +1369,35 @@ PYBIND11_MODULE(nexoradb, m) {
                 return gm.startup();
             }, "بارگذاری گراف‌ها در startup")
             .def("shutdown", &GraphManager::shutdown, "بستن همه گراف‌ها")
+            .def("set_memory_budget", [](GraphManager& gm,const std::string& name,size_t bytes) {
+                auto* graph=gm.getLiveGraph(name);
+                if (!graph) throw std::invalid_argument("graph not loaded");
+                graph->setMemoryBudget(bytes);
+            },py::arg("graph_name"),py::arg("bytes"))
+            .def("memory_usage", [](const GraphManager& gm,const std::string& name) {
+                const auto* graph=gm.getLiveGraph(name);
+                if (!graph) throw std::invalid_argument("graph not loaded");
+                const auto usage=graph->memoryUsage(); py::dict result;
+                result["object_bytes"]=usage.object_bytes;
+                result["node_records_bytes"]=usage.node_records_bytes;
+                result["adjacency_headers_bytes"]=usage.adjacency_headers_bytes;
+                result["adjacency_payload_bytes"]=usage.adjacency_payload_bytes;
+                result["edge_store_bytes"]=usage.edge_store_bytes;
+                result["reverse_identity_bytes"]=usage.reverse_identity_bytes;
+                result["forward_identity_bytes_estimate"]=usage.forward_identity_bytes_estimate;
+                result["type_registry_bytes_estimate"]=usage.type_registry_bytes_estimate;
+                result["free_ids_bytes_estimate"]=usage.free_ids_bytes_estimate;
+                result["wal_bytes_estimate"]=usage.wal_bytes_estimate;
+                result["storage_bytes_estimate"]=usage.storage_bytes_estimate;
+                result["total_bytes_estimate"]=usage.total_bytes_estimate;
+                result["budget_bytes"]=usage.budget_bytes;
+                result["admission_charged_bytes"]=usage.admission_charged_bytes;
+                result["edge_slot_capacity"]=usage.edge_slot_capacity;
+                result["sparse_edges"]=usage.sparse_edges;
+                result["inline_adjacency_lists"]=usage.inline_adjacency_lists;
+                result["heavy_adjacency_lists"]=usage.heavy_adjacency_lists;
+                return result;
+            },py::arg("graph_name"))
             .def("checkpoint_graph", &GraphManager::checkpointGraph, py::arg("graph_name"),
                  "Durably checkpoint graph data and applied WAL, including Async mode")
 
