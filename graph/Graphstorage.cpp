@@ -299,6 +299,29 @@ bool GraphStorage::writeBatch(const std::vector<NodeRecord>& nodes,const std::ve
     edge_file_.flush();
     return bool(edge_file_) || fail("batch edge flush failed");
 }
+size_t GraphStorage::memoryBytesEstimate() const {
+    std::lock_guard lock(mutex_);
+    const auto jsonBytes=[](const auto& self,const nlohmann::json& value)->size_t {
+        size_t bytes=sizeof(value);
+        if (value.is_string()) {
+            const auto& str=value.get_ref<const std::string&>();
+            bytes+=sizeof(str)+(str.capacity()>std::string{}.capacity() ? str.capacity()+1 : 0);
+        } else if (value.is_array()) {
+            const auto& array=value.get_ref<const nlohmann::json::array_t&>();
+            bytes+=sizeof(array)+(array.capacity()-array.size())*sizeof(nlohmann::json);
+            for (const auto& child:array) bytes+=self(self,child);
+        } else if (value.is_object()) {
+            bytes+=sizeof(nlohmann::json::object_t);
+            for (auto it=value.begin();it!=value.end();++it) {
+                bytes+=sizeof(std::string)+4*sizeof(void*)+
+                    (it.key().capacity()>std::string{}.capacity() ? it.key().capacity()+1 : 0);
+                bytes+=self(self,it.value());
+            }
+        }
+        return bytes;
+    };
+    return sizeof(*this)+jsonBytes(jsonBytes,metadata_);
+}
 bool GraphStorage::rememberBatch(const std::vector<Identity>& identities,
                                 const std::map<TypeId,std::string>& types) {
     std::lock_guard lock(mutex_);

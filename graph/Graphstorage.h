@@ -29,6 +29,7 @@ public:
     void close();
     bool isOpen() const noexcept { return is_open_; }
     std::string lastError() const;
+    size_t memoryBytesEstimate() const;
     uint64_t generation() const noexcept { return generation_; }
     std::optional<GraphMeta> readMeta() const;
     bool writeMeta(const GraphMeta&);
