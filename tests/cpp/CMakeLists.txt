@@ -55,6 +55,9 @@ gtest_discover_tests(
 if (NEXORA_BUILD_GRAPH)
     add_executable(nexora_graph_tests
             test_graph.cpp
+            test_graph_wal.cpp
+            test_graph_storage.cpp
+            test_graph_bulk.cpp
             test_concurrency.cpp
     )
     target_link_libraries(nexora_graph_tests

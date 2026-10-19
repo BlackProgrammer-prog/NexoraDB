@@ -131,6 +131,66 @@ namespace {
         EXPECT_TRUE(wal.loadUnapplied().empty());
     }
 
+    TEST(GraphWal, DirectMarkSurvivesReopenAndRetentionGaps) {
+        TestTempDir temp("nexora_wal_offsets");
+        const auto path = temp.path() / "graph.wal";
+        // Negative retention makes applied records immediately eligible.
+        WalOptions options;
+        options.segment_bytes = GraphWAL::kRecordBytes;
+        GraphWAL wal(path, -1, options);
+        ASSERT_TRUE(wal.open());
+        const auto first = wal.append(WalOpType::AddNode, 10);
+        const auto second = wal.append(WalOpType::AddNode, 20);
+        const auto third = wal.append(WalOpType::AddNode, 30);
+        ASSERT_NE(third, UINT64_MAX);
+        ASSERT_TRUE(wal.markApplied(second));
+        EXPECT_FALSE(wal.markApplied(UINT64_MAX));
+        // A later applied record cannot be retained away past a pending prefix.
+        ASSERT_EQ(wal.purgeOld(), 0U);
+        ASSERT_TRUE(wal.markApplied(third));
+        auto pending = wal.loadUnapplied();
+        ASSERT_EQ(pending.size(), 1U);
+        EXPECT_EQ(pending.front().seq, first);
+        wal.close();
+        ASSERT_TRUE(wal.open());
+        EXPECT_TRUE(wal.open());
+        // Out-of-order applied markers are volatile until the contiguous
+        // checkpoint can advance. Replay them conservatively after restart.
+        ASSERT_TRUE(wal.markApplied(first));
+        ASSERT_TRUE(wal.markApplied(second));
+        ASSERT_TRUE(wal.markApplied(third));
+        EXPECT_TRUE(wal.loadUnapplied().empty());
+        EXPECT_EQ(wal.purgeOld(), 2U);
+        EXPECT_FALSE(wal.markApplied(second));
+        const auto next = wal.append(WalOpType::AddNode, 40);
+        EXPECT_GT(next, third);
+        ASSERT_TRUE(wal.markApplied(next));
+        EXPECT_TRUE(wal.loadUnapplied().empty());
+    }
+
+    TEST(GraphWal, ReplayStopsAtFirstFailureAndRetriesInOrder) {
+        TestTempDir temp("nexora_wal_replay_failure");
+        GraphWAL wal(temp.path() / "graph.wal");
+        ASSERT_TRUE(wal.open());
+        const auto first = wal.append(WalOpType::AddNode, 1);
+        const auto second = wal.append(WalOpType::AddNode, 2);
+        const auto third = wal.append(WalOpType::AddNode, 3);
+        std::vector<uint64_t> seen;
+        EXPECT_EQ(wal.replay([&](const WalRecord& rec) {
+            seen.push_back(rec.seq);
+            return rec.seq != second;
+        }), 1U);
+        EXPECT_EQ(seen, (std::vector<uint64_t>{first, second}));
+        ASSERT_EQ(wal.loadUnapplied().size(), 2U);
+        seen.clear();
+        EXPECT_EQ(wal.replay([&](const WalRecord& rec) {
+            seen.push_back(rec.seq);
+            return true;
+        }), 2U);
+        EXPECT_EQ(seen, (std::vector<uint64_t>{second, third}));
+        EXPECT_TRUE(wal.loadUnapplied().empty());
+    }
+
 /*
  * این تست در نسخه فعلی احتمالاً FAIL می‌شود و عمداً regression test است.
  * compactEdges فعلی src/dst را با node_remap روی دیسک بازنویسی نمی‌کند.
