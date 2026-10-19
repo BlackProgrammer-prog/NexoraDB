@@ -91,6 +91,10 @@ GraphWAL::GraphWAL(const std::filesystem::path& path, int64_t retention, WalOpti
 GraphWAL::~GraphWAL() { close(); }
 bool GraphWAL::fail(const std::string& message) { error_ = message; failed_ = true; return false; }
 std::string GraphWAL::lastError() const { std::lock_guard lock(mutex_); return error_; }
+size_t GraphWAL::memoryBytesEstimate() const {
+    std::lock_guard lock(mutex_);
+    return sizeof(*this)+records_.size()*sizeof(WalRecord)+segments_.capacity()*sizeof(Segment);
+}
 
 bool GraphWAL::open() {
     std::lock_guard lock(mutex_);

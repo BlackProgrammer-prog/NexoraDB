@@ -50,6 +50,7 @@ public:
     uint64_t syncCount() const noexcept { return sync_count_.load(); }
     WalDurability durability() const noexcept { return options_.durability; }
     std::string lastError() const;
+    size_t memoryBytesEstimate() const;
     static constexpr size_t kRecordBytes = 72;
 private:
     struct Segment {
