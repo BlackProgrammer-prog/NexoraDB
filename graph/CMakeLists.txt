@@ -51,6 +51,8 @@ add_library(nexora_graph STATIC
         # RAM Layer
         Livegraph.h
         Livegraph.cpp
+        BulkGraphBuilder.h
+        BulkGraphBuilder.cpp
         StaticGraph.h
         StaticGraph.cpp
 
