@@ -1315,6 +1315,23 @@ PYBIND11_MODULE(nexoradb, m) {
 
     // ── GraphManager ──
 
+    py::enum_<WalDurability>(m, "WalDurability")
+            .value("Sync", WalDurability::Sync)
+            .value("GroupCommit", WalDurability::GroupCommit)
+            .value("Async", WalDurability::Async);
+    py::class_<WalOptions>(m, "WalOptions")
+            .def(py::init<>())
+            .def_readwrite("durability", &WalOptions::durability)
+            .def_readwrite("segment_bytes", &WalOptions::segment_bytes)
+            .def_readwrite("migrate_legacy", &WalOptions::migrate_legacy)
+            .def_property("group_delay_ms",
+                 [](const WalOptions& options) { return options.group_delay.count(); },
+                 [](WalOptions& options, int64_t value) {
+                     if (value < 0 || value > 1000)
+                         throw std::invalid_argument("group_delay_ms must be between 0 and 1000");
+                     options.group_delay = std::chrono::milliseconds(value);
+                 });
+
     py::class_<GraphManager>(m, "GraphManager",
                              R"doc(
         Orchestrator اصلی — اتصال DocEngine به LiveGraph.
@@ -1341,8 +1358,9 @@ PYBIND11_MODULE(nexoradb, m) {
             result = gm.build_graph("social")
             print(result.nodes_built, result.edges_built)
         )doc")
-            .def(py::init<DocEngine*, const std::string&>(),
+            .def(py::init<DocEngine*, const std::string&, WalOptions>(),
                  py::arg("doc_engine"), py::arg("graph_dir") = "./graph_data",
+                 py::arg("wal_options") = WalOptions{},
                  py::keep_alive<1, 2>())  // GraphManager نباید بیشتر از DocEngine زنده بماند
 
                     // Lifecycle
@@ -1351,6 +1369,8 @@ PYBIND11_MODULE(nexoradb, m) {
                 return gm.startup();
             }, "بارگذاری گراف‌ها در startup")
             .def("shutdown", &GraphManager::shutdown, "بستن همه گراف‌ها")
+            .def("checkpoint_graph", &GraphManager::checkpointGraph, py::arg("graph_name"),
+                 "Durably checkpoint graph data and applied WAL, including Async mode")
 
                     // Graph Definition
             .def("create_graph",    &GraphManager::createGraph,    py::arg("definition"))

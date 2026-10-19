@@ -8,6 +8,7 @@
 
 #ifdef NEXORA_BUILD_GRAPH
 #include "graph/Livegraph.h"
+#include "graph/Graphwal.h"
 #include "graph/StaticGraph.h"
 #include "graph/algorithms/ShortestPath.h"
 #endif
@@ -1052,6 +1053,37 @@ namespace {
         recordBenchmarkMetrics(state);
     }
 
+#endif
+
+#ifdef NEXORA_BUILD_GRAPH
+    void BM_WalAppendAndMarkByRetainedRecords(benchmark::State& state) {
+        const auto path = makeTemporaryPath("wal_scaling", state.range(0));
+        std::filesystem::create_directories(path);
+        {
+            nexora::graph::WalOptions options;
+            options.durability = nexora::graph::WalDurability::Async;
+            // Exclude rotation and fsync latency to isolate per-record work.
+            options.segment_bytes = 1024ULL * 1024 * 1024;
+            nexora::graph::GraphWAL wal(path / "graph.wal", 86400, options);
+            if (!wal.open()) { state.SkipWithError("WAL open failed"); return; }
+            for (int64_t i = 0; i < state.range(0); ++i) {
+                const auto seq = wal.append(nexora::graph::WalOpType::AddNode, i);
+                if (seq == UINT64_MAX || !wal.markApplied(seq)) {
+                    state.SkipWithError("WAL prefill failed"); return;
+                }
+            }
+            for (auto _ : state) {
+                auto seq = wal.append(nexora::graph::WalOpType::AddNode, 42);
+                if (seq == UINT64_MAX || !wal.markApplied(seq)) {
+                    state.SkipWithError("WAL append failed"); break;
+                }
+                benchmark::DoNotOptimize(seq);
+            }
+            state.SetItemsProcessed(state.iterations());
+        }
+        std::filesystem::remove_all(path);
+    }
+    BENCHMARK(BM_WalAppendAndMarkByRetainedRecords)->Arg(1000)->Arg(100000)->Arg(1000000)->Iterations(10000);
 #endif
 
     BENCHMARK(BM_CompiledBsonPredicate);
