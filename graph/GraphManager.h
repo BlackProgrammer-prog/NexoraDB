@@ -179,7 +179,8 @@ namespace nexora {
              * @param graph_dir    پوشه‌ای که .nex/.nexr/.nexl/.wal در آن ذخیره می‌شوند
              */
             explicit GraphManager(nexora::core::DocEngine* doc_engine,
-                                  std::filesystem::path graph_dir = "./graph_data");
+                                  std::filesystem::path graph_dir = "./graph_data",
+                                  WalOptions wal_options = {});
             ~GraphManager();
 
             // non-copyable
@@ -280,6 +281,7 @@ namespace nexora {
              * NexoraQL: RENDER GRAPH social_graph;
              */
             bool renderGraph(const std::string& graph_name);
+            bool checkpointGraph(const std::string& graph_name);
 
             /**
              * @brief rebuild کامل گراف (build + render)
@@ -466,6 +468,7 @@ namespace nexora {
         private:
             nexora::core::DocEngine* doc_engine_;   ///< source of truth
             std::filesystem::path    graph_dir_;    ///< پوشه فایل‌های گراف
+            WalOptions wal_options_;
 
             // ── Graph registry ──
             mutable std::mutex                                       registry_mutex_;
@@ -478,21 +481,21 @@ namespace nexora {
              */
             bool buildNodeFromDoc(LiveGraph& graph,
                                   const NodeMappingDef& mapping,
-                                  const std::string& bson);
+                                  const std::string& bson,BulkGraphBuilder* bulk=nullptr);
 
             /**
              * @brief edge(ها) را از یک document می‌سازد
              */
             bool buildEdgeFromDoc(LiveGraph& graph,
                                   const EdgeMappingDef& mapping,
-                                  const std::string& bson);
+                                  const std::string& bson,BulkGraphBuilder* bulk=nullptr);
 
             /**
              * @brief UNWIND: از یک array در document چند edge می‌سازد
              */
             bool buildEdgesUnwind(LiveGraph& graph,
                                   const EdgeMappingDef& mapping,
-                                  const std::string& bson);
+                                  const std::string& bson,BulkGraphBuilder* bulk=nullptr);
 
             /**
              * @brief یک فیلد را از BSON با dot-path استخراج می‌کند

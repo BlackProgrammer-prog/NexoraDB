@@ -9,6 +9,7 @@
 
 #include "GraphManager.h"
 #include "DurableFile.h"
+#include "BulkGraphBuilder.h"
 
 #include <nlohmann/json.hpp>
 
@@ -28,8 +29,8 @@ namespace nexora {
 // ══════════════════════════════════════════════════════════════
 
         GraphManager::GraphManager(nexora::core::DocEngine* doc_engine,
-                                   std::filesystem::path graph_dir)
-                : doc_engine_(doc_engine), graph_dir_(std::move(graph_dir)) {
+                                   std::filesystem::path graph_dir, WalOptions wal_options)
+                : doc_engine_(doc_engine), graph_dir_(std::move(graph_dir)), wal_options_(wal_options) {
             std::filesystem::create_directories(graph_dir_);
         }
 
@@ -310,18 +311,17 @@ namespace nexora {
 
             // Storage
             h->storage = std::make_unique<GraphStorage>(graph_subdir, def.name);
-            if (!h->storage->open()) return nullptr;
+            if (!h->storage->open())
+                throw std::runtime_error("Graph storage startup failed: "+h->storage->lastError());
 
             // WAL
             auto wal_path = graph_subdir / "graph.wal";
-            h->wal = std::make_unique<GraphWAL>(wal_path, 86400);
-            if (!h->wal->open()) return nullptr;
+            h->wal = std::make_unique<GraphWAL>(wal_path, 86400, wal_options_);
+            if (!h->wal->open())
+                throw std::runtime_error("Graph WAL startup failed: " + h->wal->lastError());
 
-            // IdStore — از RocksDB DocEngine استفاده می‌کند
-//            rocksdb::DB* raw_db = nullptr;
-            // DocEngine::getRocksDB() — این متد باید به DocEngine اضافه شود
-            // در MVP از storage->metaPath() استفاده می‌کنیم
-            // h->id_store = std::make_unique<GraphIdStore>(raw_db, def.name);
+            // Physical identities and type dictionaries live in the same
+            // GraphStorage generation as the records, including compaction.
 
             // Backing graph used for both modes.
             // Live graphs receive incremental updates; Static graphs are only
@@ -458,7 +458,7 @@ namespace nexora {
 
         bool GraphManager::buildNodeFromDoc(LiveGraph& graph,
                                             const NodeMappingDef& mapping,
-                                            const std::string& bson) {
+                                            const std::string& bson,BulkGraphBuilder* bulk) {
             // فیلتر (اگر filter_expr تنظیم شده)
             if (!mapping.filter_expr.empty()) {
                 // ساده‌ترین فیلتر: "field=value"
@@ -468,15 +468,16 @@ namespace nexora {
             std::string ext_id = extractField(bson, mapping.key_path);
             if (ext_id.empty()) return false;
 
-            graph.addNode(ext_id, mapping.node_type, false);
+            if (bulk) bulk->addNode(ext_id,mapping.node_type);
+            else graph.addNode(ext_id, mapping.node_type, false);
             return true;
         }
 
         bool GraphManager::buildEdgeFromDoc(LiveGraph& graph,
                                             const EdgeMappingDef& mapping,
-                                            const std::string& bson) {
+                                            const std::string& bson,BulkGraphBuilder* bulk) {
             if (mapping.unwind.has_value()) {
-                return buildEdgesUnwind(graph, mapping, bson);
+                return buildEdgesUnwind(graph, mapping, bson,bulk);
             }
 
             // روش ۱ یا ۲: یک src و یک dst
@@ -485,13 +486,14 @@ namespace nexora {
 
             if (src_id.empty() || dst_id.empty()) return false;
 
-            graph.addEdge(src_id, dst_id, mapping.edge_type, mapping.directed);
+            if (bulk) bulk->addEdge(src_id,dst_id,mapping.edge_type,mapping.directed);
+            else graph.addEdge(src_id, dst_id, mapping.edge_type, mapping.directed);
             return true;
         }
 
         bool GraphManager::buildEdgesUnwind(LiveGraph& graph,
                                             const EdgeMappingDef& mapping,
-                                            const std::string& bson) {
+                                            const std::string& bson,BulkGraphBuilder* bulk) {
             // UNWIND: از array، چند edge می‌سازیم
             const auto& uw = *mapping.unwind;
 
@@ -526,8 +528,8 @@ namespace nexora {
 
                 if (src_id.empty() || dst_id.empty()) continue;
 
-                auto eid = graph.addEdge(src_id, dst_id, mapping.edge_type, mapping.directed);
-                if (eid != kInvalidEdgeId) ++built;
+                if (bulk) { bulk->addEdge(src_id,dst_id,mapping.edge_type,mapping.directed); ++built; }
+                else if (graph.addEdge(src_id,dst_id,mapping.edge_type,mapping.directed)!=kInvalidEdgeId) ++built;
             }
 
             // true اگر حداقل یک edge ساخته شد
@@ -571,11 +573,12 @@ namespace nexora {
 
             // ── مرحله ۱: ساخت nodes از collections ──
             try {
+            BulkGraphBuilder bulk(graph);
             for (const auto& nm : def.node_mappings) {
                 doc_engine_->IterateCollection(
                         nm.collection,
                         [&](const std::string& doc_id, const std::string& bson) -> bool {
-                            if (buildNodeFromDoc(graph, nm, bson))
+                            if (buildNodeFromDoc(graph, nm, bson,&bulk))
                                 ++result.nodes_built;
                             return true;
                         }
@@ -587,12 +590,15 @@ namespace nexora {
                 doc_engine_->IterateCollection(
                         em.collection,
                         [&](const std::string& doc_id, const std::string& bson) -> bool {
-                            if (buildEdgeFromDoc(graph, em, bson))
+                            if (buildEdgeFromDoc(graph, em, bson,&bulk))
                                 ++result.edges_built;
                             return true;
                         }
                 );
             }
+            bulk.flush();
+            result.nodes_built=graph.activeNodeCount();
+            result.edges_built=graph.activeEdgeCount();
             } catch (const std::exception& error) {
                 result.error_msg = std::string("Graph source scan failed: ") + error.what();
                 return result;
@@ -633,6 +639,13 @@ namespace nexora {
             it->second->live_graph->replayWAL();
             it->second->built = true;
             return true;
+        }
+
+        bool GraphManager::checkpointGraph(const std::string& graph_name) {
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            auto it = graphs_.find(graph_name);
+            return it != graphs_.end() && it->second->live_graph &&
+                   it->second->live_graph->checkpointWAL();
         }
 
         BuildResult GraphManager::refreshGraph(const std::string& graph_name) {
