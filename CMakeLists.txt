@@ -27,6 +27,20 @@ option(NEXORA_ENABLE_UBSAN  "Enable UndefinedSanitizer"  OFF)
 option(NEXORA_ENABLE_TSAN   "Enable ThreadSanitizer"     OFF)
 option(NEXORA_ENABLE_LTO    "Enable LTO in optimized builds" OFF)
 option(NEXORA_BUILD_BENCHMARKS "Build native C++ benchmarks" OFF)
+option(NEXORA_BUILD_FUZZERS "Build libFuzzer document/query harnesses" OFF)
+
+if(NEXORA_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "NEXORA_BUILD_FUZZERS requires Clang/libFuzzer")
+    endif()
+    # Instrument the static query/core libraries as well as the harnesses. The
+    # no-link variant supplies coverage callbacks without injecting a fuzzer
+    # main into every executable.
+    add_compile_options(
+            -fsanitize=fuzzer-no-link,address,undefined
+            -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+endif()
 
 # CMake supplies the optimization/debug flags for each configuration. Choose a
 # predictable default only for single-config generators such as Make and Ninja.
@@ -269,6 +283,10 @@ if (NEXORA_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks/cpp)
 endif ()
 
+if (NEXORA_BUILD_FUZZERS)
+    add_subdirectory(tests/fuzz)
+endif ()
+
 # ─────────────────────────────────────────────────────────────
 # §9  Build summary
 # ─────────────────────────────────────────────────────────────
@@ -286,6 +304,7 @@ message(STATUS "  UBSAN          : ${NEXORA_ENABLE_UBSAN}")
 message(STATUS "  TSAN           : ${NEXORA_ENABLE_TSAN}")
 message(STATUS "  LTO            : ${NEXORA_ENABLE_LTO}")
 message(STATUS "  C++ Benchmarks : ${NEXORA_BUILD_BENCHMARKS}")
+message(STATUS "  Fuzzers        : ${NEXORA_BUILD_FUZZERS}")
 message(STATUS "")
 message(STATUS "  nexora_query → nexora_core → nexora_graph")
 message(STATUS "                                    ↓")
