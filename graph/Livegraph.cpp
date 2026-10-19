@@ -13,6 +13,7 @@
 #include <cassert>
 #include <chrono>
 #include <stdexcept>
+#include <limits>
 
 namespace nexora {
     namespace graph {
@@ -106,7 +107,7 @@ namespace nexora {
                 out_edges.insert(pos, e);
                 checkAndUpgrade();
             } else {
-                heavy_out.insert(e);
+                heavy_out->insert(e);
             }
         }
 
@@ -117,7 +118,7 @@ namespace nexora {
                 in_edges.insert(pos, e);
                 checkAndUpgrade();
             } else {
-                heavy_in.insert(e);
+                heavy_in->insert(e);
             }
         }
 
@@ -131,7 +132,14 @@ namespace nexora {
                 }
                 return false;
             }
-            return heavy_out.remove(neighbor, type_id);
+            const bool removed=heavy_out->remove(neighbor,type_id);
+            if (removed && heavy_out->size()<=kHeavyNodeThreshold/2) {
+                out_edges.reserve(heavy_out->size());
+                heavy_out->forEach([&](const AdjEntry& entry) { out_edges.push_back(entry); return true; });
+                heavy_out.reset(); out_heavy=false;
+                out_edges.shrink_to_fit();
+            }
+            return removed;
         }
 
         bool NodeAdj::removeIn(DenseId neighbor, TypeId type_id) {
@@ -144,7 +152,14 @@ namespace nexora {
                 }
                 return false;
             }
-            return heavy_in.remove(neighbor, type_id);
+            const bool removed=heavy_in->remove(neighbor,type_id);
+            if (removed && heavy_in->size()<=kHeavyNodeThreshold/2) {
+                in_edges.reserve(heavy_in->size());
+                heavy_in->forEach([&](const AdjEntry& entry) { in_edges.push_back(entry); return true; });
+                heavy_in.reset(); in_heavy=false;
+                in_edges.shrink_to_fit();
+            }
+            return removed;
         }
 
         void NodeAdj::forEachOut(const std::function<bool(const AdjEntry&)>& fn) const {
@@ -153,7 +168,7 @@ namespace nexora {
                     if (!fn(e)) return;
                 }
             }
-            else heavy_out.forEach(fn);
+            else heavy_out->forEach(fn);
         }
 
         void NodeAdj::forEachIn(const std::function<bool(const AdjEntry&)>& fn) const {
@@ -162,18 +177,20 @@ namespace nexora {
                     if (!fn(e)) return;
                 }
             }
-            else heavy_in.forEach(fn);
+            else heavy_in->forEach(fn);
         }
 
         void NodeAdj::checkAndUpgrade() {
             if (!out_heavy && out_edges.size() > kHeavyNodeThreshold) {
-                for (const auto& e : out_edges) heavy_out.insert(e);
+                heavy_out=std::make_unique<ChunkedSortedVector>();
+                for (const auto& e : out_edges) heavy_out->insert(e);
                 out_edges.clear();
                 out_edges.shrink_to_fit();
                 out_heavy = true;
             }
             if (!in_heavy && in_edges.size() > kHeavyNodeThreshold) {
-                for (const auto& e : in_edges) heavy_in.insert(e);
+                heavy_in=std::make_unique<ChunkedSortedVector>();
+                for (const auto& e : in_edges) heavy_in->insert(e);
                 in_edges.clear();
                 in_edges.shrink_to_fit();
                 in_heavy = true;
@@ -189,9 +206,11 @@ namespace nexora {
             if (it != ext_to_dense_.end()) return it->second;
 
             DenseId id = (reuse_id != kInvalidDenseId) ? reuse_id : next_dense_++;
+            if (id>=dense_to_ext_.size()) dense_to_ext_.resize(id+1);
+            if (dense_to_ext_[id]) throw std::invalid_argument("dense identity slot already occupied");
             ext_to_dense_[ext_id] = id;
             dense_to_ext_[id]     = ext_id;
-            if (reuse_id == kInvalidDenseId && id >= next_dense_) next_dense_ = id + 1;
+            if (id >= next_dense_) next_dense_ = id + 1;
             return id;
         }
 
@@ -201,8 +220,7 @@ namespace nexora {
         }
 
         ExtId DenseIdMap::getExt(DenseId dense_id) const {
-            auto it = dense_to_ext_.find(dense_id);
-            return (it != dense_to_ext_.end()) ? it->second : "";
+            return hasDense(dense_id) ? *dense_to_ext_[dense_id] : "";
         }
 
         bool DenseIdMap::hasExt(const ExtId& ext_id) const {
@@ -210,22 +228,99 @@ namespace nexora {
         }
 
         bool DenseIdMap::hasDense(DenseId dense_id) const {
-            return dense_to_ext_.count(dense_id) > 0;
+            return dense_id<dense_to_ext_.size() && dense_to_ext_[dense_id].has_value();
         }
 
         void DenseIdMap::remove(const ExtId& ext_id) {
             auto it = ext_to_dense_.find(ext_id);
             if (it == ext_to_dense_.end()) return;
             DenseId did = it->second;
-            dense_to_ext_.erase(did);
+            dense_to_ext_[did].reset();
             ext_to_dense_.erase(it);
         }
 
         void DenseIdMap::remove(DenseId dense_id) {
-            auto it = dense_to_ext_.find(dense_id);
-            if (it == dense_to_ext_.end()) return;
-            ext_to_dense_.erase(it->second);
-            dense_to_ext_.erase(it);
+            if (!hasDense(dense_id)) return;
+            ext_to_dense_.erase(*dense_to_ext_[dense_id]);
+            dense_to_ext_[dense_id].reset();
+        }
+
+        namespace {
+            size_t stringHeap(const std::string& value) {
+                return value.capacity()>std::string{}.capacity() ? value.capacity()+1 : 0;
+            }
+            template<class Map> size_t mapEstimate(const Map& map) {
+                return map.bucket_count()*sizeof(void*)+
+                    map.size()*(sizeof(typename Map::value_type)+2*sizeof(void*));
+            }
+        }
+        size_t DenseIdMap::reverseBytes() const noexcept {
+            size_t bytes=dense_to_ext_.capacity()*sizeof(decltype(dense_to_ext_)::value_type);
+            for (const auto& ext:dense_to_ext_) if (ext) bytes+=stringHeap(*ext);
+            return bytes;
+        }
+        size_t DenseIdMap::forwardBytesEstimate() const noexcept {
+            size_t bytes=mapEstimate(ext_to_dense_);
+            for (const auto& [ext,id]:ext_to_dense_) bytes+=stringHeap(ext);
+            return bytes;
+        }
+
+        GraphMemoryUsage LiveGraph::memoryUsageUnlocked() const {
+            GraphMemoryUsage usage;
+            usage.object_bytes=sizeof(*this)+stringHeap(name_);
+            usage.node_records_bytes=node_records_.capacity()*sizeof(NodeRecord);
+            usage.adjacency_headers_bytes=adj_.capacity()*sizeof(NodeAdj);
+            usage.edge_store_bytes=edge_records_.allocatedBytesEstimate();
+            usage.edge_slot_capacity=edge_records_.slotCapacity(); usage.sparse_edges=edge_records_.sparseSize();
+            usage.reverse_identity_bytes=id_map_.reverseBytes();
+            usage.forward_identity_bytes_estimate=id_map_.forwardBytesEstimate();
+            for (const auto& adj:adj_) {
+                usage.adjacency_payload_bytes+=adj.out_edges.heapBytes()+adj.in_edges.heapBytes();
+                usage.inline_adjacency_lists+=(!adj.out_heavy && adj.out_edges.heapBytes()==0)+
+                                              (!adj.in_heavy && adj.in_edges.heapBytes()==0);
+                for (const auto* heavy:{adj.heavy_out.get(),adj.heavy_in.get()}) if (heavy) {
+                    ++usage.heavy_adjacency_lists;
+                    usage.adjacency_payload_bytes+=sizeof(ChunkedSortedVector)+
+                        heavy->chunks.capacity()*sizeof(std::vector<AdjEntry>);
+                    for (const auto& chunk:heavy->chunks)
+                        usage.adjacency_payload_bytes+=chunk.capacity()*sizeof(AdjEntry);
+                }
+            }
+            for (const auto* registry:{&node_type_reg_,&edge_type_reg_}) {
+                usage.type_registry_bytes_estimate+=mapEstimate(registry->name_to_id)+mapEstimate(registry->id_to_name);
+                for (const auto& [name,id]:registry->name_to_id) usage.type_registry_bytes_estimate+=stringHeap(name);
+                for (const auto& [id,name]:registry->id_to_name) usage.type_registry_bytes_estimate+=stringHeap(name);
+            }
+            usage.free_ids_bytes_estimate=(node_free_stack_.size()+edge_free_stack_.size())*sizeof(uint64_t);
+            usage.wal_bytes_estimate=wal_ ? wal_->memoryBytesEstimate() : 0;
+            usage.storage_bytes_estimate=storage_ ? storage_->memoryBytesEstimate() : 0;
+            usage.total_bytes_estimate=usage.object_bytes+usage.node_records_bytes+usage.adjacency_headers_bytes+
+                usage.adjacency_payload_bytes+usage.edge_store_bytes+usage.reverse_identity_bytes+
+                usage.forward_identity_bytes_estimate+usage.type_registry_bytes_estimate+usage.free_ids_bytes_estimate+
+                usage.wal_bytes_estimate+usage.storage_bytes_estimate;
+            usage.budget_bytes=memory_budget_; usage.admission_charged_bytes=memory_charged_;
+            return usage;
+        }
+        GraphMemoryUsage LiveGraph::memoryUsage() const {
+            std::shared_lock lock(mutex_); return memoryUsageUnlocked();
+        }
+        void LiveGraph::setMemoryBudget(size_t bytes) {
+            std::unique_lock lock(mutex_);
+            const auto usage=memoryUsageUnlocked().total_bytes_estimate;
+            if (bytes && bytes<usage) throw std::length_error("memory budget below current graph estimate");
+            memory_budget_=bytes; memory_charged_=bytes ? usage : 0;
+        }
+        void LiveGraph::admitMemory(size_t nodes,size_t edges,size_t text) {
+            if (!memory_budget_) return;
+            // High-water admission credits deliberately do not refund deletes or
+            // duplicates: vector/hash capacities and fragmentation may persist.
+            size_t available=memory_budget_-memory_charged_;
+            auto charge=[&](size_t count,size_t unit) {
+                if (count>available/unit) throw std::length_error("graph memory admission budget exceeded");
+                available-=count*unit;
+            };
+            charge(nodes,1024); charge(edges,512); charge(text,4);
+            memory_charged_=memory_budget_-available;
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -371,6 +466,7 @@ namespace nexora {
                 return true;
             });
             next_edge_id_.store(max_edge + 1);
+            edge_records_.optimizeDense();
 
             version_.fetch_add(1);
             return true;
@@ -509,6 +605,7 @@ namespace nexora {
                 if (is_implicit == false &&
                     existing < node_records_.size() &&
                     node_records_[existing].isImplicit()) {
+                    admitMemory(0,0,type_name.size());
                     const auto type=node_type_reg_.getOrCreate(type_name);
                     if (storage_ && !storage_->rememberNode(existing,ext_id,type,type_name))
                         throw std::runtime_error("Graph promoted identity persistence failed");
@@ -523,6 +620,7 @@ namespace nexora {
                 return existing;
             }
 
+            admitMemory(1,0,ext_id.size()+type_name.size());
             TypeId type_id = node_type_reg_.getOrCreate(type_name);
             DenseId new_id  = allocDenseId();
             ensureCapacity(new_id);
@@ -655,6 +753,9 @@ namespace nexora {
                                   const std::string& type_name, bool directed) {
             std::unique_lock lock(mutex_);
             if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
+            const size_t missing=(id_map_.get(src_ext)==kInvalidDenseId)+
+                (src_ext!=dst_ext && id_map_.get(dst_ext)==kInvalidDenseId);
+            admitMemory(missing,1,src_ext.size()+dst_ext.size()+type_name.size());
 
             TypeId edge_type = edge_type_reg_.getOrCreate(type_name);
             if (storage_ && !storage_->rememberEdgeType(edge_type,type_name))
@@ -1126,7 +1227,7 @@ namespace nexora {
             }
 
             // ── EdgeRecords و Adjacency ──
-            std::unordered_map<EdgeId, EdgeRecord> new_edges;
+            EdgeStore new_edges;
             for (const auto& [old_eid, original] : edge_records_) {
                 auto er=original;
                 auto eit = edge_remap.find(old_eid);
@@ -1155,6 +1256,7 @@ namespace nexora {
             // جایگزینی ساختارها
             node_records_ = std::move(new_records);
             adj_          = std::move(new_adj);
+            new_edges.optimizeDense();
             edge_records_ = std::move(new_edges);
             id_map_       = std::move(new_id_map);
             active_node_count_.store(node_records_.size());

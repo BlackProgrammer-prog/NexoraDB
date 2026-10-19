@@ -30,6 +30,8 @@
 #include "Graphtypes.h"
 #include "Graphstorage.h"
 #include "Graphwal.h"
+#include "EdgeStore.h"
+#include "GraphMemory.h"
 
 #include <deque>
 #include <shared_mutex>
@@ -75,10 +77,12 @@ namespace nexora {
             void remove(DenseId dense_id);
 
             size_t size() const noexcept { return ext_to_dense_.size(); }
+            size_t reverseBytes() const noexcept;
+            size_t forwardBytesEstimate() const noexcept;
 
         private:
             std::unordered_map<ExtId, DenseId>  ext_to_dense_;
-            std::unordered_map<DenseId, ExtId>  dense_to_ext_;
+            std::vector<std::optional<ExtId>> dense_to_ext_;
             DenseId                             next_dense_ = 0;
         };
 
@@ -297,6 +301,10 @@ namespace nexora {
             // ──────────────────────────────────────────────────────────
 
             GraphStats stats() const;
+            GraphMemoryUsage memoryUsage() const;
+            // Conservative admission budget, not a process RSS/allocator limit.
+            // Zero disables. Rejected admission precedes RAM/WAL/data mutation.
+            void setMemoryBudget(size_t bytes);
 
             uint64_t activeNodeCount() const noexcept;
             uint64_t activeEdgeCount() const noexcept;
@@ -327,6 +335,9 @@ namespace nexora {
         private:
             friend class BulkGraphBuilder;
             bool bulk_failed_=false;
+            size_t memory_budget_=0,memory_charged_=0;
+            GraphMemoryUsage memoryUsageUnlocked() const;
+            void admitMemory(size_t nodes,size_t edges,size_t text_bytes);
             std::string    name_;
             GraphStorage*  storage_;  ///< owned by GraphManager
             GraphWAL*      wal_;      ///< owned by GraphManager
@@ -341,7 +352,7 @@ namespace nexora {
             std::vector<NodeRecord>         node_records_;
 
             /// edge metadata: EdgeId → EdgeRecord
-            std::unordered_map<EdgeId, EdgeRecord> edge_records_;
+            EdgeStore edge_records_;
 
             /// ExtId ↔ DenseId
             DenseIdMap                      id_map_;
