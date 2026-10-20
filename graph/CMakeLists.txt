@@ -59,6 +59,7 @@ add_library(nexora_graph STATIC
         # Orchestrator
         GraphManager.h
         GraphManager.cpp
+        JobScheduler.cpp
 )
 
 target_include_directories(nexora_graph
