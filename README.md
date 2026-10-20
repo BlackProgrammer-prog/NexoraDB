@@ -7,7 +7,7 @@
 **C++20 core · RocksDB storage · Live graph projections · Built-in graph algorithms · SQL-like query language**
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg?style=flat&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![RocksDB](https://img.shields.io/badge/Storage-RocksDB-orange.svg?style=flat)](https://rocksdb.org/)
 [![pybind11](https://img.shields.io/badge/Bindings-pybind11-green.svg?style=flat)](https://github.com/pybind/pybind11)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat)](#-license)
@@ -21,6 +21,9 @@
 [CLI](#-cli--terminal-commands)
 
 </div>
+
+Release 0.3.0: [changes and upgrade precautions](docs/releases/v0.3.0.md).
+Published wheels target Linux x86_64 and CPython 3.10 only.
 
 ---
 
@@ -147,7 +150,7 @@ pip install NexoraDataBase
 To install this exact release instead of the latest available version:
 
 ```bash
-pip install NexoraDataBase==0.2.1
+pip install NexoraDataBase==0.3.0
 ```
 
 The PyPI project is named `NexoraDataBase`, while the Python import name is
