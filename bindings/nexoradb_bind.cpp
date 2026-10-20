@@ -27,7 +27,7 @@
  *
  * @section GIL
  * عملیات‌های سنگین (buildGraph, IterateCollection, createSnapshot)
- * با py::gil_scoped_release اجرا می‌شوند تا Python thread-safe بماند.
+ * GIL release permits Python concurrency; native locks provide database safety.
  */
 
 #include <pybind11/pybind11.h>
@@ -74,6 +74,68 @@ static py::dict result_to_dict(const DBResult& r) {
     d["error_msg"] = r.error_msg;
     return d;
 }
+
+// Lazy, page-bounded document output. Python owns this object; keep_alive on
+// the factory pins DocEngine. One consumer at a time, including close().
+class DocumentStream {
+    DocEngine* engine_;
+    std::string collection_,token_;
+    Condition condition_;
+    uint32_t page_size_;
+    size_t max_bytes_,offset_=0;
+    bool ended_=false;
+    py::list page_;
+    std::mutex mutex_;
+public:
+    DocumentStream(DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes)
+        :engine_(&engine),collection_(std::move(collection)),condition_(std::move(condition)),
+         page_size_(page_size),max_bytes_(max_bytes) {
+        if (!page_size || page_size>4096 || max_bytes<2 || max_bytes>64*1024*1024)
+            throw std::invalid_argument("stream requires page_size 1..4096 and max_page_bytes 2..64MiB");
+    }
+    ~DocumentStream() { if (!token_.empty()) engine_->ClosePage(token_); }
+    py::object next() {
+        std::unique_lock lock(mutex_,std::try_to_lock);
+        if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
+        if (offset_>=py::len(page_)) {
+            if (ended_) throw py::stop_iteration();
+            PageResult result;
+            {
+                py::gil_scoped_release release;
+                result=engine_->FindPage(collection_,condition_,page_size_,token_,max_bytes_);
+            }
+            if (!result.success) {
+                engine_->ClosePage(token_); token_.clear(); ended_=true;
+                throw std::runtime_error(result.error_msg);
+            }
+            token_=std::move(result.continuation_token); ended_=token_.empty();
+            try { page_=py::module_::import("json").attr("loads")(result.data).cast<py::list>(); }
+            catch (...) { engine_->ClosePage(token_); token_.clear(); ended_=true; throw; }
+            offset_=0;
+            if (!py::len(page_)) throw py::stop_iteration();
+        }
+        return page_[offset_++];
+    }
+    void close() {
+        std::unique_lock lock(mutex_,std::try_to_lock);
+        if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
+        engine_->ClosePage(token_); token_.clear(); ended_=true; page_=py::list(); offset_=0;
+    }
+};
+
+#ifdef NEXORA_BUILD_GRAPH
+class SnapshotEdgeStream {
+    const StaticGraph* graph_;
+    size_t offset_=0;
+public:
+    explicit SnapshotEdgeStream(const StaticGraph& graph):graph_(&graph) {}
+    py::tuple next() {
+        const auto edge=graph_->edgeAt(offset_);
+        if (!edge) throw py::stop_iteration();
+        ++offset_; return py::make_tuple((*edge)[0],(*edge)[1],(*edge)[2],(*edge)[3],bool((*edge)[4]));
+    }
+};
+#endif
 
 static py::dict build_info_dict() {
     py::dict info;
@@ -123,6 +185,17 @@ static const char* wal_op_to_string(WalOpType op) {
 // ══════════════════════════════════════════════════════════════
 
 PYBIND11_MODULE(nexoradb, m) {
+#ifdef NEXORA_BUILD_GRAPH
+    py::class_<SnapshotEdgeStream>(m,"SnapshotEdgeStream")
+        .def("__iter__",[](SnapshotEdgeStream& stream)->SnapshotEdgeStream& { return stream; },py::return_value_policy::reference_internal)
+        .def("__next__",&SnapshotEdgeStream::next);
+#endif
+    py::class_<DocumentStream>(m,"DocumentStream")
+        .def("__iter__",[](DocumentStream& stream)->DocumentStream& { return stream; },py::return_value_policy::reference_internal)
+        .def("__next__",&DocumentStream::next)
+        .def("close",&DocumentStream::close)
+        .def("__enter__",[](DocumentStream& stream)->DocumentStream& { return stream; },py::return_value_policy::reference_internal)
+        .def("__exit__",[](DocumentStream& stream,py::object,py::object,py::object) { stream.close(); });
     m.def("build_info", &build_info_dict,
           "Return compiler, dependency, sanitizer and build metadata for this C++ core.");
     m.doc() = "NexoraDB — High-performance Document + Graph Database (C++ core)";
@@ -593,6 +666,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("create_collection",
                  [](DocEngine& e, const std::string& name,
                     std::optional<SchemaDefinition> schema) {
+                     py::gil_scoped_release release;
                      return e.CreateCollection(name, schema);
                  },
                  py::arg("collection"), py::arg("schema") = py::none(),
@@ -610,7 +684,7 @@ PYBIND11_MODULE(nexoradb, m) {
                 result = db.create_collection("users")
             )doc")
 
-            .def("drop_collection", &DocEngine::DropCollection,
+            .def("drop_collection", &DocEngine::DropCollection,py::call_guard<py::gil_scoped_release>(),
                  py::arg("collection"),
                  "حذف Collection (برگشت‌ناپذیر)")
 
@@ -621,27 +695,31 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("list_collections", &DocEngine::ListCollections,
                  "لیست همه Collections → list[str]")
 
-            .def("set_schema", &DocEngine::SetSchemaValidation,
+            .def("set_schema", [](DocEngine& e,std::string name,SchemaDefinition schema) {
+                     py::gil_scoped_release release; return e.SetSchemaValidation(name,schema);
+                 },
                  py::arg("collection"), py::arg("schema"),
                  "تنظیم/به‌روزرسانی Schema")
 
                     // ── Index ──
-            .def("create_index", &DocEngine::CreateIndex,
+            .def("create_index", [](DocEngine& e,std::string name,IndexDefinition index) {
+                     py::gil_scoped_release release; return e.CreateIndex(name,index);
+                 },
                  py::arg("collection"), py::arg("index_def"),
                  "ایجاد Index")
 
-            .def("drop_index", &DocEngine::DropIndex,
+            .def("drop_index", &DocEngine::DropIndex,py::call_guard<py::gil_scoped_release>(),
                  py::arg("collection"), py::arg("index_name"),
                  "حذف Index")
 
-            .def("rebuild_indexes", &DocEngine::RebuildIndexes,
+            .def("rebuild_indexes", &DocEngine::RebuildIndexes,py::call_guard<py::gil_scoped_release>(),
                  py::arg("collection"),
                  "بازسازی indexها و migration فرمت legacy به v2")
 
-            .def("resume_index_build", &DocEngine::ResumeIndexBuild,
+            .def("resume_index_build", &DocEngine::ResumeIndexBuild,py::call_guard<py::gil_scoped_release>(),
                  py::arg("collection"), py::arg("index_name"))
 
-            .def("cleanup_index_build", &DocEngine::CleanupIndexBuild,
+            .def("cleanup_index_build", &DocEngine::CleanupIndexBuild,py::call_guard<py::gil_scoped_release>(),
                  py::arg("collection"), py::arg("index_name"))
 
             .def("get_indexes",
@@ -652,11 +730,13 @@ PYBIND11_MODULE(nexoradb, m) {
                  "لیست Index های یک Collection")
 
                     // ── Foreign Key ──
-            .def("add_foreign_key", &DocEngine::AddForeignKey,
+            .def("add_foreign_key", [](DocEngine& e,std::string name,ForeignKeyDefinition fk) {
+                     py::gil_scoped_release release; return e.AddForeignKey(name,fk);
+                 },
                  py::arg("collection"), py::arg("fk_def"),
                  "تعریف Foreign Key")
 
-            .def("drop_foreign_key", &DocEngine::DropForeignKey,
+            .def("drop_foreign_key", &DocEngine::DropForeignKey,py::call_guard<py::gil_scoped_release>(),
                  py::arg("collection"), py::arg("fk_name"),
                  "حذف Foreign Key")
 
@@ -710,7 +790,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("insert_many_bulk",
                  [](DocEngine& e, const std::string& col,
                     const std::vector<std::string>& docs,
-                    const BulkWriteOptions& options) {
+                    BulkWriteOptions options) {
                      py::gil_scoped_release rel;
                      return e.InsertManyBulk(col, docs, options);
                  },
@@ -728,7 +808,7 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("find_many",
                  [](DocEngine& e, const std::string& col,
-                    const Condition& cond, uint32_t limit, uint32_t skip) {
+                    Condition cond, uint32_t limit, uint32_t skip) {
                      py::gil_scoped_release rel;
                      return e.FindMany(col, cond, limit, skip);
                  },
@@ -754,9 +834,13 @@ PYBIND11_MODULE(nexoradb, m) {
                 r = db.find_many("users", c, limit=10)
             )doc")
 
+            .def("iter_documents",[](DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes) {
+                return std::make_unique<DocumentStream>(engine,std::move(collection),std::move(condition),page_size,max_bytes);
+            },py::arg("collection"),py::arg("condition")=Condition{},py::arg("page_size")=128,
+               py::arg("max_page_bytes")=4*1024*1024,py::keep_alive<0,1>())
             .def("find_page",
                  [](DocEngine& e, const std::string& collection,
-                    const Condition& condition, std::uint32_t limit,
+                    Condition condition, std::uint32_t limit,
                     const std::string& token) {
                      py::gil_scoped_release release;
                      return e.FindPage(collection, condition, limit, token);
@@ -774,7 +858,7 @@ PYBIND11_MODULE(nexoradb, m) {
                     // ── CRUD: Update ──
             .def("update_by_id",
                  [](DocEngine& e, const std::string& col,
-                    const std::string& id, const UpdateSpec& spec) {
+                    const std::string& id, UpdateSpec spec) {
                      py::gil_scoped_release rel;
                      return e.UpdateById(col, id, spec);
                  },
@@ -783,7 +867,7 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("update_many",
                  [](DocEngine& e, const std::string& col,
-                    const Condition& cond, const UpdateSpec& spec) {
+                    Condition cond, UpdateSpec spec) {
                      py::gil_scoped_release rel;
                      return e.UpdateMany(col, cond, spec);
                  },
@@ -792,8 +876,8 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("update_many_bulk",
                  [](DocEngine& e, const std::string& col,
-                    const Condition& cond, const UpdateSpec& spec,
-                    const BulkWriteOptions& options) {
+                    Condition cond, UpdateSpec spec,
+                    BulkWriteOptions options) {
                      py::gil_scoped_release rel;
                      return e.UpdateManyBulk(col, cond, spec, options);
                  },
@@ -811,7 +895,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  "حذف یک سند با ID → DBResult(data='1' یا '0')")
 
             .def("delete_many",
-                 [](DocEngine& e, const std::string& col, const Condition& cond) {
+                 [](DocEngine& e, const std::string& col, Condition cond) {
                      py::gil_scoped_release rel;
                      return e.DeleteMany(col, cond);
                  },
@@ -820,8 +904,8 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("delete_many_bulk",
                  [](DocEngine& e, const std::string& col,
-                    const Condition& cond,
-                    const BulkWriteOptions& options) {
+                    Condition cond,
+                    BulkWriteOptions options) {
                      py::gil_scoped_release rel;
                      return e.DeleteManyBulk(col, cond, options);
                  },
@@ -830,7 +914,7 @@ PYBIND11_MODULE(nexoradb, m) {
 
                     // ── Utility ──
             .def("count",
-                 [](DocEngine& e, const std::string& col, const Condition& cond) {
+                 [](DocEngine& e, const std::string& col, Condition cond) {
                      py::gil_scoped_release rel;
                      return e.Count(col, cond);
                  },
@@ -838,7 +922,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  "تعداد اسناد → DBResult(data='42')")
 
             .def("exists",
-                 [](DocEngine& e, const std::string& col, const Condition& cond) {
+                 [](DocEngine& e, const std::string& col, Condition cond) {
                      py::gil_scoped_release rel;
                      return e.Exists(col, cond);
                  },
@@ -917,7 +1001,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  [](DocEngine& e,
                     const std::string& from_col, const std::string& from_field,
                     const std::string& to_col,   const std::string& to_field,
-                    const Condition& cond, uint32_t limit) {
+                    Condition cond, uint32_t limit) {
                      // GIL را فقط در طول C++ call آزاد می‌کنیم
                      // قبل از ساخت py::dict باید GIL برگردد
                      JoinResult jr;
@@ -956,10 +1040,14 @@ PYBIND11_MODULE(nexoradb, m) {
                  [](DocEngine& e, const std::string& col,
                     const std::function<bool(std::string, std::string)>& cb,
                     uint32_t batch) {
-                     // ⚠️ GIL را اینجا آزاد نمی‌کنیم!
-                     // چون callback یک Python function است و برای اجرا به GIL نیاز دارد.
-                     // اگر GIL آزاد شود و callback صدا زده شود → Segfault
-                     e.IterateCollection(col, cb, batch);
+                     // Own the Python callable before release. Reacquire only
+                     // around Python execution; destroy captures after release's
+                     // destructor has restored GIL on normal and exception paths.
+                     DocumentCallback callback=[cb](const std::string& id,const std::string& document) {
+                         py::gil_scoped_acquire acquire; return cb(id,document);
+                     };
+                     py::gil_scoped_release release;
+                     e.IterateCollection(col, callback, batch);
                  },
                  py::arg("collection"),
                  py::arg("callback"),
@@ -986,7 +1074,7 @@ PYBIND11_MODULE(nexoradb, m) {
                      if (!tx) return py::none();
                      return py::cast(tx.release(),
                                      py::return_value_policy::take_ownership);
-                 },
+                 }, py::keep_alive<0,1>(),
                  "شروع تراکنش → TxHandle یا None")
 
             .def("commit_transaction",
@@ -1014,7 +1102,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("update_by_id_tx",
                  [](DocEngine& e, TxHandle* tx,
                     const std::string& col, const std::string& id,
-                    const UpdateSpec& spec) -> DBResult {
+                    UpdateSpec spec) -> DBResult {
                      if (!tx) return DBResult::Err("null transaction");
                      py::gil_scoped_release rel;
                      return e.UpdateByIdTx(*tx, col, id, spec);
@@ -1205,6 +1293,9 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_readonly("error_msg",   &algorithms::AlgoResult::error_msg)
             .def_readonly("result_json", &algorithms::AlgoResult::result_json)
             .def_readonly("elapsed_ms",  &algorithms::AlgoResult::elapsed_ms)
+            .def_readonly("queue_ms",&algorithms::AlgoResult::queue_ms)
+            .def_readonly("execution_ms",&algorithms::AlgoResult::execution_ms)
+            .def_readonly("reserved_bytes",&algorithms::AlgoResult::reserved_bytes)
             .def("__repr__", [](const algorithms::AlgoResult& r) {
                 return "<AlgoResult success=" + std::string(r.success ? "True":"False") +
                        " elapsed_ms=" + std::to_string(r.elapsed_ms) + ">";
@@ -1261,6 +1352,17 @@ PYBIND11_MODULE(nexoradb, m) {
 
     // ── StaticGraph ──
 
+    py::class_<SnapshotOptions>(m,"SnapshotOptions")
+            .def(py::init([] { SnapshotOptions options; options.cancellation=std::make_shared<std::atomic<bool>>(false); return options; }))
+            .def_readwrite("incoming",&SnapshotOptions::incoming)
+            .def_readwrite("use_cache",&SnapshotOptions::use_cache)
+            .def_readwrite("max_build_bytes",&SnapshotOptions::max_build_bytes)
+            .def_readwrite("job_priority",&SnapshotOptions::job_priority)
+            .def_readwrite("enqueue_timeout_ms",&SnapshotOptions::enqueue_timeout_ms)
+            .def_readwrite("timeout_ms",&SnapshotOptions::timeout_ms)
+            .def_readwrite("workspace_reservation_bytes",&SnapshotOptions::workspace_reservation_bytes)
+            .def_readwrite("max_result_bytes",&SnapshotOptions::max_result_bytes)
+            .def("cancel",[](SnapshotOptions& options) { if (options.cancellation) options.cancellation->store(true); });
     py::class_<StaticGraph>(m, "StaticGraph",
                             R"doc(
         Snapshot read-only از LiveGraph برای الگوریتم‌های سنگین.
@@ -1278,7 +1380,16 @@ PYBIND11_MODULE(nexoradb, m) {
         )doc")
             .def("node_count",      &StaticGraph::nodeCount)
             .def("edge_count",      &StaticGraph::edgeCount)
+            .def("iter_edges",[](const StaticGraph& graph) { return std::make_unique<SnapshotEdgeStream>(graph); },py::keep_alive<0,1>())
             .def("snapshot_version",&StaticGraph::snapshotVersion)
+            .def("cancel",&StaticGraph::cancel)
+            .def("has_incoming_index",&StaticGraph::hasIncomingIndex)
+            .def("compressed_bytes",&StaticGraph::compressedBytes)
+            .def("planned_peak_bytes",&StaticGraph::plannedPeakBytes)
+            .def("allocation_peak_bytes",&StaticGraph::allocationPeakBytes)
+            .def("allocation_current_bytes",&StaticGraph::allocationCurrentBytes)
+            .def("original_id",&StaticGraph::originalId)
+            .def("cache_hit",&StaticGraph::cacheHit)
             .def("has_node",        &StaticGraph::hasNode,       py::arg("dense_id"))
             .def("node_type",       &StaticGraph::nodeType,      py::arg("dense_id"))
             .def("out_degree",      &StaticGraph::outDegree,     py::arg("dense_id"))
@@ -1319,6 +1430,17 @@ PYBIND11_MODULE(nexoradb, m) {
             .value("Sync", WalDurability::Sync)
             .value("GroupCommit", WalDurability::GroupCommit)
             .value("Async", WalDurability::Async);
+    py::class_<SchedulerOptions>(m,"SchedulerOptions")
+        .def(py::init<>())
+        .def_readwrite("workers",&SchedulerOptions::workers)
+        .def_readwrite("queue_capacity",&SchedulerOptions::queue_capacity)
+        .def_readwrite("max_reserved_bytes",&SchedulerOptions::max_reserved_bytes);
+    py::class_<SchedulerStats>(m,"SchedulerStats")
+        .def_readonly("workers",&SchedulerStats::workers)
+        .def_readonly("queued",&SchedulerStats::queued)
+        .def_readonly("running",&SchedulerStats::running)
+        .def_readonly("reserved_bytes",&SchedulerStats::reserved_bytes)
+        .def_readonly("stopping",&SchedulerStats::stopping);
     py::class_<WalOptions>(m, "WalOptions")
             .def(py::init<>())
             .def_readwrite("durability", &WalOptions::durability)
@@ -1358,9 +1480,10 @@ PYBIND11_MODULE(nexoradb, m) {
             result = gm.build_graph("social")
             print(result.nodes_built, result.edges_built)
         )doc")
-            .def(py::init<DocEngine*, const std::string&, WalOptions>(),
+            .def(py::init<DocEngine*, const std::string&, WalOptions,SchedulerOptions>(),
                  py::arg("doc_engine"), py::arg("graph_dir") = "./graph_data",
                  py::arg("wal_options") = WalOptions{},
+                 py::arg("scheduler_options")=SchedulerOptions{},
                  py::keep_alive<1, 2>())  // GraphManager نباید بیشتر از DocEngine زنده بماند
 
                     // Lifecycle
@@ -1368,14 +1491,15 @@ PYBIND11_MODULE(nexoradb, m) {
                 py::gil_scoped_release rel;
                 return gm.startup();
             }, "بارگذاری گراف‌ها در startup")
-            .def("shutdown", &GraphManager::shutdown, "بستن همه گراف‌ها")
+            .def("shutdown", &GraphManager::shutdown,py::call_guard<py::gil_scoped_release>(), "بستن همه گراف‌ها")
+            .def("scheduler_stats",&GraphManager::schedulerStats)
             .def("set_memory_budget", [](GraphManager& gm,const std::string& name,size_t bytes) {
-                auto* graph=gm.getLiveGraph(name);
+                auto graph=gm.shareLiveGraph(name);
                 if (!graph) throw std::invalid_argument("graph not loaded");
                 graph->setMemoryBudget(bytes);
             },py::arg("graph_name"),py::arg("bytes"))
             .def("memory_usage", [](const GraphManager& gm,const std::string& name) {
-                const auto* graph=gm.getLiveGraph(name);
+                const auto graph=gm.shareLiveGraph(name);
                 if (!graph) throw std::invalid_argument("graph not loaded");
                 const auto usage=graph->memoryUsage(); py::dict result;
                 result["object_bytes"]=usage.object_bytes;
@@ -1398,16 +1522,22 @@ PYBIND11_MODULE(nexoradb, m) {
                 result["heavy_adjacency_lists"]=usage.heavy_adjacency_lists;
                 return result;
             },py::arg("graph_name"))
-            .def("checkpoint_graph", &GraphManager::checkpointGraph, py::arg("graph_name"),
+            .def("checkpoint_graph", &GraphManager::checkpointGraph,py::call_guard<py::gil_scoped_release>(), py::arg("graph_name"),
                  "Durably checkpoint graph data and applied WAL, including Async mode")
 
                     // Graph Definition
-            .def("create_graph",    &GraphManager::createGraph,    py::arg("definition"))
-            .def("add_node_mapping",&GraphManager::addNodeMapping,
+            .def("create_graph",[](GraphManager& gm,GraphDefinition definition) {
+                py::gil_scoped_release release; return gm.createGraph(definition);
+            },py::arg("definition"))
+            .def("add_node_mapping",[](GraphManager& gm,std::string name,NodeMappingDef mapping) {
+                py::gil_scoped_release release; return gm.addNodeMapping(name,mapping);
+            },
                  py::arg("graph_name"), py::arg("mapping"))
-            .def("add_edge_mapping",&GraphManager::addEdgeMapping,
+            .def("add_edge_mapping",[](GraphManager& gm,std::string name,EdgeMappingDef mapping) {
+                py::gil_scoped_release release; return gm.addEdgeMapping(name,mapping);
+            },
                  py::arg("graph_name"), py::arg("mapping"))
-            .def("drop_graph",      &GraphManager::dropGraph,      py::arg("graph_name"))
+            .def("drop_graph",      &GraphManager::dropGraph,py::call_guard<py::gil_scoped_release>(),py::arg("graph_name"))
             .def("list_graphs",     &GraphManager::listGraphs)
             .def("get_definition",  &GraphManager::getDefinition, py::arg("graph_name"))
             .def("is_ready",        &GraphManager::isReady,        py::arg("graph_name"))
@@ -1434,7 +1564,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  }, py::arg("graph_name"),
                  "Rebuild کامل گراف")
 
-            .def("compact_graph",   &GraphManager::compactGraph,   py::arg("graph_name"))
+            .def("compact_graph",   &GraphManager::compactGraph,py::call_guard<py::gil_scoped_release>(),py::arg("graph_name"))
 
                     // Traversal روی LiveGraph
             .def("neighbors",
@@ -1495,11 +1625,12 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("run_connected_components",
                  [](GraphManager& gm, const std::string& graph_name,
-                    const std::vector<std::string>& params) {
+                    const std::vector<std::string>& params,SnapshotOptions options) {
                      py::gil_scoped_release rel;
-                     return algorithms::runConnectedComponents(gm, graph_name, params);
+                     return algorithms::runConnectedComponents(gm,graph_name,params,std::move(options));
                  },
                  py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 py::arg("options") = SnapshotOptions{},
                  "اجرای ConnectedComponents به صورت JobAlgorithm")
 
             .def("run_most_connected",
@@ -1522,20 +1653,22 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("run_community_detection",
                  [](GraphManager& gm, const std::string& graph_name,
-                    const std::vector<std::string>& params) {
+                    const std::vector<std::string>& params,SnapshotOptions options) {
                      py::gil_scoped_release rel;
-                     return algorithms::runCommunityDetection(gm, graph_name, params);
+                     return algorithms::runCommunityDetection(gm,graph_name,params,std::move(options));
                  },
                  py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 py::arg("options") = SnapshotOptions{},
                  "اجرای CommunityDetection به صورت JobAlgorithm")
 
             .def("run_all_distances",
                  [](GraphManager& gm, const std::string& graph_name,
-                    const std::vector<std::string>& params) {
+                    const std::vector<std::string>& params,SnapshotOptions options) {
                      py::gil_scoped_release rel;
-                     return algorithms::runAllDistances(gm, graph_name, params);
+                     return algorithms::runAllDistances(gm,graph_name,params,std::move(options));
                  },
                  py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 py::arg("options") = SnapshotOptions{},
                  "اجرای AllDistances به صورت JobAlgorithm")
 
             .def("run_get_friends",
@@ -1576,32 +1709,34 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("run_betweenness_centrality",
                  [](GraphManager& gm, const std::string& graph_name,
-                    const std::vector<std::string>& params) {
+                    const std::vector<std::string>& params,SnapshotOptions options) {
                      py::gil_scoped_release rel;
-                     return algorithms::runBetweennessCentrality(gm, graph_name, params);
+                     return algorithms::runBetweennessCentrality(gm,graph_name,params,std::move(options));
                  },
                  py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 py::arg("options") = SnapshotOptions{},
                  "اجرای BetweennessCentrality به صورت JobAlgorithm")
 
             .def("run_influence_maximization",
                  [](GraphManager& gm, const std::string& graph_name,
-                    const std::vector<std::string>& params) {
+                    const std::vector<std::string>& params,SnapshotOptions options) {
                      py::gil_scoped_release rel;
-                     return algorithms::runInfluenceMaximization(gm, graph_name, params);
+                     return algorithms::runInfluenceMaximization(gm,graph_name,params,std::move(options));
                  },
                  py::arg("graph_name"), py::arg("params") = std::vector<std::string>{},
+                 py::arg("options") = SnapshotOptions{},
                  "اجرای InfluenceMaximization به صورت JobAlgorithm")
 
                     // Snapshot برای الگوریتم سنگین
             .def("create_snapshot",
                  [](GraphManager& gm, const std::string& name,
                     const std::vector<std::string>& nt,
-                    const std::vector<std::string>& et) -> py::object {
+                    const std::vector<std::string>& et,SnapshotOptions options) -> py::object {
                      // GIL فقط در طول C++ snapshot گرفته می‌شود
                      std::unique_ptr<StaticGraph> snap;
                      {
                          py::gil_scoped_release rel;
-                         snap = gm.createSnapshot(name, nt, et);
+                         snap = gm.createSnapshot(name,nt,et,std::move(options));
                      }
                      // GIL برگشته — py::cast و py::none ایمن هستند
                      if (!snap) return py::none();
@@ -1611,6 +1746,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("graph_name"),
                  py::arg("node_types") = std::vector<std::string>{},
                  py::arg("edge_types") = std::vector<std::string>{},
+                 py::arg("options") = SnapshotOptions{},
                  R"doc(
             گرفتن snapshot برای الگوریتم سنگین (JobAlgorithm).
 
@@ -1682,7 +1818,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  },
                  py::arg("graph_name"), py::arg("limit") = 20,
                  "آخرین رکوردهای WAL گراف → list[dict]")
-            .def("purge_wal",    &GraphManager::purgeWAL,    py::arg("graph_name"));
+            .def("purge_wal",    &GraphManager::purgeWAL,py::call_guard<py::gil_scoped_release>(),py::arg("graph_name"));
 
 #endif // NEXORA_BUILD_GRAPH
 
