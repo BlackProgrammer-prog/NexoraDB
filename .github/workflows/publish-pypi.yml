@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up CPython 3.10
         uses: actions/setup-python@v5
@@ -34,9 +36,14 @@ jobs:
         run: |
           python scripts/check_release_version.py
           if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            [[ "${GITHUB_REF_NAME}" == v* ]] || { echo 'Release tag must start with v'; exit 1; }
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo 'Release commit must belong to main'; exit 1; }
             python scripts/check_release_version.py \
               --expected "${GITHUB_REF_NAME#v}"
           fi
+      - name: Require main for manual publication
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        run: test "$GITHUB_REF" = refs/heads/main
 
       - name: Install native build tools
         run: sudo apt-get update && sudo apt-get install --yes ninja-build
@@ -63,10 +70,21 @@ jobs:
           cmake -S . -B build-wheel -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-            -DPython_EXECUTABLE="$(command -v python)"
-          cmake --build build-wheel --target nexoradb_py --parallel 2
+            -DPython_EXECUTABLE="$(command -v python)" \
+            -DBUILD_TESTING=ON -DNEXORA_BUILD_GRAPH=ON
+          cmake --build build-wheel --target nexoradb_py nexora_doc_tests nexora_graph_tests --parallel 2
           install -Dm755 nexoradb.cpython-310-*.so \
             NexoraDB/src/nexoradb/native/nexoradb.cpython-310-x86_64-linux-gnu.so
+
+      - name: Native and recovery release gate
+        env:
+          PYTHONPATH: build-wheel
+        run: |
+          ctest --test-dir build-wheel --output-on-failure -j2
+          python3 tests/test_native_threading_contract.py
+          python3 tests/test_admin_recovery.py
+          python3 tests/test_operations_metrics.py
+          python3 tests/test_benchmark_history.py
 
       - name: Build wheel
         run: |
