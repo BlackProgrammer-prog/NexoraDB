@@ -30,6 +30,7 @@
 #include <rocksdb/iterator.h>
 #include <rocksdb/options.h>
 #include <rocksdb/slice.h>
+#include <rocksdb/slice_transform.h>
 #include <rocksdb/status.h>
 #include <rocksdb/utilities/transaction.h>
 #include <rocksdb/utilities/transaction_db.h>
@@ -99,6 +100,18 @@ namespace nexora {
 
 // ══════════════════════════════════════════════════════════════
         namespace {
+            class ReadEpoch {
+                rocksdb::DB* db_;
+                const rocksdb::Snapshot* snapshot_;
+                bool owned_;
+            public:
+                explicit ReadEpoch(rocksdb::DB* db,const rocksdb::Snapshot* borrowed=nullptr)
+                    :db_(db),snapshot_(borrowed ? borrowed : db->GetSnapshot()),owned_(!borrowed) {
+                    if (!snapshot_) throw std::runtime_error("unable to acquire RocksDB read snapshot");
+                }
+                ~ReadEpoch() { if (owned_) db_->ReleaseSnapshot(snapshot_); }
+                const rocksdb::Snapshot* get() const { return snapshot_; }
+            };
             rocksdb::Status MatchDocument(
                     std::string_view encoded_or_json,
                     const nexora::query::CompiledQuery& query,
@@ -178,7 +191,7 @@ namespace nexora {
                 }
                 return DBResult::Err(
                         category + "[RocksDB] " + operation + ": " +
-                        status.ToString());
+                        status.ToString(),status.IsCorruption()?"corruption":status.IsIOError()?"io_error":"operation_failed");
             }
 
             std::string PrefixUpperBound(std::string prefix) {
@@ -192,6 +205,21 @@ namespace nexora {
                 }
                 return {};
             }
+
+            class PrefixIterator {
+                std::string upper_;
+                rocksdb::Slice bound_;
+                rocksdb::ReadOptions options_;
+                std::unique_ptr<rocksdb::Iterator> iterator_;
+            public:
+                PrefixIterator(rocksdb::DB* db,const std::string& prefix,const rocksdb::ReadOptions& base)
+                    :upper_(PrefixUpperBound(prefix)),bound_(upper_),options_(MakeScanReadOptions(base)) {
+                    if (!upper_.empty()) options_.iterate_upper_bound=&bound_;
+                    iterator_.reset(db->NewIterator(options_));
+                }
+                PrefixIterator(const PrefixIterator&)=delete;
+                rocksdb::Iterator* operator->() const { return iterator_.get(); }
+            };
 
             std::string EncodeCursorToken(const std::string& key) {
                 static constexpr char hex[] = "0123456789abcdef";
@@ -624,19 +652,25 @@ namespace nexora {
 
         DocEngine::DocEngine(
                 const std::string& db_path,
-                const TransactionSettings& transaction_settings)
+                const TransactionSettings& transaction_settings,const RocksSettings& rocks_settings)
                 : db_path_(db_path),
-                  txn_db_(nullptr, [](rocksdb::TransactionDB* db) {
-                      if (db) { db->SyncWAL(); delete db; }
-                  }) {
+                  rocks_settings_(rocks_settings),
+                  rocks_resources_(rocks_settings.shared_resources ? rocks_settings.shared_resources :
+                      std::make_shared<RocksResources>(rocks_settings.memory_budget_bytes,rocks_settings.block_cache_bytes)),
+                  txn_db_(nullptr, [this](rocksdb::TransactionDB* db) {
+                      if (db) {
+                          uint64_t background_errors=0;
+                          bool failed=!db->GetIntProperty("rocksdb.background-errors",&background_errors) || background_errors!=0;
+                          {std::lock_guard lock(operations_.mutex); failed|=operations_.io_error || operations_.corruption;}
+                          // RocksDB 8.5 debug builds assert on SyncWAL after a
+                          // previous WAL append error. Do not retry a failed WAL
+                          // implicitly during destruction or claim a clean sync.
+                          if(!failed) (void)db->SyncWAL();
+                          delete db;
+                      }
+                  }),db_options_(MakeRocksOptions(rocks_settings,rocks_resources_)),
+                  write_options_(MakeDocumentWriteOptions(rocks_settings.durability)),read_options_(MakeDocumentReadOptions()) {
 
-            db_options_.create_if_missing              = true;
-            db_options_.create_missing_column_families = true;
-            db_options_.compression                    = rocksdb::kSnappyCompression;
-            db_options_.max_open_files                 = 500;
-            db_options_.write_buffer_size             = 64 * 1024 * 1024;  // 64 MB
-            db_options_.max_write_buffer_number       = 3;
-            db_options_.target_file_size_base         = 64 * 1024 * 1024;
 
             // Immutable defaults: sync=false, verify_checksums=true. Customize
             // per-call snapshots, bounds and cache policy on local copies only.
@@ -670,7 +704,7 @@ namespace nexora {
                     read_options_,
                     keys::kDocumentFormat,
                     &stored_document_format);
-            if (s.ok() && stored_document_format != "1") {
+            if (s.ok() && stored_document_format != "1" && stored_document_format != "2") {
                 throw std::runtime_error(
                         "[NexoraDB] Unsupported document format version: " +
                         stored_document_format);
@@ -680,6 +714,7 @@ namespace nexora {
                         "[NexoraDB] Failed to read document format metadata: " +
                         s.ToString());
             }
+            ValidateFormatManifest();
             if (!EnsureInternalCollections()) {
                 throw std::runtime_error("[NexoraDB] Failed to initialize internal collections");
             }
@@ -708,9 +743,8 @@ namespace nexora {
         }
 
         bool DocEngine::IsHealthy() const noexcept {
-            if (!txn_db_) return false;
-            std::string prop;
-            return txn_db_->GetProperty("rocksdb.num-live-versions", &prop);
+            try { return nlohmann::json::parse(HealthReport()).at("ready").get<bool>(); }
+            catch(...) { return false; }
         }
 
         void DocEngine::SetMutationFaultPointForTesting(
@@ -783,7 +817,7 @@ namespace nexora {
             std::string format;
             rocksdb::Status status = txn_db_->Get(
                     read_options_, keys::kDocumentFormat, &format);
-            if (status.ok() && format == "1") {
+            if (status.ok() && (format == "1" || format == "2")) {
                 complete = true;
                 return rocksdb::Status::OK();
             }
@@ -798,7 +832,7 @@ namespace nexora {
             const std::string prefix = keys::kData;
             const std::string upper_value = PrefixUpperBound(prefix);
             const rocksdb::Slice upper_bound(upper_value);
-            rocksdb::ReadOptions scan_options = read_options_;
+            rocksdb::ReadOptions scan_options = MakeScanReadOptions(read_options_);
             scan_options.fill_cache = false;
             scan_options.iterate_upper_bound = &upper_bound;
             auto iterator = std::unique_ptr<rocksdb::Iterator>(
@@ -844,6 +878,8 @@ namespace nexora {
             }
             if (!iterator->status().ok()) return iterator->status();
 
+            // Selected keys are owned. Do not pin old memtables while committing.
+            iterator.reset();
             std::unique_ptr<rocksdb::Transaction> transaction(
                     txn_db_->BeginTransaction(
                             write_options_, transaction_options_));
@@ -998,7 +1034,7 @@ namespace nexora {
             if (!CollectionExists(collection_name))
                 return DBResult::Err("Collection '" + collection_name + "' does not exist");
 
-            rocksdb::ReadOptions ro;
+            rocksdb::ReadOptions ro=MakeScanReadOptions(read_options_);
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
             rocksdb::WriteBatch batch;
 
@@ -1154,7 +1190,7 @@ namespace nexora {
             }
 
             rocksdb::WriteBatch batch;
-            rocksdb::ReadOptions ro;
+            rocksdb::ReadOptions ro=MakeScanReadOptions(read_options_);
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
             if (idx_def->format_version == indexv2::kFormatVersion &&
                 !idx_def->index_id.empty()) {
@@ -1194,7 +1230,7 @@ namespace nexora {
             auto indexes = GetIndexes(collection_name);
             rocksdb::WriteBatch batch;
             auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                    txn_db_->NewIterator(read_options_));
+                    txn_db_->NewIterator(MakeScanReadOptions(read_options_)));
 
             for (auto& index : indexes) {
                 if (index.format_version == indexv2::kFormatVersion &&
@@ -1275,7 +1311,7 @@ namespace nexora {
                 rocksdb::WriteBatch batch;
                 std::size_t count = 0;
                 auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                        txn_db_->NewIterator(read_options_));
+                        txn_db_->NewIterator(MakeScanReadOptions(read_options_)));
                 for (iterator->Seek(prefix);
                      iterator->Valid() && iterator->key().starts_with(prefix) &&
                      count < 1000;
@@ -1342,7 +1378,7 @@ namespace nexora {
             while (true) {
                 std::vector<std::string> keys_to_process;
                 std::size_t bytes = 0;
-                rocksdb::ReadOptions scan_options;
+                rocksdb::ReadOptions scan_options=MakeScanReadOptions(read_options_);
                 scan_options.fill_cache = false;
                 const std::string upper_value = PrefixUpperBound(data_prefix);
                 const rocksdb::Slice upper_bound(upper_value);
@@ -1560,11 +1596,9 @@ namespace nexora {
 
             const std::string foreign_key_prefix = std::string(keys::kMetaFk) + collection_name + ":";
 
-            rocksdb::ReadOptions iterator_options = read_options_;
+            rocksdb::ReadOptions iterator_options = MakeScanReadOptions(read_options_);
             {
-                auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                        txn_db_->NewIterator(iterator_options)
-                );
+                PrefixIterator iterator(txn_db_.get(),foreign_key_prefix,iterator_options);
 
                 for (iterator->Seek(foreign_key_prefix);
                      iterator->Valid() &&
@@ -1590,8 +1624,7 @@ namespace nexora {
             const std::string index_prefix = std::string(keys::kMetaIdx) + collection_name + ":" ;
 
             {
-                auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                        txn_db_->NewIterator(iterator_options));
+                PrefixIterator iterator(txn_db_.get(),index_prefix,iterator_options);
 
                 for (iterator->Seek(index_prefix);
                      iterator->Valid() &&
@@ -1714,8 +1747,8 @@ namespace nexora {
 
                 if (!index_iterator) {
                     index_iterator.reset(transaction
-                            ? transaction->GetIterator(read_options_)
-                            : txn_db_->NewIterator(read_options_));
+                            ? transaction->GetIterator(MakeScanReadOptions(read_options_))
+                            : txn_db_->NewIterator(MakeScanReadOptions(read_options_)));
                 }
 
                 index_iterator->Seek(index_prefix);
@@ -2208,7 +2241,7 @@ namespace nexora {
 // §9  CRUD - Insert
 // ══════════════════════════════════════════════════════════════
 
-        DBResult DocEngine::InsertOne(
+        DBResult DocEngine::InsertOneImpl(
                 const std::string& collection_name,
                 const std::string& input_document) {
             std::string bson_document = input_document;
@@ -2337,7 +2370,7 @@ namespace nexora {
             return DBResult::Ok(document_id);
         }
 
-        DBResult DocEngine::InsertMany(const std::string&              collection_name,
+        DBResult DocEngine::InsertManyImpl(const std::string&              collection_name,
                                        const std::vector<std::string>& bson_documents) {
             TouchUserActivity();
             std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
@@ -2554,7 +2587,7 @@ namespace nexora {
 // §10  CRUD - Find
 // ══════════════════════════════════════════════════════════════
 
-        DBResult DocEngine::FindById(const std::string& collection_name,
+        DBResult DocEngine::FindByIdImpl(const std::string& collection_name,
                                      const std::string& doc_id) {
             TouchUserActivity();
             if (IsReservedCollectionName(collection_name))
@@ -2590,13 +2623,16 @@ namespace nexora {
             return ExecuteQuery(collection_name, condition, limit, skip, true).result;
         }
 
-        DocEngine::QueryExecution DocEngine::ExecuteQuery(
+        DocEngine::QueryExecution DocEngine::ExecuteQueryImpl(
                 const std::string& collection_name,
                 const nexora::query::Condition& condition,
                 std::uint32_t limit,
                 std::uint32_t skip,
-                bool force_full_scan) {
-            std::shared_lock ddl_lock(index_ddl_mutex_);
+                bool force_full_scan,const rocksdb::Snapshot* shared_epoch,bool ddl_already_locked) {
+            std::shared_lock ddl_lock(index_ddl_mutex_,std::defer_lock);
+            if (!ddl_already_locked) ddl_lock.lock();
+            ReadEpoch epoch(txn_db_.get(),shared_epoch);
+            auto read_epoch=read_options_; read_epoch.snapshot=epoch.get();
             QueryExecution execution;
             TouchUserActivity();
             if (IsReservedCollectionName(collection_name))
@@ -2708,33 +2744,47 @@ namespace nexora {
                 }
                 const std::string upper_value = PrefixUpperBound(prefix);
                 const rocksdb::Slice upper_bound(upper_value);
-                rocksdb::ReadOptions options;
+                rocksdb::ReadOptions options=MakeScanReadOptions(read_epoch);
                 options.iterate_upper_bound = &upper_bound;
+                if (db_options_.prefix_extractor && db_options_.prefix_extractor->InDomain(seek_key)) {
+                    options.total_order_seek=false; options.prefix_same_as_start=true;
+                }
                 auto iterator = std::unique_ptr<rocksdb::Iterator>(
                         txn_db_->NewIterator(options));
-                for (iterator->Seek(seek_key); iterator->Valid(); iterator->Next()) {
+                iterator->Seek(seek_key);
+                bool finished=false;
+                while (iterator->Valid() && !finished) {
+                    std::vector<std::string> keys;
+                    keys.reserve(64);
+                    while (iterator->Valid() && keys.size()<64) {
                     const std::string physical_key = iterator->key().ToString();
                     if (plan.range) {
                         if (plan.range->op == query::Op::GT &&
-                            physical_key.starts_with(boundary)) continue;
+                            physical_key.starts_with(boundary)) { iterator->Next(); continue; }
                         if (plan.range->op == query::Op::LT &&
-                            physical_key >= boundary) break;
+                            physical_key >= boundary) { finished=true; break; }
                         if (plan.range->op == query::Op::LTE &&
                             physical_key > boundary &&
-                            !physical_key.starts_with(boundary)) break;
+                            !physical_key.starts_with(boundary)) { finished=true; break; }
                     }
                     ++execution.scanned_index_entries;
-                    std::string document;
-                    const rocksdb::Status status = txn_db_->Get(
-                            read_options_, MakeDocKey(collection_name,
-                                                      iterator->value().ToString()),
-                            &document);
-                    if (status.IsNotFound()) continue;
-                    if (!status.ok()) {
-                        execution.result = RocksFailure("indexed query document read", status);
-                        return execution;
+                    keys.push_back(MakeDocKey(collection_name,iterator->value().ToString()));
+                    iterator->Next();
                     }
-                    if (append_if_match(document)) break;
+                    std::vector<rocksdb::Slice> slices; slices.reserve(keys.size());
+                    for (const auto& key:keys) slices.emplace_back(key);
+                    std::vector<std::string> documents;
+                    if (!keys.empty()) {
+                        ++multiget_calls_; multiget_keys_+=keys.size();
+                        const auto statuses=txn_db_->MultiGet(read_epoch,slices,&documents);
+                        for (size_t index=0;index<statuses.size();++index) {
+                            if (statuses[index].IsNotFound()) continue;
+                            if (!statuses[index].ok()) {
+                                execution.result=RocksFailure("indexed query MultiGet",statuses[index]); return execution;
+                            }
+                            if (append_if_match(documents[index])) { finished=true; break; }
+                        }
+                    }
                 }
                 if (!decode_status.ok()) {
                     execution.result = RocksFailure(
@@ -2749,7 +2799,7 @@ namespace nexora {
                 const std::string data_prefix = std::string(keys::kData) + collection_name + ":";
                 const std::string upper_value = PrefixUpperBound(data_prefix);
                 const rocksdb::Slice upper_bound(upper_value);
-                rocksdb::ReadOptions options;
+                rocksdb::ReadOptions options=MakeScanReadOptions(read_epoch);
                 options.fill_cache = false;
                 options.iterate_upper_bound = &upper_bound;
                 auto iterator = std::unique_ptr<rocksdb::Iterator>(
@@ -2861,7 +2911,7 @@ namespace nexora {
             const std::string prefix = std::string(keys::kData) + collection_name + ":";
             const std::string upper_value = PrefixUpperBound(prefix);
             const rocksdb::Slice upper_bound(upper_value);
-            rocksdb::ReadOptions options;
+            rocksdb::ReadOptions options=MakeScanReadOptions(read_options_);
             options.fill_cache = false;
             options.iterate_upper_bound = &upper_bound;
             options.snapshot = session->snapshot;
@@ -2953,7 +3003,7 @@ namespace nexora {
             }
         }
 
-        DBResult DocEngine::UpdateById(
+        DBResult DocEngine::UpdateByIdImpl(
                 const std::string& collection_name,
                 const std::string& doc_id,
                 const nexora::query::UpdateSpec& update_spec) {
@@ -3094,7 +3144,7 @@ namespace nexora {
             std::vector<std::string> candidate_ids;
 
             {
-                rocksdb::ReadOptions scan_options = read_options_;
+                rocksdb::ReadOptions scan_options = MakeScanReadOptions(read_options_);
                 scan_options.fill_cache = false;
                 const std::string upper_value = PrefixUpperBound(data_prefix);
                 const rocksdb::Slice upper_bound(upper_value);
@@ -3243,7 +3293,7 @@ namespace nexora {
             const std::string prefix =
                     std::string(keys::kData) + collection_name + ":";
             std::vector<std::pair<std::string, std::size_t>> candidates;
-            rocksdb::ReadOptions scan_options = read_options_;
+            rocksdb::ReadOptions scan_options = MakeScanReadOptions(read_options_);
             scan_options.fill_cache = false;
             const std::string upper_value = PrefixUpperBound(prefix);
             const rocksdb::Slice upper_bound(upper_value);
@@ -3334,7 +3384,7 @@ namespace nexora {
 // §12  CRUD - Delete
 // ══════════════════════════════════════════════════════════════
 
-        DBResult DocEngine::DeleteById(
+        DBResult DocEngine::DeleteByIdImpl(
                 const std::string& collection_name,
                 const std::string& doc_id) {
             TouchUserActivity();
@@ -3452,7 +3502,7 @@ namespace nexora {
             std::vector<std::string> candidate_ids;
 
             {
-                rocksdb::ReadOptions scan_options = read_options_;
+                rocksdb::ReadOptions scan_options = MakeScanReadOptions(read_options_);
                 scan_options.fill_cache = false;
                 const std::string upper_value = PrefixUpperBound(data_prefix);
                 const rocksdb::Slice upper_bound(upper_value);
@@ -3574,7 +3624,7 @@ namespace nexora {
             const std::string prefix =
                     std::string(keys::kData) + collection_name + ":";
             std::vector<std::pair<std::string, std::size_t>> candidates;
-            rocksdb::ReadOptions scan_options = read_options_;
+            rocksdb::ReadOptions scan_options = MakeScanReadOptions(read_options_);
             scan_options.fill_cache = false;
             const std::string upper_value = PrefixUpperBound(prefix);
             const rocksdb::Slice upper_bound(upper_value);
@@ -3677,7 +3727,7 @@ namespace nexora {
             std::string data_prefix = std::string(keys::kData) + collection_name + ":";
 
             // fill_cache=false مناسب bulk scan — مصرف cache RocksDB را کاهش می‌دهد
-            rocksdb::ReadOptions ro;
+            rocksdb::ReadOptions ro=MakeScanReadOptions(read_options_);
             ro.fill_cache       = false;
             ro.total_order_seek = true;
             const std::string upper_value = PrefixUpperBound(data_prefix);
@@ -3757,7 +3807,7 @@ namespace nexora {
             std::uint64_t document_count = 0;
 
             auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                    transaction->GetIterator(read_options_));
+                    transaction->GetIterator(MakeScanReadOptions(read_options_)));
             for (iterator->Seek(data_prefix);
                  iterator->Valid() &&
                  iterator->key().starts_with(prefix_slice);
@@ -3802,7 +3852,7 @@ namespace nexora {
             std::string scan_prefix = std::string(keys::kData) + collection_name + ":";
             std::string seek_key    = scan_prefix + id_prefix;
 
-            rocksdb::ReadOptions ro;
+            rocksdb::ReadOptions ro=MakeScanReadOptions(read_options_);
             ro.fill_cache = false;
             auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
 
@@ -3826,133 +3876,86 @@ namespace nexora {
 // §14  LookupJoin
 // ══════════════════════════════════════════════════════════════
 
-        JoinResult DocEngine::LookupJoin(const std::string&              from_collection,
-                                         const std::string&              from_field,
-                                         const std::string&              to_collection,
-                                         const std::string&              to_field,
-                                         const nexora::query::Condition& condition,
-                                         uint32_t                        limit) {
+        JoinResult DocEngine::LookupJoin(const std::string& from_collection,
+                const std::string& from_field,const std::string& to_collection,
+                const std::string& to_field,const nexora::query::Condition& condition,uint32_t limit) {
             JoinResult result;
-
-            if (IsReservedCollectionName(from_collection) ||
-                IsReservedCollectionName(to_collection)) {
-                result.error_msg = "reserved collection name";
-                return result;
+            std::shared_lock ddl_lock(index_ddl_mutex_);
+            if (IsReservedCollectionName(from_collection) || IsReservedCollectionName(to_collection)) {
+                result.error_msg="reserved collection name"; return result;
             }
-
-            if (!CollectionExists(from_collection)) {
-                result.error_msg = "Collection '" + from_collection + "' does not exist";
-                return result;
+            if (!CollectionExists(from_collection) || !CollectionExists(to_collection)) {
+                result.error_msg="JOIN collection does not exist"; return result;
             }
-            if (!CollectionExists(to_collection)) {
-                result.error_msg = "Collection '" + to_collection + "' does not exist";
-                return result;
-            }
-            const nexora::query::CompiledQuery compiled_query(condition);
-            if (!compiled_query.valid()) {
-                result.error_msg = "Invalid query: " + compiled_query.error();
-                return result;
-            }
-
-            std::string data_prefix = std::string(keys::kData) + from_collection + ":";
-            rocksdb::ReadOptions ro;
-            ro.fill_cache = false;
-            const std::string upper_value = PrefixUpperBound(data_prefix);
-            const rocksdb::Slice upper_bound(upper_value);
-            ro.iterate_upper_bound = &upper_bound;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            uint32_t count = 0;
-
-            for (it->Seek(data_prefix);
-                 it->Valid() && it->key().starts_with(data_prefix); it->Next()) {
-                const std::string stored_from = it->value().ToString();
-                bool matched = false;
-                rocksdb::Status match_status = MatchDocument(
-                        stored_from, compiled_query, matched);
-                if (!match_status.ok()) {
-                    result.error_msg = match_status.ToString();
-                    return result;
-                }
-                if (!matched) continue;
-                std::string from_bson;
-                rocksdb::Status decode_status = DecodeStoredDocument(
-                        stored_from, from_bson);
-                if (!decode_status.ok()) {
-                    result.error_msg = decode_status.ToString();
-                    return result;
-                }
-                const auto encoded = DocumentCodec::EncodeJson(from_bson);
-                if (!encoded.success) {
-                    result.error_msg = encoded.error;
-                    return result;
-                }
-                const query::DocumentView source_view(std::string_view(encoded.value).substr(
-                        DocumentCodec::kEnvelopeSize));
-                const query::CompiledFieldPath path(from_field);
-                if (!path.valid()) {
-                    result.error_msg = path.error();
-                    return result;
-                }
-                const auto value = source_view.Get(path);
-                query::ValueType value_type;
-                switch (value.type) {
-                    case query::DocumentValueType::String: value_type = query::ValueType::String; break;
-                    case query::DocumentValueType::Int64: value_type = query::ValueType::Int64; break;
-                    case query::DocumentValueType::Float64: value_type = query::ValueType::Float64; break;
-                    case query::DocumentValueType::Bool: value_type = query::ValueType::Bool; break;
-                    default: continue; // Null/missing/containers do not join.
-                }
-                const std::string join_val = ScalarToString(value);
-                std::string to_json;
-                if (to_field == "_id") {
-                    if (value_type != query::ValueType::String) continue;
-                    std::string to_bson;
-                    rocksdb::Status s = txn_db_->Get(read_options_,
-                                                     MakeDocKey(to_collection, join_val),
-                                                     &to_bson);
-                    if (s.IsNotFound()) continue;
-                    if (!s.ok()) {
-                        result.error_msg = s.ToString();
-                        return result;
+            const query::CompiledQuery compiled(condition);
+            const query::CompiledFieldPath path(from_field);
+            if (!compiled.valid() || !path.valid()) { result.error_msg="Invalid JOIN predicate/path"; return result; }
+            ReadEpoch epoch(txn_db_.get()); auto read_epoch=read_options_; read_epoch.snapshot=epoch.get();
+            const std::string prefix=std::string(keys::kData)+from_collection+":";
+            const auto upper_value=PrefixUpperBound(prefix); const rocksdb::Slice upper(upper_value);
+            auto scan=MakeScanReadOptions(read_epoch); scan.iterate_upper_bound=&upper;
+            auto iterator=std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(scan));
+            struct Candidate { std::string document,value; query::ValueType type; };
+            iterator->Seek(prefix); bool finished=false;
+            while (iterator->Valid() && !finished) {
+                std::vector<Candidate> batch; batch.reserve(64);
+                while (iterator->Valid() && batch.size()<64) {
+                    const auto stored=iterator->value().ToString(); iterator->Next();
+                    bool matched=false; auto status=MatchDocument(stored,compiled,matched);
+                    if (!status.ok()) { result.error_msg=status.ToString(); return result; }
+                    if (!matched) continue;
+                    std::string document; status=DecodeStoredDocument(stored,document);
+                    if (!status.ok()) { result.error_msg=status.ToString(); return result; }
+                    const auto encoded=DocumentCodec::EncodeJson(document);
+                    if (!encoded.success) { result.error_msg=encoded.error; return result; }
+                    query::DocumentView view(std::string_view(encoded.value).substr(DocumentCodec::kEnvelopeSize));
+                    const auto value=view.Get(path); query::ValueType type;
+                    switch (value.type) {
+                        case query::DocumentValueType::String: type=query::ValueType::String; break;
+                        case query::DocumentValueType::Int64: type=query::ValueType::Int64; break;
+                        case query::DocumentValueType::Float64: type=query::ValueType::Float64; break;
+                        case query::DocumentValueType::Bool: type=query::ValueType::Bool; break;
+                        default: continue;
                     }
-                    decode_status = DecodeStoredDocument(to_bson, to_json);
-                    if (!decode_status.ok()) {
-                        result.error_msg = decode_status.ToString();
-                        return result;
-                    }
-                } else {
-                    const auto joined = FindMany(to_collection, query::Condition::Leaf(
-                            to_field, query::Op::EQ, join_val, value_type), 1, 0);
-                    if (!joined.success) {
-                        result.error_msg = joined.error_msg;
-                        return result;
-                    }
-                    const auto rows = nlohmann::ordered_json::parse(joined.data, nullptr, false);
-                    if (!rows.is_array()) {
-                        result.error_msg = "Invalid JOIN result representation";
-                        return result;
-                    }
-                    if (rows.empty()) continue;
-                    to_json = rows.front().dump();
+                    if (to_field=="_id" && type!=query::ValueType::String) continue;
+                    batch.push_back({std::move(document),ScalarToString(value),type});
                 }
-                auto merged = nlohmann::ordered_json::parse(from_bson, nullptr, false);
-                const auto target = nlohmann::ordered_json::parse(to_json, nullptr, false);
-                if (!merged.is_object() || !target.is_object()) {
-                    result.error_msg = "Invalid JOIN document representation";
-                    return result;
+                std::vector<std::string> targets;
+                std::vector<rocksdb::Status> statuses;
+                if (to_field=="_id" && !batch.empty()) {
+                    std::vector<std::string> keys; keys.reserve(batch.size());
+                    for (const auto& row:batch) keys.push_back(MakeDocKey(to_collection,row.value));
+                    std::vector<rocksdb::Slice> slices; slices.reserve(keys.size());
+                    for (const auto& key:keys) slices.emplace_back(key);
+                    ++multiget_calls_; multiget_keys_+=keys.size();
+                    statuses=txn_db_->MultiGet(read_epoch,slices,&targets);
                 }
-                merged["__joined__"] = target;
-                result.records.push_back(merged.dump());
-                ++count;
-                if (limit > 0 && count >= limit) break;
+                for (size_t index=0;index<batch.size();++index) {
+                    std::string target;
+                    if (to_field=="_id") {
+                        if (statuses[index].IsNotFound()) continue;
+                        if (!statuses[index].ok()) { result.error_msg=statuses[index].ToString(); return result; }
+                        const auto status=DecodeStoredDocument(targets[index],target);
+                        if (!status.ok()) { result.error_msg=status.ToString(); return result; }
+                    } else {
+                        // Preserve existing first-match inner lookup semantics.
+                        const auto query=ExecuteQuery(to_collection,query::Condition::Leaf(to_field,query::Op::EQ,
+                            batch[index].value,batch[index].type),1,0,false,epoch.get(),true).result;
+                        if (!query.success) { result.error_msg=query.error_msg; return result; }
+                        const auto rows=nlohmann::ordered_json::parse(query.data,nullptr,false);
+                        if (!rows.is_array()) { result.error_msg="Invalid JOIN result"; return result; }
+                        if (rows.empty()) continue;
+                        target=rows.front().dump();
+                    }
+                    auto source=nlohmann::ordered_json::parse(batch[index].document,nullptr,false);
+                    const auto joined=nlohmann::ordered_json::parse(target,nullptr,false);
+                    if (!source.is_object() || !joined.is_object()) { result.error_msg="Invalid JOIN document"; return result; }
+                    source["__joined__"]=joined; result.records.push_back(source.dump());
+                    if (limit && result.records.size()>=limit) { finished=true; break; }
+                }
             }
-
-            if (!it->status().ok()) {
-                result.error_msg = it->status().ToString();
-                return result;
-            }
-            result.success = true;
-            return result;
+            if (!iterator->status().ok()) { result.error_msg=iterator->status().ToString(); return result; }
+            result.success=true; return result;
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -3961,8 +3964,7 @@ namespace nexora {
 
         std::unique_ptr<TxHandle> DocEngine::BeginTransaction() {
             TouchUserActivity();
-            rocksdb::WriteOptions wo;
-            wo.sync = false;
+            rocksdb::WriteOptions wo=write_options_;
             rocksdb::Transaction* tx = txn_db_->BeginTransaction(
                     wo,
                     transaction_options_);
@@ -4441,7 +4443,7 @@ namespace nexora {
             const std::string prefix = std::string(keys::kData) +
                                        keys::kInternalAppTokens + ":";
             auto iterator = std::unique_ptr<rocksdb::Iterator>(
-                    txn_db_->NewIterator(read_options_));
+                    txn_db_->NewIterator(MakeScanReadOptions(read_options_)));
             std::string json = "[";
             bool first = true;
             for (iterator->Seek(prefix);
@@ -4529,8 +4531,8 @@ namespace nexora {
         std::vector<std::string> DocEngine::ListCollections() const {
             std::vector<std::string> result;
             std::string prefix = keys::kMetaCol;
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
+            rocksdb::ReadOptions ro=MakeScanReadOptions(read_options_);
+            PrefixIterator it(txn_db_.get(),prefix,ro);
             for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
                 std::string collection = it->key().ToString().substr(prefix.size());
                 if (!IsReservedCollectionName(collection)) result.push_back(std::move(collection));
@@ -4551,6 +4553,68 @@ namespace nexora {
 #else
             return 0;
 #endif
+        }
+
+        RocksMetrics DocEngine::GetRocksMetrics() const {
+            RocksMetrics result;
+            result.cache_capacity=rocks_resources_->cache->GetCapacity();
+            result.cache_usage=rocks_resources_->cache->GetUsage();
+            result.cache_pinned=rocks_resources_->cache->GetPinnedUsage();
+            result.memtable_budget=rocks_resources_->memtable_bytes;
+            result.memtable_usage=rocks_resources_->write_buffers->memory_usage();
+            auto property=[&](const char* name,uint64_t& value) {
+                if (!txn_db_->GetIntProperty(name,&value)) {
+                    std::string text;
+                    if (txn_db_->GetProperty(name,&text)) (void)std::from_chars(text.data(),text.data()+text.size(),value);
+                }
+            };
+            property("rocksdb.estimate-pending-compaction-bytes",result.pending_compaction_bytes);
+            property("rocksdb.live-sst-files-size",result.live_sst_bytes);
+            property("rocksdb.total-sst-files-size",result.total_sst_bytes);
+            property("rocksdb.num-files-at-level0",result.l0_files);
+            property("rocksdb.is-write-stopped",result.write_stopped);
+            property("rocksdb.actual-delayed-write-rate",result.delayed_write_rate);
+            property("rocksdb.num-running-compactions",result.running_compactions);
+            property("rocksdb.num-running-flushes",result.running_flushes);
+            const auto& stats=db_options_.statistics;
+            result.multiget_calls=multiget_calls_; result.multiget_keys=multiget_keys_;
+            result.statistics_enabled=bool(stats);
+            if (!stats) return result; // Properties and engine counters remain available.
+            result.logical_write_bytes=stats->getTickerCount(rocksdb::BYTES_WRITTEN);
+            result.wal_write_bytes=stats->getTickerCount(rocksdb::WAL_FILE_BYTES);
+            result.flush_write_bytes=stats->getTickerCount(rocksdb::FLUSH_WRITE_BYTES);
+            result.compaction_write_bytes=stats->getTickerCount(rocksdb::COMPACT_WRITE_BYTES);
+            result.stall_micros=stats->getTickerCount(rocksdb::STALL_MICROS);
+            result.cache_hits=stats->getTickerCount(rocksdb::BLOCK_CACHE_HIT);
+            result.cache_misses=stats->getTickerCount(rocksdb::BLOCK_CACHE_MISS);
+            result.bloom_useful=stats->getTickerCount(rocksdb::BLOOM_FILTER_USEFUL);
+            result.bloom_full_positive=stats->getTickerCount(rocksdb::BLOOM_FILTER_FULL_POSITIVE);
+            result.bloom_prefix_checked=stats->getTickerCount(rocksdb::BLOOM_FILTER_PREFIX_CHECKED);
+            result.bloom_prefix_useful=stats->getTickerCount(rocksdb::BLOOM_FILTER_PREFIX_USEFUL);
+            result.get_read_bytes=stats->getTickerCount(rocksdb::BYTES_READ);
+            result.multiget_read_bytes=stats->getTickerCount(rocksdb::NUMBER_MULTIGET_BYTES_READ);
+            result.iterator_read_bytes=stats->getTickerCount(rocksdb::ITER_BYTES_READ);
+            result.compaction_read_bytes=stats->getTickerCount(rocksdb::COMPACT_READ_BYTES);
+            const auto ratio=[](uint64_t numerator,uint64_t other) {
+                const double total=double(numerator)+double(other);
+                return total ? double(numerator)/total : 0.0;
+            };
+            result.cache_hit_rate=ratio(result.cache_hits,result.cache_misses);
+            result.bloom_useful_rate=ratio(result.bloom_useful,result.bloom_full_positive);
+            if (result.bloom_prefix_checked) result.bloom_prefix_useful_rate=
+                double(result.bloom_prefix_useful)/double(result.bloom_prefix_checked);
+            if (result.logical_write_bytes) result.sst_write_amplification=
+                double(result.flush_write_bytes+result.compaction_write_bytes)/double(result.logical_write_bytes);
+            return result;
+        }
+        DBResult DocEngine::FlushStorage() {
+            rocksdb::FlushOptions options; options.wait=true;
+            const auto status=txn_db_->Flush(options);
+            if(!status.ok()) {
+                std::lock_guard lock(operations_.mutex);
+                operations_.io_error|=status.IsIOError(); operations_.corruption|=status.IsCorruption();
+            }
+            return status.ok() ? DBResult::Ok() : RocksFailure("Flush",status);
         }
 
         uint64_t DocEngine::GetDiskUsageBytes() const {

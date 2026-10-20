@@ -42,6 +42,8 @@
 // ─── QueryLayer (باید قبل از هر چیز دیگری include شود) ───
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
+#include "RocksTuning.h"
+#include "Operations.h"
 
 // ─── RocksDB ───
 #include <rocksdb/db.h>
@@ -384,7 +386,9 @@ namespace nexora {
              */
             explicit DocEngine(
                     const std::string& db_path,
-                    const TransactionSettings& transaction_settings = {});
+                    const TransactionSettings& transaction_settings = {},const RocksSettings& rocks_settings={});
+            RocksMetrics GetRocksMetrics() const;
+            DBResult FlushStorage(); // Maintenance flush, not a replacement for sync durability.
 
             /**
              * @brief مخرب - اتصال RocksDB را می‌بندد
@@ -400,6 +404,17 @@ namespace nexora {
              * @return true اگر RocksDB سالم و قابل استفاده باشد
              */
             bool IsHealthy() const noexcept;
+            DBResult CreateCheckpoint(const std::string& destination);
+            DBResult IntegrityCheck(bool verify_indexes=true) const;
+            DBResult FormatVersions() const;
+            DBResult UpgradeFormatManifest();
+            static DBResult InspectStore(const std::string& path);
+            void PauseDocumentMigration(); // Offline maintenance; no active caller transaction.
+            std::string OperationMetrics() const;
+            std::string DrainSlowQueries();
+            void ConfigureSlowQueries(uint64_t threshold_us,size_t capacity=128);
+            std::string HealthReport() const;
+            DBResult PrepareShutdown(); // Caller must first stop accepting requests.
 
             /** Test-only one-shot fault injection for atomicity tests. */
             void SetMutationFaultPointForTesting(
@@ -985,6 +1000,10 @@ namespace nexora {
             // ──────────────────────────────────────────────────────────
 
             std::string db_path_;
+            mutable OperationsState operations_;
+            RocksSettings rocks_settings_;
+            std::shared_ptr<RocksResources> rocks_resources_;
+            mutable std::atomic<uint64_t> multiget_calls_{0},multiget_keys_{0};
 
             /// RocksDB TransactionDB (برای ACID کامل)
             std::unique_ptr<rocksdb::TransactionDB,
@@ -1055,6 +1074,18 @@ namespace nexora {
             };
 
             class MutationBuilder;
+            DBResult InsertOneImpl(const std::string&,const std::string&);
+            DBResult InsertManyImpl(const std::string&,const std::vector<std::string>&);
+            DBResult FindByIdImpl(const std::string&,const std::string&);
+            DBResult UpdateByIdImpl(const std::string&,const std::string&,const nexora::query::UpdateSpec&);
+            DBResult DeleteByIdImpl(const std::string&,const std::string&);
+            void RecordOperation(OperationsState::Kind,uint64_t,const DBResult&,const nlohmann::json& plan={}) const noexcept;
+            template<class Fn> DBResult Observe(OperationsState::Kind kind,Fn fn) {
+                const auto started=std::chrono::steady_clock::now();
+                const auto elapsed=[&] { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count(); };
+                try { auto result=fn(); RecordOperation(kind,elapsed(),result); return result; }
+                catch(...) { RecordOperation(kind,elapsed(),DBResult::Err("exception")); throw; }
+            }
 
             struct QueryExecution {
                 DBResult result;
@@ -1070,7 +1101,9 @@ namespace nexora {
                     const nexora::query::Condition& condition,
                     std::uint32_t limit,
                     std::uint32_t skip,
-                    bool force_full_scan);
+                    bool force_full_scan,const rocksdb::Snapshot* shared_epoch=nullptr,bool ddl_already_locked=false);
+            QueryExecution ExecuteQueryImpl(const std::string&,const nexora::query::Condition&,std::uint32_t,
+                std::uint32_t,bool,const rocksdb::Snapshot*,bool);
 
             rocksdb::Status InjectMutationFaultIfRequested(
                     MutationFaultPoint point) noexcept;
@@ -1153,6 +1186,7 @@ namespace nexora {
             static std::optional<ForeignKeyDefinition> DeserializeFk(const std::string& bytes);
 
             static std::string GenerateDocId();
+            void ValidateFormatManifest() const;
         };
 
     } // namespace core
