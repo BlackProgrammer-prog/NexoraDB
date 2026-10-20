@@ -27,9 +27,10 @@ builder.flush(); // Required: destructor never performs I/O or commits.
    declarations preserve the first existing explicit type, matching CRUD.
 3. Canonicalize undirected endpoints, sort/dedup candidate edges, and compare with
    existing adjacency. Identity is endpoint/type adjacency, not a parallel-edge
-   multigraph. Existing edges retain their direction. Within a batch, undirected
-   candidates win conflicting directed inputs; reverse directed edges remain
-   distinct if no undirected candidate occupies those arcs. Different edge types
+   multigraph. Existing edges retain their direction. Within a batch, the first
+   input wins conflicting directed/undirected inputs, matching single insertion;
+   reverse directed edges remain distinct unless an undirected edge occupies
+   those arcs. Different edge types
    remain distinct. Self-loops contribute one incoming and one outgoing entry.
 4. Accumulate final degrees in RAM. Persist identities/types in one metadata
    replacement before the WAL. Append redo records under one WAL lock with one
