@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 from importlib.metadata import version
+import json
+from pathlib import Path
+import tempfile
 
 import nexoradb
 
@@ -20,6 +23,25 @@ def main() -> int:
     assert nexoradb.__version__ == arguments.expected
     assert build_info["project_version"] == arguments.expected
     assert build_info["build_type"] == "Release"
+    # A correct metadata version alone must not hide an obsolete bundled .so.
+    with tempfile.TemporaryDirectory(prefix="nexora_wheel_smoke_") as directory:
+        root = Path(directory)
+        engine = nexoradb.DocEngine(str(root / "documents"))
+        assert engine.create_collection("items").success
+        assert engine.insert_one("items", '{"_id":"one","value":1}').success
+        assert engine.find_by_id("items", "one").success
+        assert json.loads(engine.health_report())["ready"]
+        assert "operations" in json.loads(engine.operation_metrics())
+        assert engine.integrity_check().success
+        assert engine.create_checkpoint(str(root / "checkpoint")).success
+        manager = nexoradb.GraphManager(engine, str(root / "graphs"))
+        definition = nexoradb.GraphDefinition()
+        definition.name = "smoke"
+        assert manager.create_graph(definition)
+        assert manager.prepare_shutdown()
+        manager.shutdown()
+        assert engine.prepare_shutdown().success
+        del manager, engine
     print(
         "Installed wheel verified:",
         package_version,
