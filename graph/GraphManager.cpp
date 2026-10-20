@@ -29,8 +29,9 @@ namespace nexora {
 // ══════════════════════════════════════════════════════════════
 
         GraphManager::GraphManager(nexora::core::DocEngine* doc_engine,
-                                   std::filesystem::path graph_dir, WalOptions wal_options)
-                : doc_engine_(doc_engine), graph_dir_(std::move(graph_dir)), wal_options_(wal_options) {
+                                   std::filesystem::path graph_dir, WalOptions wal_options,SchedulerOptions scheduler_options)
+                : doc_engine_(doc_engine), graph_dir_(std::move(graph_dir)), wal_options_(wal_options),
+                  scheduler_(std::make_unique<JobScheduler>(scheduler_options)) {
             std::filesystem::create_directories(graph_dir_);
         }
 
@@ -39,6 +40,7 @@ namespace nexora {
         }
 
         void GraphManager::shutdown() {
+            scheduler_->shutdown(); // No registry lock while workers finish.
             std::lock_guard<std::mutex> lock(registry_mutex_);
             for (auto& [name, handle] : graphs_) {
                 if (handle->wal)     handle->wal->close();
@@ -299,11 +301,11 @@ namespace nexora {
 // §4  makeHandle
 // ══════════════════════════════════════════════════════════════
 
-        std::unique_ptr<GraphHandle> GraphManager::makeHandle(
+        std::shared_ptr<GraphHandle> GraphManager::makeHandle(
                 const GraphDefinition& def)
         {
             if (!detail::ValidGraphName(def.name)) return nullptr;
-            auto h = std::make_unique<GraphHandle>();
+            auto h = std::make_shared<GraphHandle>();
             h->definition = def;
 
             auto graph_subdir = graph_dir_ / def.name;
@@ -393,29 +395,29 @@ namespace nexora {
 
         bool GraphManager::addNodeMapping(const std::string& graph_name,
                                           const NodeMappingDef& mapping) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end()) return false;
+            auto owner=findHandle(graph_name);
+            if (!owner) return false;
+            std::unique_lock lock(owner->rw_mutex);
 
-            auto updated = it->second->definition;
+            auto updated = owner->definition;
             updated.node_mappings.push_back(mapping);
             if (!persistDefinition(updated)) return false;
-            it->second->definition = std::move(updated);
-            it->second->built = false;
+            owner->definition = std::move(updated);
+            owner->built = false;
             return true;
         }
 
         bool GraphManager::addEdgeMapping(const std::string& graph_name,
                                           const EdgeMappingDef& mapping) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end()) return false;
+            auto owner=findHandle(graph_name);
+            if (!owner) return false;
+            std::unique_lock lock(owner->rw_mutex);
 
-            auto updated = it->second->definition;
+            auto updated = owner->definition;
             updated.edge_mappings.push_back(mapping);
             if (!persistDefinition(updated)) return false;
-            it->second->definition = std::move(updated);
-            it->second->built = false;
+            owner->definition = std::move(updated);
+            owner->built = false;
             return true;
         }
 
@@ -423,6 +425,9 @@ namespace nexora {
             std::lock_guard<std::mutex> lock(registry_mutex_);
             auto it = graphs_.find(graph_name);
             if (it == graphs_.end()) return false;
+            // Never close backing files while an operation or lease owns them.
+            // Busy is retryable; waiting here would recreate registry/graph ABBA.
+            if (it->second.use_count()!=1) return false;
 
             if (it->second->wal)     it->second->wal->close();
             if (it->second->storage) it->second->storage->close();
@@ -439,10 +444,10 @@ namespace nexora {
         std::optional<GraphDefinition> GraphManager::getDefinition(
                 const std::string& graph_name) const
         {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end()) return std::nullopt;
-            return it->second->definition;
+            auto owner=findHandle(graph_name);
+            if (!owner) return std::nullopt;
+            std::shared_lock lock(owner->rw_mutex);
+            return owner->definition;
         }
 
         std::vector<std::string> GraphManager::listGraphs() const {
@@ -545,7 +550,7 @@ namespace nexora {
 
             auto t0 = std::chrono::steady_clock::now();
 
-            GraphHandle* handle = nullptr;
+            std::shared_ptr<GraphHandle> handle;
             {
                 std::lock_guard<std::mutex> lock(registry_mutex_);
                 auto it = graphs_.find(graph_name);
@@ -553,8 +558,10 @@ namespace nexora {
                     result.error_msg = "Graph '" + graph_name + "' not found";
                     return result;
                 }
-                handle = it->second.get();
+                handle = it->second;
             }
+
+            std::unique_lock operation_lock(handle->rw_mutex);
 
             if (!handle->live_graph)
                 handle->live_graph = std::make_unique<LiveGraph>(
@@ -630,39 +637,31 @@ namespace nexora {
         }
 
         bool GraphManager::renderGraph(const std::string& graph_name) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->live_graph) return false;
+            auto owner=findHandle(graph_name);
+            if (!owner || !owner->live_graph) return false;
+            std::unique_lock lock(owner->rw_mutex);
 
-            it->second->built = false;
-            if (!it->second->live_graph->loadFromDisk()) return false;
-            it->second->live_graph->replayWAL();
-            it->second->built = true;
+            owner->built = false;
+            if (!owner->live_graph->loadFromDisk()) return false;
+            owner->live_graph->replayWAL();
+            owner->built = true;
             return true;
         }
 
         bool GraphManager::checkpointGraph(const std::string& graph_name) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            return it != graphs_.end() && it->second->live_graph &&
-                   it->second->live_graph->checkpointWAL();
+            auto owner=findHandle(graph_name);
+            return owner && owner->live_graph && owner->live_graph->checkpointWAL();
         }
 
         BuildResult GraphManager::refreshGraph(const std::string& graph_name) {
-            {
-                std::lock_guard<std::mutex> lock(registry_mutex_);
-                auto it = graphs_.find(graph_name);
-                if (it != graphs_.end() && it->second->live_graph)
-                    it->second->live_graph->clear();
-            }
             return buildGraph(graph_name);
         }
 
         bool GraphManager::compactGraph(const std::string& graph_name) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->live_graph) return false;
-            return it->second->live_graph->compact();
+            auto owner=findHandle(graph_name);
+            if (!owner || !owner->live_graph) return false;
+            std::unique_lock lock(owner->rw_mutex);
+            return owner->live_graph->compact();
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -683,15 +682,25 @@ namespace nexora {
             return it->second->live_graph.get();
         }
 
-        std::pair<const LiveGraph*, std::shared_lock<std::shared_mutex>>
-        GraphManager::acquireReadLock(const std::string& graph_name) const {
-            std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->live_graph)
-                return {nullptr, std::shared_lock<std::shared_mutex>{}};
+        std::shared_ptr<GraphHandle> GraphManager::findHandle(const std::string& name) const {
+            std::lock_guard lock(registry_mutex_);
+            const auto found=graphs_.find(name);
+            return found==graphs_.end() ? nullptr : found->second;
+        }
 
-            std::shared_lock<std::shared_mutex> sh(it->second->rw_mutex);
-            return {it->second->live_graph.get(), std::move(sh)};
+        std::shared_ptr<LiveGraph> GraphManager::shareLiveGraph(const std::string& name) const {
+            auto owner=findHandle(name);
+            if (!owner || !owner->live_graph) return {};
+            auto* graph=owner->live_graph.get();
+            return std::shared_ptr<LiveGraph>(std::move(owner),graph);
+        }
+
+        std::pair<const LiveGraph*, GraphReadLease>
+        GraphManager::acquireReadLock(const std::string& graph_name) const {
+            auto owner=findHandle(graph_name);
+            if (!owner || !owner->live_graph) return {nullptr,GraphReadLease{}};
+            const auto* graph=owner->live_graph.get();
+            return {graph,GraphReadLease(std::move(owner))};
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -701,16 +710,34 @@ namespace nexora {
         std::unique_ptr<StaticGraph> GraphManager::createSnapshot(
                 const std::string& graph_name,
                 const std::vector<std::string>& node_types,
-                const std::vector<std::string>& edge_types) const
+                const std::vector<std::string>& edge_types,SnapshotOptions options) const
         {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->live_graph) return nullptr;
+            const auto owner=findHandle(graph_name);
+            if (!owner || !owner->live_graph) return nullptr;
 
             // snapshot با shared_lock (سریع — فقط copy ساختار)
-            std::shared_lock<std::shared_mutex> sh(it->second->rw_mutex);
+            std::shared_lock sh(owner->rw_mutex);
+            std::lock_guard cache_lock(owner->cache_mutex);
+            auto& handle=*owner;
+            if (options.use_cache) {
+                auto nodes=node_types,edges=edge_types;
+                std::sort(nodes.begin(),nodes.end()); nodes.erase(std::unique(nodes.begin(),nodes.end()),nodes.end());
+                std::sort(edges.begin(),edges.end()); edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
+                const auto signature=nlohmann::json{{"nodes",nodes},{"edges",edges}}.dump();
+                if (handle.snapshot_cache && handle.snapshot_filter_signature==signature &&
+                    handle.snapshot_cache->snapshotVersion()==handle.live_graph->version()) {
+                    auto result=handle.snapshot_cache->clone(options); result->cache_hit_=true; return result;
+                }
+                handle.snapshot_cache.reset();
+                auto build_options=options; build_options.incoming=false;
+                auto candidate=std::make_unique<StaticGraph>(*handle.live_graph,nodes,edges,graph_name,build_options);
+                auto result=candidate->clone(options);
+                handle.snapshot_cache=std::move(candidate); handle.snapshot_filter_signature=signature;
+                return result;
+            }
+            handle.snapshot_cache.reset();
             return std::make_unique<StaticGraph>(
-                    *it->second->live_graph, node_types, edge_types, graph_name);
+                    *handle.live_graph,node_types,edge_types,graph_name,std::move(options));
         }
 
         algorithms::AlgoResult GraphManager::runLock(
@@ -718,18 +745,17 @@ namespace nexora {
                 algorithms::LockAlgorithm& algo,
                 const std::vector<ExtId>& params) const
         {
-            std::lock_guard<std::mutex> reg_lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end())
+            const auto owner=findHandle(graph_name);
+            if (!owner)
                 return {false, "Graph '" + graph_name + "' not found", "", 0.0};
-            if (!it->second->live_graph)
+            std::shared_lock graph_lock(owner->rw_mutex);
+            if (!owner->live_graph)
                 return {false, "Graph '" + graph_name + "' has no backing graph", "", 0.0};
-            if (!it->second->built)
+            if (!owner->built)
                 return {false, "Graph '" + graph_name + "' is not built/rendered", "", 0.0};
 
-            std::shared_lock<std::shared_mutex> graph_lock(it->second->rw_mutex);
             try {
-                return algo.run(*it->second->live_graph, params);
+                return algo.run(*owner->live_graph, params);
             } catch (const std::exception& ex) {
                 return {false, std::string("LockAlgorithm '") + algo.name() +
                                "' failed: " + ex.what(), "", 0.0};
@@ -742,36 +768,33 @@ namespace nexora {
         JobHandle GraphManager::submitJob(
                 const std::string& graph_name,
                 algorithms::JobAlgorithm& algo,
-                const std::vector<ExtId>& params) const
+                const std::vector<ExtId>& params,SnapshotOptions options) const
         {
-            auto snapshot = createSnapshot(graph_name);
-            if (!snapshot) {
-                return JobHandle(readyAlgoFuture(
-                        {false, "Unable to create snapshot for graph '" + graph_name + "'",
-                         "", 0.0}));
-            }
+            // Legacy borrowed API: caller must keep algo alive through completion.
+            return submitJob(graph_name,std::shared_ptr<algorithms::JobAlgorithm>(&algo,[](auto*) {}),params,std::move(options));
+        }
 
-            return JobHandle(std::async(
-                    std::launch::async,
-                    [snapshot = std::move(snapshot), &algo, params]() mutable {
-                        try {
-                            return algo.run(*snapshot, params);
-                        } catch (const std::exception& ex) {
-                            return algorithms::AlgoResult{
-                                    false,
-                                    std::string("JobAlgorithm '") + algo.name() +
-                                            "' failed: " + ex.what(),
-                                    "",
-                                    0.0};
-                        } catch (...) {
-                            return algorithms::AlgoResult{
-                                    false,
-                                    std::string("JobAlgorithm '") + algo.name() +
-                                            "' failed with unknown exception",
-                                    "",
-                                    0.0};
-                        }
-                    }));
+        JobHandle GraphManager::submitJob(const std::string& graph_name,
+                std::shared_ptr<algorithms::JobAlgorithm> algo,
+                const std::vector<ExtId>& params,SnapshotOptions options) const
+        {
+            if (!options.cancellation) options.cancellation=std::make_shared<std::atomic<bool>>(false);
+            const auto cancellation=options.cancellation;
+            if (!algo) return JobHandle(readyAlgoFuture({false,"null job algorithm","",0}),cancellation);
+            if (!options.max_build_bytes) options.max_build_bytes=64*1024*1024;
+            if (options.workspace_reservation_bytes>SIZE_MAX-options.max_build_bytes)
+                return JobHandle(readyAlgoFuture({false,"job reservation overflow","",0}),cancellation);
+            if (options.timeout_ms) options.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(options.timeout_ms);
+            const auto reservation=options.max_build_bytes+options.workspace_reservation_bytes;
+            auto future=scheduler_->submit([this,graph_name,algo=std::move(algo),params,options]() mutable {
+                auto snapshot=createSnapshot(graph_name,{},{},options);
+                if (!snapshot) return algorithms::AlgoResult{false,"graph not found for job","",0};
+                auto result=algo->run(*snapshot,params); snapshot->checkCancelled();
+                if (options.max_result_bytes && result.result_json.size()>options.max_result_bytes)
+                    return algorithms::AlgoResult{false,"job result byte budget exceeded","",0};
+                return result;
+            },cancellation,options.job_priority,reservation,std::chrono::milliseconds(options.enqueue_timeout_ms),options.deadline);
+            return JobHandle(std::move(future),cancellation);
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -784,8 +807,13 @@ namespace nexora {
                                          const NodeMappingDef*,
                                          const EdgeMappingDef*)>& fn)
         {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            for (auto& [name, handle] : graphs_) {
+            std::vector<std::shared_ptr<GraphHandle>> owners;
+            {
+                std::lock_guard lock(registry_mutex_);
+                for (const auto& [name,handle]:graphs_) owners.push_back(handle);
+            }
+            for (auto& handle:owners) {
+                std::unique_lock operation_lock(handle->rw_mutex);
                 if (handle->definition.mode != GraphMode::Live) continue;
                 if (!handle->live_graph || !handle->built) continue;
 
@@ -806,7 +834,6 @@ namespace nexora {
                                               const std::string& bson) {
             dispatchToLiveGraphs(collection,
                                  [&](GraphHandle& h, const NodeMappingDef* nm, const EdgeMappingDef* em) {
-                                     std::unique_lock<std::shared_mutex> lock(h.rw_mutex);
                                      if (nm) buildNodeFromDoc(*h.live_graph, *nm, bson);
                                      if (em) buildEdgeFromDoc(*h.live_graph, *em, bson);
                                  });
@@ -817,7 +844,6 @@ namespace nexora {
                                              const std::string& new_bson) {
             dispatchToLiveGraphs(collection,
                                  [&](GraphHandle& h, const NodeMappingDef* nm, const EdgeMappingDef* em) {
-                                     std::unique_lock<std::shared_mutex> lock(h.rw_mutex);
                                      // حذف قدیمی، اضافه جدید
                                      if (nm) {
                                          std::string old_id = extractField(old_bson, nm->key_path);
@@ -841,7 +867,6 @@ namespace nexora {
                                              const std::string& bson) {
             dispatchToLiveGraphs(collection,
                                  [&](GraphHandle& h, const NodeMappingDef* nm, const EdgeMappingDef* em) {
-                                     std::unique_lock<std::shared_mutex> lock(h.rw_mutex);
                                      if (nm) {
                                          std::string ext_id = extractField(bson, nm->key_path);
                                          if (!ext_id.empty()) h.live_graph->removeNode(ext_id);
@@ -860,28 +885,25 @@ namespace nexora {
 // ══════════════════════════════════════════════════════════════
 
         GraphStats GraphManager::getStats(const std::string& graph_name) const {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->live_graph) return {};
-            return it->second->live_graph->stats();
+            auto owner=findHandle(graph_name);
+            if (!owner || !owner->live_graph) return {};
+            return owner->live_graph->stats();
         }
 
         bool GraphManager::isReady(const std::string& graph_name) const {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            return it != graphs_.end() && it->second->built;
+            auto owner=findHandle(graph_name);
+            return owner && owner->built;
         }
 
         GraphManager::WalStatus GraphManager::getWalStatus(
                 const std::string& graph_name) const
         {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->wal) return {};
+            auto owner=findHandle(graph_name);
+            if (!owner || !owner->wal) return {};
             WalStatus ws;
-            ws.total_entries   = it->second->wal->totalEntries();
-            ws.has_pending     = it->second->wal->hasPendingEntries();
-            ws.pending_entries = it->second->wal->loadUnapplied().size();
+            ws.total_entries   = owner->wal->totalEntries();
+            ws.has_pending     = owner->wal->hasPendingEntries();
+            ws.pending_entries = owner->wal->loadUnapplied().size();
             return ws;
         }
 
@@ -889,17 +911,15 @@ namespace nexora {
                 const std::string& graph_name,
                 size_t limit) const
         {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->wal) return {};
-            return it->second->wal->loadRecent(limit);
+            auto owner=findHandle(graph_name);
+            if (!owner || !owner->wal) return {};
+            return owner->wal->loadRecent(limit);
         }
 
         size_t GraphManager::purgeWAL(const std::string& graph_name) {
-            std::lock_guard<std::mutex> lock(registry_mutex_);
-            auto it = graphs_.find(graph_name);
-            if (it == graphs_.end() || !it->second->wal) return 0;
-            return it->second->wal->purgeOld();
+            auto owner=findHandle(graph_name);
+            if (!owner || !owner->wal) return 0;
+            return owner->wal->purgeOld();
         }
 
     } // namespace graph
