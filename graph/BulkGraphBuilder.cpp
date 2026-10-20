@@ -67,16 +67,18 @@ void BulkGraphBuilder::flush() {
         };
         // Explicit nodes are resolved before implicit endpoints, irrespective of input order.
         for (const auto& input:nodes_) node(input.id,input.type,false);
-        struct Candidate { DenseId src,dst; TypeId type; bool directed; bool exists=false; };
+        struct Candidate { DenseId src,dst; TypeId type; bool directed; size_t ordinal=0; bool exists=false; };
         std::vector<Candidate> candidates; candidates.reserve(edges_.size());
         for (const auto& input:edges_) {
             auto src=node(input.src,{},true),dst=node(input.dst,{},true);
             const auto type=g.edge_type_reg_.getOrCreate(input.type); edge_types[type]=input.type;
             if (!input.directed && dst<src) std::swap(src,dst);
-            candidates.push_back({src,dst,type,input.directed});
+            candidates.push_back({src,dst,type,input.directed,candidates.size()});
         }
         auto key=[](const Candidate& e) { return std::tie(e.src,e.dst,e.type,e.directed); };
-        std::sort(candidates.begin(),candidates.end(),[&](const auto& a,const auto& b) { return key(a)<key(b); });
+        std::sort(candidates.begin(),candidates.end(),[&](const auto& a,const auto& b) {
+            return key(a)!=key(b) ? key(a)<key(b) : a.ordinal<b.ordinal;
+        });
         const auto end=std::unique(candidates.begin(),candidates.end(),[&](const auto& a,const auto& b) { return key(a)==key(b); });
         stats_.edges_deduplicated+=std::distance(end,candidates.end()); candidates.erase(end,candidates.end());
         // Merge sorted candidate keys with existing sorted adjacency per source.
@@ -94,6 +96,9 @@ void BulkGraphBuilder::flush() {
             });
             first=last;
         }
+        // Restore ingestion precedence after sorted dedup: mixed-direction
+        // conflicts must have the same first-wins result as single inserts.
+        std::sort(candidates.begin(),candidates.end(),[](const auto& a,const auto& b) { return a.ordinal<b.ordinal; });
         std::set<std::tuple<DenseId,DenseId,TypeId>> occupied;
         for (const auto& input:candidates) {
             bool exists=input.exists;
