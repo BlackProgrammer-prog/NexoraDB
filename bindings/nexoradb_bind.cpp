@@ -637,6 +637,77 @@ PYBIND11_MODULE(nexoradb, m) {
     // §7  DocEngine
     // ──────────────────────────────────────────────────────────
 
+    // Keep settings and telemetry bindings compiled against the current native layout.
+    py::enum_<DocumentDurability>(m,"DocumentDurability")
+        .value("Buffered",DocumentDurability::Buffered).value("Durable",DocumentDurability::Durable);
+    py::enum_<DiskClass>(m,"DiskClass")
+        .value("Unknown",DiskClass::Unknown).value("Rotational",DiskClass::Rotational).value("SSD",DiskClass::SSD);
+    py::enum_<HotCompression>(m,"HotCompression")
+        .value("Lz4",HotCompression::Lz4).value("Snappy",HotCompression::Snappy);
+    py::class_<RocksResources,std::shared_ptr<RocksResources>>(m,"RocksResources")
+        .def(py::init<size_t,size_t>(),py::arg("memory_budget_bytes")=256*1024*1024,py::arg("cache_bytes")=0)
+        .def_readonly("budget_bytes",&RocksResources::budget_bytes)
+        .def_readonly("cache_bytes",&RocksResources::cache_bytes)
+        .def_readonly("memtable_bytes",&RocksResources::memtable_bytes);
+    py::class_<RocksSettings>(m,"RocksSettings")
+        .def(py::init<>())
+        .def_readwrite("memory_budget_bytes",&RocksSettings::memory_budget_bytes)
+        .def_readwrite("block_cache_bytes",&RocksSettings::block_cache_bytes)
+        .def_readwrite("write_buffer_bytes",&RocksSettings::write_buffer_bytes)
+        .def_readwrite("max_write_buffers",&RocksSettings::max_write_buffers)
+        .def_readwrite("block_size",&RocksSettings::block_size)
+        .def_readwrite("max_background_jobs",&RocksSettings::max_background_jobs)
+        .def_readwrite("cpu_threads",&RocksSettings::cpu_threads)
+        .def_readwrite("disk",&RocksSettings::disk)
+        .def_readwrite("dynamic_level_bytes",&RocksSettings::dynamic_level_bytes)
+        .def_readwrite("hot_compression",&RocksSettings::hot_compression)
+        .def_readwrite("cold_zstd",&RocksSettings::cold_zstd)
+        .def_readwrite("rate_limit_bytes_per_second",&RocksSettings::rate_limit_bytes_per_second)
+        .def_readwrite("bytes_per_sync",&RocksSettings::bytes_per_sync)
+        .def_readwrite("wal_bytes_per_sync",&RocksSettings::wal_bytes_per_sync)
+        .def_readwrite("bloom_filter",&RocksSettings::bloom_filter)
+        .def_readwrite("prefix_extractor",&RocksSettings::prefix_extractor)
+        .def_readwrite("statistics_enabled",&RocksSettings::statistics_enabled)
+        .def_readwrite("durability",&RocksSettings::durability)
+        .def_readwrite("shared_resources",&RocksSettings::shared_resources)
+        ;
+    py::class_<RocksMetrics>(m,"RocksMetrics")
+        .def_readonly("statistics_enabled",&RocksMetrics::statistics_enabled)
+        .def_readonly("cache_hit_rate",&RocksMetrics::cache_hit_rate)
+        .def_readonly("bloom_useful_rate",&RocksMetrics::bloom_useful_rate)
+        .def_readonly("bloom_prefix_useful_rate",&RocksMetrics::bloom_prefix_useful_rate)
+        .def_readonly("bloom_full_positive",&RocksMetrics::bloom_full_positive)
+        .def_readonly("bloom_prefix_checked",&RocksMetrics::bloom_prefix_checked)
+        .def_readonly("bloom_prefix_useful",&RocksMetrics::bloom_prefix_useful)
+        .def_readonly("get_read_bytes",&RocksMetrics::get_read_bytes)
+        .def_readonly("multiget_read_bytes",&RocksMetrics::multiget_read_bytes)
+        .def_readonly("iterator_read_bytes",&RocksMetrics::iterator_read_bytes)
+        .def_readonly("compaction_read_bytes",&RocksMetrics::compaction_read_bytes)
+        .def_readonly("cache_capacity",&RocksMetrics::cache_capacity)
+        .def_readonly("cache_usage",&RocksMetrics::cache_usage)
+        .def_readonly("cache_pinned",&RocksMetrics::cache_pinned)
+        .def_readonly("memtable_budget",&RocksMetrics::memtable_budget)
+        .def_readonly("memtable_usage",&RocksMetrics::memtable_usage)
+        .def_readonly("pending_compaction_bytes",&RocksMetrics::pending_compaction_bytes)
+        .def_readonly("live_sst_bytes",&RocksMetrics::live_sst_bytes)
+        .def_readonly("total_sst_bytes",&RocksMetrics::total_sst_bytes)
+        .def_readonly("l0_files",&RocksMetrics::l0_files)
+        .def_readonly("write_stopped",&RocksMetrics::write_stopped)
+        .def_readonly("delayed_write_rate",&RocksMetrics::delayed_write_rate)
+        .def_readonly("running_compactions",&RocksMetrics::running_compactions)
+        .def_readonly("running_flushes",&RocksMetrics::running_flushes)
+        .def_readonly("logical_write_bytes",&RocksMetrics::logical_write_bytes)
+        .def_readonly("wal_write_bytes",&RocksMetrics::wal_write_bytes)
+        .def_readonly("flush_write_bytes",&RocksMetrics::flush_write_bytes)
+        .def_readonly("compaction_write_bytes",&RocksMetrics::compaction_write_bytes)
+        .def_readonly("stall_micros",&RocksMetrics::stall_micros)
+        .def_readonly("cache_hits",&RocksMetrics::cache_hits)
+        .def_readonly("cache_misses",&RocksMetrics::cache_misses)
+        .def_readonly("bloom_useful",&RocksMetrics::bloom_useful)
+        .def_readonly("multiget_calls",&RocksMetrics::multiget_calls)
+        .def_readonly("multiget_keys",&RocksMetrics::multiget_keys)
+        .def_readonly("sst_write_amplification",&RocksMetrics::sst_write_amplification)
+        ;
     py::class_<DocEngine>(m, "DocEngine",
                           R"doc(
         موتور اصلی پایگاه داده اسناد NexoraDB.
@@ -659,6 +730,21 @@ PYBIND11_MODULE(nexoradb, m) {
                  "باز کردن دیتابیس با timeout و deadlock policy سفارشی")
 
                     // ── Lifecycle ──
+            .def(py::init<const std::string&,const TransactionSettings&,const RocksSettings&>(),
+                py::arg("db_path"),py::arg("transaction_settings")=TransactionSettings{},py::arg("rocks_settings")=RocksSettings{})
+            .def("rocks_metrics",&DocEngine::GetRocksMetrics,py::call_guard<py::gil_scoped_release>())
+            .def("flush_storage",&DocEngine::FlushStorage,py::call_guard<py::gil_scoped_release>())
+            .def("create_checkpoint",&DocEngine::CreateCheckpoint,py::call_guard<py::gil_scoped_release>())
+            .def("integrity_check",&DocEngine::IntegrityCheck,py::arg("verify_indexes")=true,py::call_guard<py::gil_scoped_release>())
+            .def("format_versions",&DocEngine::FormatVersions,py::call_guard<py::gil_scoped_release>())
+            .def("upgrade_format_manifest",&DocEngine::UpgradeFormatManifest,py::call_guard<py::gil_scoped_release>())
+            .def_static("inspect_store",&DocEngine::InspectStore,py::call_guard<py::gil_scoped_release>())
+            .def("pause_document_migration",&DocEngine::PauseDocumentMigration,py::call_guard<py::gil_scoped_release>())
+            .def("operation_metrics",&DocEngine::OperationMetrics,py::call_guard<py::gil_scoped_release>())
+            .def("drain_slow_queries",&DocEngine::DrainSlowQueries,py::call_guard<py::gil_scoped_release>())
+            .def("configure_slow_queries",&DocEngine::ConfigureSlowQueries,py::arg("threshold_us"),py::arg("capacity")=128,py::call_guard<py::gil_scoped_release>())
+            .def("health_report",&DocEngine::HealthReport,py::call_guard<py::gil_scoped_release>())
+            .def("prepare_shutdown",&DocEngine::PrepareShutdown,py::call_guard<py::gil_scoped_release>())
             .def("is_healthy", &DocEngine::IsHealthy,
                  "بررسی سلامت اتصال RocksDB")
 
@@ -1492,6 +1578,8 @@ PYBIND11_MODULE(nexoradb, m) {
                 return gm.startup();
             }, "بارگذاری گراف‌ها در startup")
             .def("shutdown", &GraphManager::shutdown,py::call_guard<py::gil_scoped_release>(), "بستن همه گراف‌ها")
+            .def("recover_stored_graphs",&GraphManager::recoverStoredGraphs,py::call_guard<py::gil_scoped_release>())
+            .def("prepare_shutdown",&GraphManager::prepareShutdown,py::call_guard<py::gil_scoped_release>())
             .def("scheduler_stats",&GraphManager::schedulerStats)
             .def("set_memory_budget", [](GraphManager& gm,const std::string& name,size_t bytes) {
                 auto graph=gm.shareLiveGraph(name);

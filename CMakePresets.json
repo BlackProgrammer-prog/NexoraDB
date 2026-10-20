@@ -187,7 +187,7 @@
       "environment": { "TSAN_OPTIONS": "halt_on_error=1:history_size=7" },
       "filter": {
         "include": {
-          "name": "cpp\\.(ThreadingContract|JobScheduler|LiveGraphConcurrency|GraphSnapshot\\.ConcurrentLazyCscPublicationAndConsistentSourceEpoch|DocEngine|Document|Compiled|IndexCodec)"
+          "name": "cpp\\.(ThreadingContract|JobScheduler|LiveGraphConcurrency|GraphRecovery|GraphSnapshot\\.ConcurrentLazyCscPublicationAndConsistentSourceEpoch|DocEngine|Document|Compiled|IndexCodec|RocksTuning|Maintenance|Operations)"
         }
       },
       "execution": { "jobs": 2 }

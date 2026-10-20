@@ -30,11 +30,15 @@ cmake_minimum_required(VERSION 3.22)
 
 add_library(nexora_core STATIC
         DocEngine.cpp
+        Maintenance.cpp
+        Operations.cpp
         DocEngine.h
         DocumentCodec.cpp
         DocumentCodec.h
         IndexCodec.cpp
         IndexCodec.h
+        RocksTuning.cpp
+        RocksTuning.h
 )
 
 # ─────────────────────────────────────────────────────────────
