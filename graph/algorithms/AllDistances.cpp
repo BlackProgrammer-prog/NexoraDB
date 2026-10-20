@@ -86,9 +86,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
-#include <queue>
 #include <sstream>
-#include <unordered_map>
 #include <vector>
 
 namespace nexora {
@@ -154,39 +152,39 @@ namespace nexora {
                         TypeId  type_id;
                     };
 
-                    auto bfs = [&](DenseId src) -> std::vector<DistEntry> {
+                    std::vector<int> dist(N,-1);
+                    std::vector<DenseId> queue; queue.reserve(N);
+                    std::vector<DistEntry> result; result.reserve(N);
+                    auto bfs = [&](DenseId src) -> const std::vector<DistEntry>& {
                         // dist: -1 = ندیده
-                        std::unordered_map<DenseId, int> dist;
-                        dist.reserve(N);
+                        snapshot.checkCancelled(); std::fill(dist.begin(),dist.end(),-1);
+                        queue.clear(); result.clear();
                         dist[src] = 0;
 
-                        std::queue<DenseId> q;
-                        q.push(src);
+                        queue.push_back(src); size_t head=0;
 
-                        while (!q.empty()) {
-                            DenseId cur = q.front(); q.pop();
+                        while (head<queue.size()) {
+                            snapshot.checkCancelled(); DenseId cur=queue[head++];
                             int     d   = dist[cur];
 
                             if (d >= max_hops) continue; // از این عمق بیشتر نرو
 
                             // iterate روی neighbors خروجی
-                            snapshot.forEachNeighbor(cur, Direction::Out,
-                                                     [&](DenseId nbr, TypeId) -> bool {
-                                                         if (dist.find(nbr) == dist.end()) {
+                            for (const auto& edge:snapshot.outgoing(cur)) {
+                                                         snapshot.checkCancelled(); const auto nbr=edge.neighbor;
+                                                         if (dist[nbr]<0) {
                                                              dist[nbr] = d + 1;
-                                                             q.push(nbr);
+                                                             queue.push_back(nbr);
                                                          }
-                                                         return true;
-                                                     });
+                            }
 
                             // اگر گراف undirected است، IN را هم بگیر
                             // (برای directed graph فقط Out کافی است)
                         }
 
                         // تبدیل dist map به vector + مرتب‌سازی
-                        std::vector<DistEntry> result;
-                        result.reserve(dist.size());
-                        for (const auto& [id, d] : dist) {
+                        for (const auto id:queue) {
+                            const auto d=dist[id];
                             if (id == src) continue; // مبدا خودش را شامل نمی‌شود
                             // فیلتر type
                             TypeId tid = snapshot.nodeType(id);
@@ -227,7 +225,7 @@ namespace nexora {
                         if (src == kInvalidDenseId)
                             return AlgoResult{false, "Source node not found: " + src_ext, "", 0.0};
 
-                        auto distances = bfs(src);
+                        const auto& distances = bfs(src);
 
                         // آمار
                         int   max_dist   = distances.empty() ? 0 : distances.back().distance;
@@ -281,7 +279,7 @@ namespace nexora {
 
                         DenseId     src     = all_nodes[si];
                         ExtId       src_ext_i = snapshot.extId(src);
-                        auto        dists   = bfs(src);
+                        const auto& dists   = bfs(src);
 
                         json << "{"
                              << "\"source\":\"" << src_ext_i << "\""
@@ -304,10 +302,17 @@ namespace nexora {
                 }
             };
 
+AlgoResult runAllDistances(GraphManager& manager,const std::string& graph_name,
+        const std::vector<ExtId>& params,SnapshotOptions options) {
+    auto algorithm=std::make_shared<AllDistances>();
+    auto handle=manager.submitJob(graph_name,algorithm,params,std::move(options));
+    return handle.result();
+}
+
             AlgoResult runAllDistances(GraphManager& manager,
                                        const std::string& graph_name,
                                        const std::vector<ExtId>& params) {
-                AllDistances algo;
+                auto algo=std::make_shared<AllDistances>();
                 auto handle = manager.submitJob(graph_name, algo, params);
                 return handle.result();
             }

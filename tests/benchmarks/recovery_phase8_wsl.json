@@ -1,0 +1,1 @@
+{"records":100000,"documents":200000,"graph":{"social":{"nodes":100000,"edges":100000,"traversal_sha256":"cc4d4fe331b3943697349395490be1de34c96c183f09123895bb3fbe1263f21d"}},"backup_bytes":149560665,"load_seconds":7.6196218359982595,"backup_seconds":7.532148745958693,"restore_verified_seconds":[7.535093193990178,7.4017469809623435,7.405474116909318]}

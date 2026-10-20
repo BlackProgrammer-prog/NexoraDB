@@ -42,7 +42,8 @@
 // ─── QueryLayer (باید قبل از هر چیز دیگری include شود) ───
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
-#include "query/Evaluator.h"
+#include "RocksTuning.h"
+#include "Operations.h"
 
 // ─── RocksDB ───
 #include <rocksdb/db.h>
@@ -64,6 +65,7 @@
 #include <optional>
 #include <string>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -83,7 +85,7 @@ namespace nexora {
  * @brief خروجی استاندارد تمام توابع عمومی DocEngine
  *
  * @field success   آیا عملیات موفق بود؟
- * @field data      خروجی BSON/JSON به صورت رشته (در صورت موفقیت)
+ * @field data      خروجی JSON یا scalar متنی (در صورت موفقیت)
  * @field error_msg پیام خطا (در صورت شکست)
  *
  * @example استفاده در Cython:
@@ -95,15 +97,16 @@ namespace nexora {
  */
         struct DBResult {
             bool        success   = false;
-            std::string data      = "";  ///< BSON hex یا JSON string
+            std::string data      = "";  ///< JSON یا scalar متنی در API عمومی
             std::string error_msg = "";
+            std::string error_code = "";
 
             /// سازنده‌های کمکی برای راحتی ساخت نتیجه
             static DBResult Ok(std::string payload = "") {
-                return {true, std::move(payload), ""};
+                return {true, std::move(payload), "", ""};
             }
-            static DBResult Err(std::string msg) {
-                return {false, "", std::move(msg)};
+            static DBResult Err(std::string msg, std::string code = "operation_failed") {
+                return {false, "", std::move(msg), std::move(code)};
             }
         };
 
@@ -263,7 +266,7 @@ namespace nexora {
  * این callback توسط GraphEngine در هنگام Startup برای ساخت گراف استفاده می‌شود.
  * پارامترها:
  *   - doc_id:    شناسه سند
- *   - bson_data: محتوای BSON باینری سند
+ *   - bson_data: محتوای JSON سازگار با API (نام پارامتر legacy است)
  *
  * اگر callback مقدار false برگرداند، iteration متوقف می‌شود (early exit).
  *
@@ -348,10 +351,11 @@ namespace nexora {
  * DocEngine تمام عملیات CRUD، مدیریت Schema، Index و Transaction را
  * روی RocksDB پیاده‌سازی می‌کند. این کلاس:
  *
- *  1. **Thread-safe نیست** — هر thread باید instance جداگانه داشته باشد
- *     یا از locking خارجی استفاده شود (Cython layer مسئول این است).
+ *  1. Ordinary APIs support concurrent calls on one live instance. Lifecycle
+ *     and raw RocksDB access require external quiescence; TxHandle is confined
+ *     to its creating thread. See docs/cpp/THREADING.md for the full contract.
  *  2. **Internal API** برای GraphEngine از طریق `IterateCollection` فراهم است.
- *  3. تمام داده‌ها BSON باینری هستند ولی API رشته BSON hex یا raw bytes می‌پذیرد.
+ *  3. داده‌ها روی دیسک BSON باینری هستند؛ API سازگار فعلی JSON UTF-8 می‌پذیرد.
  *  4. منطق تطابق (Match) و به‌روزرسانی (Apply) به nexora::query::Evaluator
  *     واگذار شده است — DocEngine فقط ذخیره‌سازی و iteration را مدیریت می‌کند.
  *
@@ -382,7 +386,9 @@ namespace nexora {
              */
             explicit DocEngine(
                     const std::string& db_path,
-                    const TransactionSettings& transaction_settings = {});
+                    const TransactionSettings& transaction_settings = {},const RocksSettings& rocks_settings={});
+            RocksMetrics GetRocksMetrics() const;
+            DBResult FlushStorage(); // Maintenance flush, not a replacement for sync durability.
 
             /**
              * @brief مخرب - اتصال RocksDB را می‌بندد
@@ -398,6 +404,17 @@ namespace nexora {
              * @return true اگر RocksDB سالم و قابل استفاده باشد
              */
             bool IsHealthy() const noexcept;
+            DBResult CreateCheckpoint(const std::string& destination);
+            DBResult IntegrityCheck(bool verify_indexes=true) const;
+            DBResult FormatVersions() const;
+            DBResult UpgradeFormatManifest();
+            static DBResult InspectStore(const std::string& path);
+            void PauseDocumentMigration(); // Offline maintenance; no active caller transaction.
+            std::string OperationMetrics() const;
+            std::string DrainSlowQueries();
+            void ConfigureSlowQueries(uint64_t threshold_us,size_t capacity=128);
+            std::string HealthReport() const;
+            DBResult PrepareShutdown(); // Caller must first stop accepting requests.
 
             /** Test-only one-shot fault injection for atomicity tests. */
             void SetMutationFaultPointForTesting(
@@ -536,7 +553,7 @@ namespace nexora {
             /**
              * @brief یک سند جدید درج می‌کند
              * @param collection_name نام Collection
-             * @param bson_document   محتوای سند به فرمت BSON باینری
+             * @param bson_document   سند JSON UTF-8 (نام پارامتر برای سازگاری حفظ شده)
              * @return DBResult با data برابر doc_id سند ایجاد شده
              *
              * @details
@@ -586,7 +603,7 @@ namespace nexora {
              * @brief یک سند را بر اساس ID بازیابی می‌کند
              * @param collection_name نام Collection
              * @param doc_id          شناسه سند
-             * @return DBResult با data برابر محتوای BSON سند
+             * @return DBResult با data برابر JSON فشرده سند
              *
              * @details O(1) — مستقیماً از RocksDB با key می‌خواند.
              */
@@ -625,7 +642,8 @@ namespace nexora {
                     const std::string& collection_name,
                     const nexora::query::Condition& condition,
                     std::uint32_t limit,
-                    const std::string& continuation_token = "");
+                    const std::string& continuation_token = "",size_t max_bytes=0);
+            void ClosePage(const std::string& continuation_token);
 
             // ──────────────────────────────────────────────────────────
             // 6.7  CRUD - Update
@@ -929,6 +947,16 @@ namespace nexora {
              */
             uint64_t GetDiskUsageBytes() const;
 
+            /**
+             * Convert legacy JSON values to the current BSON envelope in bounded
+             * transactions. The operation is idempotent and crash-resumable.
+             * Normal applications do not need to call it: an idle worker invokes
+             * it automatically. It is public for maintenance and diagnostics.
+             */
+            DBResult MigrateLegacyDocuments(
+                    std::size_t max_documents = 1000,
+                    std::size_t max_bytes = 4U * 1024U * 1024U);
+
             // ──────────────────────────────────────────────────────────
             // 6.15  Internal database users (system collection)
             // ──────────────────────────────────────────────────────────
@@ -972,6 +1000,10 @@ namespace nexora {
             // ──────────────────────────────────────────────────────────
 
             std::string db_path_;
+            mutable OperationsState operations_;
+            RocksSettings rocks_settings_;
+            std::shared_ptr<RocksResources> rocks_resources_;
+            mutable std::atomic<uint64_t> multiget_calls_{0},multiget_keys_{0};
 
             /// RocksDB TransactionDB (برای ACID کامل)
             std::unique_ptr<rocksdb::TransactionDB,
@@ -979,13 +1011,16 @@ namespace nexora {
 
             rocksdb::Options              db_options_;
             rocksdb::TransactionDBOptions txn_db_options_;
-            rocksdb::WriteOptions         write_options_;
-            rocksdb::ReadOptions          read_options_;
+            const rocksdb::WriteOptions   write_options_{};
+            const rocksdb::ReadOptions    read_options_{};
             rocksdb::TransactionOptions   transaction_options_;
             mutable std::shared_mutex index_ddl_mutex_;
             std::atomic<MutationFaultPoint> mutation_fault_point_{
                     MutationFaultPoint::None};
             std::atomic<std::uint32_t> pause_index_build_chunks_{0};
+            mutable std::atomic<std::int64_t> last_user_activity_ns_{0};
+            std::mutex document_migration_mutex_;
+            std::jthread document_migration_worker_;
 
             struct PageSession {
                 const rocksdb::Snapshot* snapshot = nullptr;
@@ -1002,7 +1037,55 @@ namespace nexora {
                 std::vector<IndexDefinition> indexes;
             };
 
+            mutable std::mutex metadata_cache_mutex_;
+            mutable std::unordered_map<std::string,MutationMetadata> metadata_cache_;
+            mutable uint64_t metadata_epoch_=0;
+            mutable size_t metadata_writers_=0;
+            std::mutex metadata_gates_mutex_;
+            std::unordered_map<std::string,std::weak_ptr<std::recursive_mutex>> metadata_gates_;
+            std::shared_ptr<std::recursive_mutex> MetadataGate(const std::string& collection) {
+                std::lock_guard lock(metadata_gates_mutex_);
+                if (auto existing=metadata_gates_[collection].lock()) return existing;
+                if (metadata_gates_.size()>256) {
+                    for (auto it=metadata_gates_.begin();it!=metadata_gates_.end();) {
+                        if (it->second.expired()) it=metadata_gates_.erase(it); else ++it;
+                    }
+                }
+                auto gate=std::make_shared<std::recursive_mutex>(); metadata_gates_[collection]=gate;
+                return gate;
+            }
+            // Invalidate on entry AND exit, including failed/partial DDL and
+            // online-build state transitions. Nested changes are supported.
+            struct MetadataChange {
+                DocEngine& engine;
+                std::shared_ptr<std::recursive_mutex> gate;
+                std::unique_lock<std::recursive_mutex> guard;
+                MetadataChange(DocEngine& value,const std::string& collection)
+                    :engine(value),gate(value.MetadataGate(collection)),guard(*gate) {
+                    std::lock_guard lock(engine.metadata_cache_mutex_);
+                    ++engine.metadata_writers_; ++engine.metadata_epoch_;
+                    engine.metadata_cache_.clear();
+                }
+                ~MetadataChange() {
+                    std::lock_guard lock(engine.metadata_cache_mutex_);
+                    --engine.metadata_writers_; ++engine.metadata_epoch_;
+                    engine.metadata_cache_.clear();
+                }
+            };
+
             class MutationBuilder;
+            DBResult InsertOneImpl(const std::string&,const std::string&);
+            DBResult InsertManyImpl(const std::string&,const std::vector<std::string>&);
+            DBResult FindByIdImpl(const std::string&,const std::string&);
+            DBResult UpdateByIdImpl(const std::string&,const std::string&,const nexora::query::UpdateSpec&);
+            DBResult DeleteByIdImpl(const std::string&,const std::string&);
+            void RecordOperation(OperationsState::Kind,uint64_t,const DBResult&,const nlohmann::json& plan={}) const noexcept;
+            template<class Fn> DBResult Observe(OperationsState::Kind kind,Fn fn) {
+                const auto started=std::chrono::steady_clock::now();
+                const auto elapsed=[&] { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count(); };
+                try { auto result=fn(); RecordOperation(kind,elapsed(),result); return result; }
+                catch(...) { RecordOperation(kind,elapsed(),DBResult::Err("exception")); throw; }
+            }
 
             struct QueryExecution {
                 DBResult result;
@@ -1018,10 +1101,26 @@ namespace nexora {
                     const nexora::query::Condition& condition,
                     std::uint32_t limit,
                     std::uint32_t skip,
-                    bool force_full_scan);
+                    bool force_full_scan,const rocksdb::Snapshot* shared_epoch=nullptr,bool ddl_already_locked=false);
+            QueryExecution ExecuteQueryImpl(const std::string&,const nexora::query::Condition&,std::uint32_t,
+                std::uint32_t,bool,const rocksdb::Snapshot*,bool);
 
             rocksdb::Status InjectMutationFaultIfRequested(
                     MutationFaultPoint point) noexcept;
+
+            static rocksdb::Status EncodeDocumentForStorage(
+                    const std::string& json_document,
+                    std::string& stored_document);
+            static rocksdb::Status DecodeStoredDocument(
+                    const std::string& stored_document,
+                    std::string& json_document);
+            rocksdb::Status MigrateLegacyDocumentsChunk(
+                    std::size_t max_documents,
+                    std::size_t max_bytes,
+                    std::size_t& migrated,
+                    bool& complete);
+            void RunDocumentMigrationWorker(std::stop_token stop_token);
+            void TouchUserActivity() const noexcept;
 
             // ─── متدهای کمکی خصوصی ───
 
@@ -1056,6 +1155,8 @@ namespace nexora {
                                               std::string&       username_out,
                                               std::string&       error_out) const;
 
+            bool ApplyInsertDefaults(std::string& document, const SchemaDefinition& schema,
+                                     std::string& error) const;
             bool ValidateDocument(const std::string&      bson_document,
                                   const SchemaDefinition& schema,
                                   std::string&            error_out) const;
@@ -1068,16 +1169,12 @@ namespace nexora {
                                             const std::string& field_name);
 
             /**
-             * @brief تطابق سند با Condition — به Evaluator::Match واگذار می‌شود
-             */
-            static bool MatchesCondition(const std::string&              bson,
-                                         const nexora::query::Condition& condition);
-
-            /**
              * @brief اعمال UpdateSpec روی سند — به Evaluator::Apply واگذار می‌شود
              */
-            static std::string ApplyUpdate(const std::string&               bson,
-                                           const nexora::query::UpdateSpec& spec);
+            static rocksdb::Status ApplyUpdate(
+                    const std::string& bson,
+                    const nexora::query::UpdateSpec& spec,
+                    std::string& updated_document);
 
             static std::string SerializeSchema(const SchemaDefinition& schema);
             static std::optional<SchemaDefinition> DeserializeSchema(const std::string& bytes);
@@ -1089,6 +1186,7 @@ namespace nexora {
             static std::optional<ForeignKeyDefinition> DeserializeFk(const std::string& bytes);
 
             static std::string GenerateDocId();
+            void ValidateFormatManifest() const;
         };
 
     } // namespace core

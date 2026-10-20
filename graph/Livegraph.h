@@ -30,9 +30,12 @@
 #include "Graphtypes.h"
 #include "Graphstorage.h"
 #include "Graphwal.h"
+#include "EdgeStore.h"
+#include "GraphMemory.h"
 
 #include <deque>
 #include <shared_mutex>
+#include "WriterPreferredMutex.h"
 #include <stack>
 #include <string>
 #include <unordered_map>
@@ -40,6 +43,7 @@
 
 namespace nexora {
     namespace graph {
+        class BulkGraphBuilder;
 
 /**
  * @class DenseIdMap
@@ -66,6 +70,9 @@ namespace nexora {
              * @return ExtId یا ""
              */
             ExtId getExt(DenseId dense_id) const;
+            const ExtId* findExt(DenseId id) const noexcept {
+                return hasDense(id) ? &*dense_to_ext_[id] : nullptr;
+            }
 
             bool hasExt(const ExtId& ext_id) const;
             bool hasDense(DenseId dense_id) const;
@@ -74,10 +81,12 @@ namespace nexora {
             void remove(DenseId dense_id);
 
             size_t size() const noexcept { return ext_to_dense_.size(); }
+            size_t reverseBytes() const noexcept;
+            size_t forwardBytesEstimate() const noexcept;
 
         private:
             std::unordered_map<ExtId, DenseId>  ext_to_dense_;
-            std::unordered_map<DenseId, ExtId>  dense_to_ext_;
+            std::vector<std::optional<ExtId>> dense_to_ext_;
             DenseId                             next_dense_ = 0;
         };
 
@@ -132,6 +141,7 @@ namespace nexora {
              * @return تعداد entries replay شده
              */
             size_t replayWAL();
+            bool checkpointWAL();
 
             // ──────────────────────────────────────────────────────────
             // §2  CRUD — Node
@@ -295,6 +305,10 @@ namespace nexora {
             // ──────────────────────────────────────────────────────────
 
             GraphStats stats() const;
+            GraphMemoryUsage memoryUsage() const;
+            // Conservative admission budget, not a process RSS/allocator limit.
+            // Zero disables. Rejected admission precedes RAM/WAL/data mutation.
+            void setMemoryBudget(size_t bytes);
 
             uint64_t activeNodeCount() const noexcept;
             uint64_t activeEdgeCount() const noexcept;
@@ -323,12 +337,18 @@ namespace nexora {
             void clear();
 
         private:
+            friend class BulkGraphBuilder;
+            friend class StaticGraph;
+            bool bulk_failed_=false;
+            size_t memory_budget_=0,memory_charged_=0;
+            GraphMemoryUsage memoryUsageUnlocked() const;
+            void admitMemory(size_t nodes,size_t edges,size_t text_bytes);
             std::string    name_;
             GraphStorage*  storage_;  ///< owned by GraphManager
             GraphWAL*      wal_;      ///< owned by GraphManager
 
             // ── RAM Structures ──
-            mutable std::shared_mutex       mutex_;
+            mutable WriterPreferredMutex   mutex_;
 
             /// adjacency lists: DenseId → NodeAdj
             std::vector<NodeAdj>            adj_;
@@ -337,7 +357,7 @@ namespace nexora {
             std::vector<NodeRecord>         node_records_;
 
             /// edge metadata: EdgeId → EdgeRecord
-            std::unordered_map<EdgeId, EdgeRecord> edge_records_;
+            EdgeStore edge_records_;
 
             /// ExtId ↔ DenseId
             DenseIdMap                      id_map_;
@@ -369,6 +389,10 @@ namespace nexora {
             /// دیسک: نوشتن NodeRecord (اگر storage_ وجود دارد)
             void persistNode(const NodeRecord& rec);
             void persistEdge(const EdgeRecord& rec);
+            void finishWal(uint64_t seq);
+            uint64_t appendWal(WalOpType op, uint64_t id, uint64_t src = 0,
+                               uint64_t dst = 0, uint32_t type = 0, uint32_t flags = 0);
+            void rebuildReplayState();
 
             /// حذف edges مرتبط با یک node (برای cascade delete)
             void removeAllEdgesOfNode(DenseId dense_id);

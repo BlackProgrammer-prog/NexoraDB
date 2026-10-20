@@ -1,0 +1,68 @@
+name: Native quality and recovery
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 1 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  native:
+    name: ${{ matrix.preset }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, asan, ubsan, tsan-full]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Native prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake g++-11 ninja-build autoconf automake libtool pkg-config
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: native-vcpkg-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**', 'cmake/TsanCompat.h') }}
+      - name: Bootstrap pinned vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git vcpkg
+          git -C vcpkg checkout 7476f0d4e77d3333fbb249657df8251c28c4faae
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+      - name: Configure and build
+        env:
+          CC: gcc-11
+          CXX: g++-11
+        run: |
+          cmake --preset ${{ matrix.preset }} -DNEXORA_BUILD_PYTHON=${{ matrix.preset == 'debug' && 'ON' || 'OFF' }}
+          cmake --build build/${{ matrix.preset }} --target nexora_doc_tests nexora_graph_tests --parallel 2
+          if [ '${{ matrix.preset }}' = debug ]; then cmake --build build/debug --target nexoradb_py --parallel 2; fi
+      - name: Native tests
+        run: |
+          if [ '${{ matrix.preset }}' = tsan-full ]; then
+            setarch "$(uname -m)" -R ctest --preset tsan-full
+          else
+            ctest --preset ${{ matrix.preset }}
+          fi
+      - name: Python integration, recovery and ownership
+        if: matrix.preset == 'debug'
+        env:
+          PYTHONPATH: build/debug
+        run: |
+          python3 tests/test_native_threading_contract.py
+          python3 tests/test_admin_recovery.py
+          python3 -m unittest discover -s tests -p 'test_benchmark_history.py'
+          python3 tests/test_operations_metrics.py
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.preset }}-${{ github.run_id }}
+          path: build/${{ matrix.preset }}/Testing/Temporary/
+          retention-days: 30

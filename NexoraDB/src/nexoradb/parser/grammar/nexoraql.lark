@@ -47,6 +47,7 @@ start: (statement ";")+
           | traverse_stmt
           | get_node
           | edge_exists
+          | edge_exists_sql
           | run_lock
           | run_job
           | job_status
@@ -100,9 +101,10 @@ show_fks: "SHOW"i "FOREIGN"i "KEYS"i "ON"i NAME
 // §3  DML — Insert
 // ──────────────────────────────────────────────────────────────
 
-insert_stmt:  "INSERT"i "INTO"i NAME "VALUES"i "(" string ")"
+insert_stmt:  "INSERT"i "INTO"i NAME "VALUES"i "(" document_input ")"
 insert_batch: "INSERT"i "INTO"i NAME "BATCH"i "VALUES"i batch_item ("," batch_item)*
-batch_item:   "(" string ")"
+batch_item:   "(" document_input ")"
+document_input: string | parameter | object_value
 
 // ──────────────────────────────────────────────────────────────
 // §4  DML — Select / Count / Exists
@@ -118,8 +120,8 @@ join_clause: "LOOKUP"i "JOIN"i NAME "ON"i field_path "=" field_path
 count_stmt:  "COUNT"i "FROM"i NAME where_clause?
 exists_stmt: "EXISTS"i "IN"i NAME where_clause
 
-limit_clause: "LIMIT"i INT
-skip_clause:  "SKIP"i INT
+limit_clause: "LIMIT"i (INT | parameter)
+skip_clause:  "SKIP"i (INT | parameter)
 
 // ──────────────────────────────────────────────────────────────
 // §5  DML — Update
@@ -143,14 +145,14 @@ assign:    field_path "=" value          -> assign_value
          | field_path "=" "NOW"i "(" ")" -> assign_now
 
 inc_op:    "INCREMENT"i inc_pair ("," inc_pair)*
-inc_pair:  field_path "BY"i SIGNED_NUMBER
+inc_pair:  field_path "BY"i (SIGNED_NUMBER | parameter)
 
 unset_op:  "UNSET"i field_path ("," field_path)*
 push_op:   "PUSH"i field_path "=" value
 pull_op:   "PULL"i field_path "=" value
 addtoset_op: "ADD"i "TO"i "SET"i field_path "=" value
 mul_op:    "MULTIPLY"i mul_pair ("," mul_pair)*
-mul_pair:  field_path "BY"i SIGNED_NUMBER
+mul_pair:  field_path "BY"i (SIGNED_NUMBER | parameter)
 setmin_op: "SET"i "MIN"i field_path "=" value
 setmax_op: "SET"i "MAX"i field_path "=" value
 
@@ -189,12 +191,14 @@ comparison: field_path comp_op value                     -> cmp
           | field_path "NOT"i "IN"i "(" value_list ")"   -> nin_cmp
           | field_path "EXISTS"i                         -> exists_cmp
           | field_path "NOT"i "EXISTS"i                  -> nexists_cmp
-          | field_path "LIKE"i string                    -> like_cmp
-          | field_path "STARTS"i "WITH"i string          -> starts_cmp
-          | field_path "CONTAINS"i string                -> contains_cmp
+          | field_path "LIKE"i string_arg                    -> like_cmp
+          | field_path "STARTS"i "WITH"i string_arg          -> starts_cmp
+          | field_path "CONTAINS"i string_arg                -> contains_cmp
 
 comp_op: "="  -> op_eq
+       | "EQ"i -> op_eq
        | "!=" -> op_neq
+       | "NEQ"i -> op_neq
        | ">=" -> op_gte
        | "<=" -> op_lte
        | ">"  -> op_gt
@@ -250,14 +254,15 @@ snapshot_graph:   "SNAPSHOT"i "GRAPH"i NAME "INTO"i NAME
 // §11  GQL — Traversal
 // ──────────────────────────────────────────────────────────────
 
-traverse_stmt: "TRAVERSE"i NAME "(" string ")" direction edge_sel "DEPTH"i INT ("LIMIT"i INT)?
+traverse_stmt: "TRAVERSE"i NAME "(" string_arg ")" direction edge_sel "DEPTH"i (INT | parameter) ("LIMIT"i (INT | parameter))?
 direction: "OUT"i  -> d_out
          | "IN"i   -> d_in
          | "BOTH"i -> d_both
 edge_sel: NAME | STAR
 
-get_node:    "GET"i "NODE"i NAME "(" string ")"
-edge_exists: "EDGE"i "EXISTS"i NAME "(" string ")" ARROW_L NAME ARROW_R NAME "(" string ")"
+get_node:    "GET"i "NODE"i NAME "(" string_arg ")"
+edge_exists: "EDGE"i "EXISTS"i NAME "(" string_arg ")" ARROW_L NAME ARROW_R NAME "(" string_arg ")"
+edge_exists_sql: "EDGE"i "EXISTS"i "FROM"i NAME "(" string_arg ")" "TO"i NAME "(" string_arg ")" "TYPE"i NAME
 ARROW_L: "-["
 ARROW_R: "]->"
 
@@ -265,17 +270,16 @@ ARROW_R: "]->"
 // §12  GAL — Algorithms
 // ──────────────────────────────────────────────────────────────
 
-run_lock: "RUN"i "LOCK"i NAME "ON"i NAME with_clause? ("LIMIT"i INT)?
-run_job:  "RUN"i "JOB"i NAME "ON"i NAME with_clause? ("RETURNS"i "TOP"i INT)?
+run_lock: "RUN"i "LOCK"i NAME "ON"i NAME with_clause? ("LIMIT"i (INT | parameter))?
+run_job:  "RUN"i "JOB"i NAME "ON"i NAME with_clause? ("RETURNS"i "TOP"i (INT | parameter))?
 
 with_clause: "WITH"i with_param ("," with_param)*
 with_param:  NAME "=" with_value
 ?with_value: value
-           | "[" value ("," value)* "]" -> wlist
 
-job_status: "JOB"i "STATUS"i string
-job_result: "JOB"i "RESULT"i string
-job_cancel: "JOB"i "CANCEL"i string
+job_status: "JOB"i "STATUS"i string_arg
+job_result: "JOB"i "RESULT"i string_arg
+job_cancel: "JOB"i "CANCEL"i string_arg
 show_jobs:  "SHOW"i "JOBS"i ("ON"i NAME)?
 
 // ──────────────────────────────────────────────────────────────
@@ -290,12 +294,20 @@ system_info:   "SYSTEM"i "INFO"i
 // ──────────────────────────────────────────────────────────────
 
 ?value: string
+      | parameter
+      | array_value
+      | object_value
       | SIGNED_NUMBER -> number
       | "true"i       -> vtrue
       | "false"i      -> vfalse
       | "null"i       -> vnull
 
 string: SQ_STRING | DQ_STRING
+string_arg: string | parameter
+parameter: "$" NAME
+array_value: "[" [value ("," value)*] "]"
+object_value: "{" [object_pair ("," object_pair)*] "}"
+object_pair: string ":" value
 
 field_path: NAME ("." NAME)*
 

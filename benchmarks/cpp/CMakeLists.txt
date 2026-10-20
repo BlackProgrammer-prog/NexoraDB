@@ -4,6 +4,10 @@ add_executable(nexora_benchmark
         nexora_benchmark.cpp
 )
 
+add_executable(nexora_phase3_allocation_benchmark
+        phase3_allocation_benchmark.cpp
+)
+
 target_include_directories(nexora_benchmark
         PRIVATE
         ${PROJECT_SOURCE_DIR}
@@ -15,6 +19,12 @@ target_link_libraries(nexora_benchmark
         nexora_core
         Threads::Threads
 )
+
+target_include_directories(nexora_phase3_allocation_benchmark
+        PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(nexora_phase3_allocation_benchmark
+        PRIVATE nexora_core Threads::Threads)
+target_compile_features(nexora_phase3_allocation_benchmark PRIVATE cxx_std_20)
 
 if (NEXORA_BUILD_GRAPH)
     target_link_libraries(nexora_benchmark

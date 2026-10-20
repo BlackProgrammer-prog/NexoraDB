@@ -51,12 +51,15 @@ add_library(nexora_graph STATIC
         # RAM Layer
         Livegraph.h
         Livegraph.cpp
+        BulkGraphBuilder.h
+        BulkGraphBuilder.cpp
         StaticGraph.h
         StaticGraph.cpp
 
         # Orchestrator
         GraphManager.h
         GraphManager.cpp
+        JobScheduler.cpp
 )
 
 target_include_directories(nexora_graph

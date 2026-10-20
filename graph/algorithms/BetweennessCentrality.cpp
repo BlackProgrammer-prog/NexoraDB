@@ -5,12 +5,20 @@
 #include <iomanip>
 #include <numeric>
 #include <sstream>
-#include <unordered_set>
 namespace nexora::graph::algorithms {
 
-    BetweennessCentrality::BfsState::BfsState(size_t N, size_t s_idx)
-    : pred(N), sigma(N, 0.0), dist(N, -1)
+    BetweennessCentrality::BfsState::BfsState(const StaticGraph& snapshot)
+    :pred_offsets(snapshot.nodeCount()+1,0),pred_counts(snapshot.nodeCount()),
+     seen(snapshot.nodeCount(),UINT64_MAX),sigma(snapshot.nodeCount()),dist(snapshot.nodeCount()),delta(snapshot.nodeCount())
     {
+        for (size_t i=0;i<snapshot.nodeCount();++i)
+            pred_offsets[i+1]=pred_offsets[i]+snapshot.outDegree(i)+snapshot.inDegree(i);
+        pred_storage.resize(pred_offsets.back()); queue.reserve(snapshot.nodeCount());
+    }
+    void BetweennessCentrality::BfsState::reset(size_t s_idx) {
+        std::fill(sigma.begin(),sigma.end(),0); std::fill(dist.begin(),dist.end(),-1);
+        std::fill(delta.begin(),delta.end(),0); std::fill(pred_counts.begin(),pred_counts.end(),0);
+        std::fill(seen.begin(),seen.end(),UINT64_MAX); queue.clear();
         sigma[s_idx] = 1.0;
         dist[s_idx]  = 0;
         queue.push_back(s_idx);
@@ -42,16 +50,12 @@ namespace nexora::graph::algorithms {
         if (N == 0)
             return AlgoResult{true, "", "{\"total_nodes\":0,\"nodes\":[]}", 0.0};
 
-        std::unordered_map<DenseId, size_t> idx;
-        idx.reserve(N);
-        for (size_t i = 0; i < N; ++i)
-            idx[nodes[i]] = i;
-
         std::vector<double> betweenness(N, 0.0);
-
+        (void)snapshot.incoming(0); // Allocate optional CSC outside the node loop.
+        BfsState state(snapshot);
         for (size_t s = 0; s < N; ++s) {
-            BfsState state(N, s);
-            forwardBfs(snapshot, nodes, idx, s, state);
+            snapshot.checkCancelled(); state.reset(s);
+            forwardBfs(snapshot, nodes, s, state);
             backwardPass(s, state, betweenness);
         }
 
@@ -59,8 +63,8 @@ namespace nexora::graph::algorithms {
 
         std::vector<size_t> order(N);
         std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(),
-                  [&](size_t a, size_t b) { return betweenness[a] > betweenness[b]; });
+        std::partial_sort(order.begin(),order.begin()+std::min(top_k,N),order.end(),
+                  [&](size_t a,size_t b) { return betweenness[a]!=betweenness[b] ? betweenness[a]>betweenness[b] : a<b; });
 
         const size_t show = std::min(top_k, N);
         double ms = std::chrono::duration<double, std::milli>(
@@ -72,19 +76,17 @@ namespace nexora::graph::algorithms {
     void BetweennessCentrality::forwardBfs(
             const StaticGraph&                    snapshot,
             const std::vector<DenseId>&           nodes,
-            const std::unordered_map<DenseId,size_t>& idx,
             size_t                                s_idx,
             BfsState&                             st)
     {
-        while (!st.queue.empty()) {
-            size_t v = st.queue.front();
-            st.queue.pop_front();
-            st.bfs_stack.push(v);
+        size_t head=0;
+        while (head<st.queue.size()) {
+            snapshot.checkCancelled(); size_t v=st.queue[head++];
 
             auto expand = [&](DenseId nbr_id) -> bool {
-                auto it = idx.find(nbr_id);
-                if (it == idx.end()) return true;
-                size_t w = it->second;
+                const size_t w=nbr_id;
+                if (st.seen[w]==v) return true;
+                st.seen[w]=v;
 
                 if (st.dist[w] < 0) {
                     st.dist[w] = st.dist[v] + 1;
@@ -92,39 +94,24 @@ namespace nexora::graph::algorithms {
                 }
                 if (st.dist[w] == st.dist[v] + 1) {
                     st.sigma[w] += st.sigma[v];
-                    st.pred[w].push_back(v);
+                    st.pred_storage[st.pred_offsets[w]+st.pred_counts[w]++]=v;
                 }
                 return true;
             };
 
-            std::unordered_set<DenseId> unique_neighbors;
-            snapshot.forEachNeighbor(nodes[v], Direction::Out,
-                                     [&](DenseId n, TypeId) -> bool {
-                                         unique_neighbors.insert(n);
-                                         return true;
-                                     });
-            snapshot.forEachNeighbor(nodes[v], Direction::In,
-                                     [&](DenseId n, TypeId) -> bool {
-                                         unique_neighbors.insert(n);
-                                         return true;
-                                     });
-            for (DenseId n : unique_neighbors)
-                expand(n);
+            for (const auto& edge:snapshot.outgoing(nodes[v])) { snapshot.checkCancelled(); expand(edge.neighbor); }
+            for (const auto& edge:snapshot.incoming(nodes[v])) { snapshot.checkCancelled(); expand(edge.neighbor); }
         }
     }
     void BetweennessCentrality::backwardPass(size_t     s_idx,
-    const BfsState&      st,
+    BfsState&      st,
             std::vector<double>& betweenness)
 {
-    const size_t N = betweenness.size();
-    std::vector<double> delta(N, 0.0);
-
-    auto stk = st.bfs_stack;
-
-    while (!stk.empty()) {
-    size_t w = stk.top();
-    stk.pop();
-    for (size_t v : st.pred[w]) {
+    auto& delta=st.delta;
+    for (auto it=st.queue.rbegin();it!=st.queue.rend();++it) {
+    const auto w=*it;
+    for (size_t p=0;p<st.pred_counts[w];++p) {
+    const auto v=st.pred_storage[st.pred_offsets[w]+p];
     delta[v] += (st.sigma[v] / st.sigma[w]) * (1.0 + delta[w]);
 }
 if (w != s_idx)
@@ -163,11 +150,18 @@ std::string BetweennessCentrality::buildJson(
     return j.str();
 }
 
+AlgoResult runBetweennessCentrality(GraphManager& manager,const std::string& graph_name,
+        const std::vector<ExtId>& params,SnapshotOptions options) {
+    auto algorithm=std::make_shared<BetweennessCentrality>();
+    auto handle=manager.submitJob(graph_name,algorithm,params,std::move(options));
+    return handle.result();
+}
+
 AlgoResult runBetweennessCentrality(GraphManager& manager,
                                     const std::string& graph_name,
                                     const std::vector<ExtId>& params)
 {
-    BetweennessCentrality algo;
+    auto algo=std::make_shared<BetweennessCentrality>();
     auto handle = manager.submitJob(graph_name, algo, params);
     return handle.result();
 }

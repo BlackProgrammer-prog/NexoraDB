@@ -30,9 +30,15 @@ cmake_minimum_required(VERSION 3.22)
 
 add_library(nexora_core STATIC
         DocEngine.cpp
+        Maintenance.cpp
+        Operations.cpp
         DocEngine.h
+        DocumentCodec.cpp
+        DocumentCodec.h
         IndexCodec.cpp
         IndexCodec.h
+        RocksTuning.cpp
+        RocksTuning.h
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -59,6 +65,7 @@ target_link_libraries(nexora_core
         PUBLIC
         nexora_query
         RocksDB::rocksdb
+        $<IF:$<TARGET_EXISTS:mongo::bson_static>,mongo::bson_static,mongo::bson_shared>
 )
 
 # فشرده‌سازی اضافی (در صورت وجود)
@@ -91,7 +98,7 @@ install(TARGETS nexora_core
         RUNTIME DESTINATION bin
 )
 
-install(FILES DocEngine.h
+install(FILES DocEngine.h DocumentCodec.h
         DESTINATION include/nexoradb/core
 )
 

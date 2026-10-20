@@ -91,5 +91,7 @@ def create_graph_manager(settings: AdminApiSettings, engine: Any) -> Any:
     if not getattr(native, "GRAPH_ENABLED", False):
         raise RuntimeError("NexoraDB graph engine is not enabled in the loaded native module")
     graph_manager = native.GraphManager(engine, str(settings.graph_dir))
-    graph_manager.startup()
+    if not graph_manager.startup():
+        graph_manager.shutdown()
+        raise RuntimeError("Graph recovery failed; database is not ready")
     return graph_manager

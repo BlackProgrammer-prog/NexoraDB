@@ -1,14 +1,20 @@
 #include "core/DocEngine.h"
+#include "core/DocumentCodec.h"
+#include "query/CompiledQuery.h"
 #include "query/Condition.h"
+#include "query/DocumentView.h"
+#include "query/Evaluator.h"
 #include "query/UpdateSpec.h"
 
 #ifdef NEXORA_BUILD_GRAPH
 #include "graph/Livegraph.h"
+#include "graph/Graphwal.h"
 #include "graph/StaticGraph.h"
 #include "graph/algorithms/ShortestPath.h"
 #endif
 
 #include <benchmark/benchmark.h>
+#include <bson/bson.h>
 
 #include <atomic>
 #include <chrono>
@@ -68,6 +74,47 @@ namespace {
 
     constexpr std::uint64_t kSeed = 0xC0FFEEULL;
     constexpr std::size_t kBatchSize = 4096;
+
+    void BM_CompiledBsonPredicate(benchmark::State& state) {
+        const std::string json =
+                R"({"_id":"bench","profile":{"age":42,"name":"Alice ✓"},"active":true})";
+        const auto encoded = nexora::core::DocumentCodec::EncodeJson(json);
+        if (!encoded.success) {
+            state.SkipWithError(encoded.error.c_str());
+            return;
+        }
+        const nexora::query::DocumentView view(
+                std::string_view(encoded.value).substr(
+                        nexora::core::DocumentCodec::kEnvelopeSize));
+        const nexora::query::CompiledQuery query(Condition::And({
+                Condition::Leaf("profile.age", Op::GTE, "40", ValueType::Int64),
+                Condition::Leaf("profile.name", Op::STARTS, "Ali"),
+                Condition::Leaf("active", Op::EQ, "true", ValueType::Bool)}));
+        if (!view.valid() || !query.valid()) {
+            state.SkipWithError("unable to prepare BSON predicate benchmark");
+            return;
+        }
+        for (auto _ : state) benchmark::DoNotOptimize(query.Match(view));
+        state.SetItemsProcessed(state.iterations());
+        state.counters["predicates"] = 3;
+        state.counters["bson_bytes"] =
+                static_cast<double>(encoded.value.size());
+    }
+
+    void BM_JsonCompatibilityPredicate(benchmark::State& state) {
+        const std::string json =
+                R"({"_id":"bench","profile":{"age":42,"name":"Alice ✓"},"active":true})";
+        const Condition condition = Condition::And({
+                Condition::Leaf("profile.age", Op::GTE, "40", ValueType::Int64),
+                Condition::Leaf("profile.name", Op::STARTS, "Ali"),
+                Condition::Leaf("active", Op::EQ, "true", ValueType::Bool)});
+        nexora::query::Evaluator evaluator;
+        for (auto _ : state)
+            benchmark::DoNotOptimize(evaluator.Match(json, condition));
+        state.SetItemsProcessed(state.iterations());
+        state.counters["predicates"] = 3;
+        state.counters["json_bytes"] = static_cast<double>(json.size());
+    }
 
     std::atomic<std::uint64_t> g_path_sequence{0};
 
@@ -1008,6 +1055,40 @@ namespace {
 
 #endif
 
+#ifdef NEXORA_BUILD_GRAPH
+    void BM_WalAppendAndMarkByRetainedRecords(benchmark::State& state) {
+        const auto path = makeTemporaryPath("wal_scaling", state.range(0));
+        std::filesystem::create_directories(path);
+        {
+            nexora::graph::WalOptions options;
+            options.durability = nexora::graph::WalDurability::Async;
+            // Exclude rotation and fsync latency to isolate per-record work.
+            options.segment_bytes = 1024ULL * 1024 * 1024;
+            nexora::graph::GraphWAL wal(path / "graph.wal", 86400, options);
+            if (!wal.open()) { state.SkipWithError("WAL open failed"); return; }
+            for (int64_t i = 0; i < state.range(0); ++i) {
+                const auto seq = wal.append(nexora::graph::WalOpType::AddNode, i);
+                if (seq == UINT64_MAX || !wal.markApplied(seq)) {
+                    state.SkipWithError("WAL prefill failed"); return;
+                }
+            }
+            for (auto _ : state) {
+                auto seq = wal.append(nexora::graph::WalOpType::AddNode, 42);
+                if (seq == UINT64_MAX || !wal.markApplied(seq)) {
+                    state.SkipWithError("WAL append failed"); break;
+                }
+                benchmark::DoNotOptimize(seq);
+            }
+            state.SetItemsProcessed(state.iterations());
+        }
+        std::filesystem::remove_all(path);
+    }
+    BENCHMARK(BM_WalAppendAndMarkByRetainedRecords)->Arg(1000)->Arg(100000)->Arg(1000000)->Iterations(10000);
+#endif
+
+    BENCHMARK(BM_CompiledBsonPredicate);
+    BENCHMARK(BM_JsonCompatibilityPredicate);
+
     BENCHMARK(BM_DocumentPointRead)
             ->Apply(standardDatasetSizes)
             ->UseManualTime();
@@ -1098,6 +1179,8 @@ int main(int argc, char** argv) {
                                 NEXORA_BENCH_COMPILER_VERSION);
     benchmark::AddCustomContext("rocksdb_version",
                                 NEXORA_BENCH_ROCKSDB_VERSION);
+    benchmark::AddCustomContext("libbson_version",
+                                bson_get_version());
     benchmark::AddCustomContext("system",
                                 NEXORA_BENCH_SYSTEM);
     benchmark::AddCustomContext("dataset_seed",

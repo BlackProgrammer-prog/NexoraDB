@@ -104,7 +104,7 @@ namespace nexora::graph::algorithms {
         for (const auto& [id, score] : scores)
             ranked.emplace_back(score, id);
 
-        std::sort(ranked.begin(), ranked.end(),
+        std::partial_sort(ranked.begin(),ranked.begin()+std::min(limit,ranked.size()),ranked.end(),
                   [](const auto& a, const auto& b) {
                       if (a.first != b.first) return a.first > b.first;
                       return a.second < b.second;

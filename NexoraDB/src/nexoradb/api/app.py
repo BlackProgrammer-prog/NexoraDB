@@ -22,6 +22,12 @@ def create_api_router(
 
     @router.get("/health")
     def health() -> dict[str, str]:
+        try:
+            if not engine_provider().is_healthy():
+                raise RuntimeError("Document engine unhealthy")
+            graph_manager_provider()  # Recovery failures must not become HTTP 200.
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail={"message": "Database is not ready"}) from exc
         return {"message": "ok"}
 
     @router.post("/query", response_model=QueryExecuteResponse)
@@ -39,6 +45,7 @@ def create_api_router(
             engine=engine_provider(),
             graph_manager=graph_manager_provider(),
             payload=payload,
+            granted_scopes=frozenset(app.scopes),
         )
 
     return router

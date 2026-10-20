@@ -1,10 +1,7 @@
 #pragma once
 #include "AlgorithmBase.h"
-#include <deque>
 #include <random>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 namespace nexora::graph::algorithms {
 
@@ -20,20 +17,25 @@ namespace nexora::graph::algorithms {
         static constexpr size_t kDefaultR = 20;
         static constexpr double kDefaultP = 0.1;
 
-        using AdjList = std::unordered_map<DenseId, std::vector<DenseId>>;
-        using SeedSet = std::unordered_set<DenseId>;
+        using AdjList = std::vector<std::vector<DenseId>>;
+        using SeedSet = std::vector<uint8_t>;
+        struct Workspace {
+            SeedSet activated;
+            std::vector<DenseId> queue;
+            const StaticGraph* snapshot;
+        };
         static AdjList buildAdjList(const StaticGraph& snapshot);
 
         static double simulateIC(const AdjList&  adj,
                                  const SeedSet&  seeds,
                                  size_t          R,
                                  double          p,
-                                 std::mt19937&   rng);
+                                 std::mt19937& rng,Workspace& workspace);
 
         static size_t runOneSim(const AdjList&  adj,
                                 const SeedSet&  seeds,
                                 double          p,
-                                std::mt19937&   rng);
+                                std::mt19937& rng,Workspace& workspace);
 
         static std::string buildJson(const StaticGraph&          snapshot,
                                      const std::vector<DenseId>& order,

@@ -13,6 +13,7 @@
 #include <cassert>
 #include <chrono>
 #include <stdexcept>
+#include <limits>
 
 namespace nexora {
     namespace graph {
@@ -106,7 +107,7 @@ namespace nexora {
                 out_edges.insert(pos, e);
                 checkAndUpgrade();
             } else {
-                heavy_out.insert(e);
+                heavy_out->insert(e);
             }
         }
 
@@ -117,7 +118,7 @@ namespace nexora {
                 in_edges.insert(pos, e);
                 checkAndUpgrade();
             } else {
-                heavy_in.insert(e);
+                heavy_in->insert(e);
             }
         }
 
@@ -131,7 +132,14 @@ namespace nexora {
                 }
                 return false;
             }
-            return heavy_out.remove(neighbor, type_id);
+            const bool removed=heavy_out->remove(neighbor,type_id);
+            if (removed && heavy_out->size()<=kHeavyNodeThreshold/2) {
+                out_edges.reserve(heavy_out->size());
+                heavy_out->forEach([&](const AdjEntry& entry) { out_edges.push_back(entry); return true; });
+                heavy_out.reset(); out_heavy=false;
+                out_edges.shrink_to_fit();
+            }
+            return removed;
         }
 
         bool NodeAdj::removeIn(DenseId neighbor, TypeId type_id) {
@@ -144,7 +152,14 @@ namespace nexora {
                 }
                 return false;
             }
-            return heavy_in.remove(neighbor, type_id);
+            const bool removed=heavy_in->remove(neighbor,type_id);
+            if (removed && heavy_in->size()<=kHeavyNodeThreshold/2) {
+                in_edges.reserve(heavy_in->size());
+                heavy_in->forEach([&](const AdjEntry& entry) { in_edges.push_back(entry); return true; });
+                heavy_in.reset(); in_heavy=false;
+                in_edges.shrink_to_fit();
+            }
+            return removed;
         }
 
         void NodeAdj::forEachOut(const std::function<bool(const AdjEntry&)>& fn) const {
@@ -153,7 +168,7 @@ namespace nexora {
                     if (!fn(e)) return;
                 }
             }
-            else heavy_out.forEach(fn);
+            else heavy_out->forEach(fn);
         }
 
         void NodeAdj::forEachIn(const std::function<bool(const AdjEntry&)>& fn) const {
@@ -162,18 +177,20 @@ namespace nexora {
                     if (!fn(e)) return;
                 }
             }
-            else heavy_in.forEach(fn);
+            else heavy_in->forEach(fn);
         }
 
         void NodeAdj::checkAndUpgrade() {
             if (!out_heavy && out_edges.size() > kHeavyNodeThreshold) {
-                for (const auto& e : out_edges) heavy_out.insert(e);
+                heavy_out=std::make_unique<ChunkedSortedVector>();
+                for (const auto& e : out_edges) heavy_out->insert(e);
                 out_edges.clear();
                 out_edges.shrink_to_fit();
                 out_heavy = true;
             }
             if (!in_heavy && in_edges.size() > kHeavyNodeThreshold) {
-                for (const auto& e : in_edges) heavy_in.insert(e);
+                heavy_in=std::make_unique<ChunkedSortedVector>();
+                for (const auto& e : in_edges) heavy_in->insert(e);
                 in_edges.clear();
                 in_edges.shrink_to_fit();
                 in_heavy = true;
@@ -189,9 +206,11 @@ namespace nexora {
             if (it != ext_to_dense_.end()) return it->second;
 
             DenseId id = (reuse_id != kInvalidDenseId) ? reuse_id : next_dense_++;
+            if (id>=dense_to_ext_.size()) dense_to_ext_.resize(id+1);
+            if (dense_to_ext_[id]) throw std::invalid_argument("dense identity slot already occupied");
             ext_to_dense_[ext_id] = id;
             dense_to_ext_[id]     = ext_id;
-            if (reuse_id == kInvalidDenseId && id >= next_dense_) next_dense_ = id + 1;
+            if (id >= next_dense_) next_dense_ = id + 1;
             return id;
         }
 
@@ -201,8 +220,7 @@ namespace nexora {
         }
 
         ExtId DenseIdMap::getExt(DenseId dense_id) const {
-            auto it = dense_to_ext_.find(dense_id);
-            return (it != dense_to_ext_.end()) ? it->second : "";
+            return hasDense(dense_id) ? *dense_to_ext_[dense_id] : "";
         }
 
         bool DenseIdMap::hasExt(const ExtId& ext_id) const {
@@ -210,22 +228,99 @@ namespace nexora {
         }
 
         bool DenseIdMap::hasDense(DenseId dense_id) const {
-            return dense_to_ext_.count(dense_id) > 0;
+            return dense_id<dense_to_ext_.size() && dense_to_ext_[dense_id].has_value();
         }
 
         void DenseIdMap::remove(const ExtId& ext_id) {
             auto it = ext_to_dense_.find(ext_id);
             if (it == ext_to_dense_.end()) return;
             DenseId did = it->second;
-            dense_to_ext_.erase(did);
+            dense_to_ext_[did].reset();
             ext_to_dense_.erase(it);
         }
 
         void DenseIdMap::remove(DenseId dense_id) {
-            auto it = dense_to_ext_.find(dense_id);
-            if (it == dense_to_ext_.end()) return;
-            ext_to_dense_.erase(it->second);
-            dense_to_ext_.erase(it);
+            if (!hasDense(dense_id)) return;
+            ext_to_dense_.erase(*dense_to_ext_[dense_id]);
+            dense_to_ext_[dense_id].reset();
+        }
+
+        namespace {
+            size_t stringHeap(const std::string& value) {
+                return value.capacity()>std::string{}.capacity() ? value.capacity()+1 : 0;
+            }
+            template<class Map> size_t mapEstimate(const Map& map) {
+                return map.bucket_count()*sizeof(void*)+
+                    map.size()*(sizeof(typename Map::value_type)+2*sizeof(void*));
+            }
+        }
+        size_t DenseIdMap::reverseBytes() const noexcept {
+            size_t bytes=dense_to_ext_.capacity()*sizeof(decltype(dense_to_ext_)::value_type);
+            for (const auto& ext:dense_to_ext_) if (ext) bytes+=stringHeap(*ext);
+            return bytes;
+        }
+        size_t DenseIdMap::forwardBytesEstimate() const noexcept {
+            size_t bytes=mapEstimate(ext_to_dense_);
+            for (const auto& [ext,id]:ext_to_dense_) bytes+=stringHeap(ext);
+            return bytes;
+        }
+
+        GraphMemoryUsage LiveGraph::memoryUsageUnlocked() const {
+            GraphMemoryUsage usage;
+            usage.object_bytes=sizeof(*this)+stringHeap(name_);
+            usage.node_records_bytes=node_records_.capacity()*sizeof(NodeRecord);
+            usage.adjacency_headers_bytes=adj_.capacity()*sizeof(NodeAdj);
+            usage.edge_store_bytes=edge_records_.allocatedBytesEstimate();
+            usage.edge_slot_capacity=edge_records_.slotCapacity(); usage.sparse_edges=edge_records_.sparseSize();
+            usage.reverse_identity_bytes=id_map_.reverseBytes();
+            usage.forward_identity_bytes_estimate=id_map_.forwardBytesEstimate();
+            for (const auto& adj:adj_) {
+                usage.adjacency_payload_bytes+=adj.out_edges.heapBytes()+adj.in_edges.heapBytes();
+                usage.inline_adjacency_lists+=(!adj.out_heavy && adj.out_edges.heapBytes()==0)+
+                                              (!adj.in_heavy && adj.in_edges.heapBytes()==0);
+                for (const auto* heavy:{adj.heavy_out.get(),adj.heavy_in.get()}) if (heavy) {
+                    ++usage.heavy_adjacency_lists;
+                    usage.adjacency_payload_bytes+=sizeof(ChunkedSortedVector)+
+                        heavy->chunks.capacity()*sizeof(std::vector<AdjEntry>);
+                    for (const auto& chunk:heavy->chunks)
+                        usage.adjacency_payload_bytes+=chunk.capacity()*sizeof(AdjEntry);
+                }
+            }
+            for (const auto* registry:{&node_type_reg_,&edge_type_reg_}) {
+                usage.type_registry_bytes_estimate+=mapEstimate(registry->name_to_id)+mapEstimate(registry->id_to_name);
+                for (const auto& [name,id]:registry->name_to_id) usage.type_registry_bytes_estimate+=stringHeap(name);
+                for (const auto& [id,name]:registry->id_to_name) usage.type_registry_bytes_estimate+=stringHeap(name);
+            }
+            usage.free_ids_bytes_estimate=(node_free_stack_.size()+edge_free_stack_.size())*sizeof(uint64_t);
+            usage.wal_bytes_estimate=wal_ ? wal_->memoryBytesEstimate() : 0;
+            usage.storage_bytes_estimate=storage_ ? storage_->memoryBytesEstimate() : 0;
+            usage.total_bytes_estimate=usage.object_bytes+usage.node_records_bytes+usage.adjacency_headers_bytes+
+                usage.adjacency_payload_bytes+usage.edge_store_bytes+usage.reverse_identity_bytes+
+                usage.forward_identity_bytes_estimate+usage.type_registry_bytes_estimate+usage.free_ids_bytes_estimate+
+                usage.wal_bytes_estimate+usage.storage_bytes_estimate;
+            usage.budget_bytes=memory_budget_; usage.admission_charged_bytes=memory_charged_;
+            return usage;
+        }
+        GraphMemoryUsage LiveGraph::memoryUsage() const {
+            std::shared_lock lock(mutex_); return memoryUsageUnlocked();
+        }
+        void LiveGraph::setMemoryBudget(size_t bytes) {
+            std::unique_lock lock(mutex_);
+            const auto usage=memoryUsageUnlocked().total_bytes_estimate;
+            if (bytes && bytes<usage) throw std::length_error("memory budget below current graph estimate");
+            memory_budget_=bytes; memory_charged_=bytes ? usage : 0;
+        }
+        void LiveGraph::admitMemory(size_t nodes,size_t edges,size_t text) {
+            if (!memory_budget_) return;
+            // High-water admission credits deliberately do not refund deletes or
+            // duplicates: vector/hash capacities and fragmentation may persist.
+            size_t available=memory_budget_-memory_charged_;
+            auto charge=[&](size_t count,size_t unit) {
+                if (count>available/unit) throw std::length_error("graph memory admission budget exceeded");
+                available-=count*unit;
+            };
+            charge(nodes,1024); charge(edges,512); charge(text,4);
+            memory_charged_=memory_budget_-available;
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -266,13 +361,30 @@ namespace nexora {
         }
 
         void LiveGraph::persistNode(const NodeRecord& rec) {
-            if (storage_ && storage_->isOpen())
-                storage_->writeNode(rec);
+            if (storage_ && !storage_->writeNode(rec))
+                throw std::runtime_error("Graph node write failed");
         }
 
         void LiveGraph::persistEdge(const EdgeRecord& rec) {
-            if (storage_ && storage_->isOpen())
-                storage_->writeEdge(rec);
+            if (storage_ && !storage_->writeEdge(rec))
+                throw std::runtime_error("Graph edge write failed");
+        }
+
+        uint64_t LiveGraph::appendWal(WalOpType op, uint64_t id, uint64_t src,
+                                     uint64_t dst, uint32_t type, uint32_t flags) {
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph and replay WAL");
+            if (!wal_) return UINT64_MAX;
+            const auto seq = wal_->append(op, id, src, dst, type, flags);
+            if (seq == UINT64_MAX) throw std::runtime_error("Graph WAL append failed: " + wal_->lastError());
+            return seq;
+        }
+
+        void LiveGraph::finishWal(uint64_t seq) {
+            if (!wal_) return;
+            if (wal_->durability() != WalDurability::Async && storage_ && !storage_->durableSync())
+                throw std::runtime_error("Graph data sync failed before WAL checkpoint");
+            if (!wal_->markApplied(seq))
+                throw std::runtime_error("Graph WAL checkpoint failed: " + wal_->lastError());
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -303,9 +415,8 @@ namespace nexora {
 
                 if (rec.isActive()) {
                     active_node_count_.fetch_add(1);
-                    // ExtId از مپ ذخیره‌شده در type registry بازسازی نمی‌شود —
-                    // در فایل .nex ExtId ذخیره نشده.
-                    // GraphManager بعد از loadFromDisk، ExtId را از RocksDB بازسازی می‌کند.
+                    // ExtId and type names are restored below from this
+                    // generation's checksummed metadata dictionary.
                 } else if (rec.isDeleted()) {
                     node_free_stack_.push(rec.dense_id);
                 }
@@ -314,6 +425,20 @@ namespace nexora {
                 return true;
             });
             next_dense_id_.store(max_dense + 1);
+
+            // Identity and type dictionaries are part of the same published
+            // storage generation as node/edge records.
+            node_type_reg_ = TypeRegistry{}; edge_type_reg_ = TypeRegistry{};
+            for (const auto& [id,name] : storage_->nodeTypes()) {
+                node_type_reg_.name_to_id[name]=id; node_type_reg_.id_to_name[id]=name;
+                node_type_reg_.next_id=std::max(node_type_reg_.next_id,id+1);
+            }
+            for (const auto& [id,name] : storage_->edgeTypes()) {
+                edge_type_reg_.name_to_id[name]=id; edge_type_reg_.id_to_name[id]=name;
+                edge_type_reg_.next_id=std::max(edge_type_reg_.next_id,id+1);
+            }
+            for (const auto& [id,ext] : storage_->identities())
+                if (id<node_records_.size() && node_records_[id].isActive()) id_map_.getOrCreate(ext,id);
 
             // ── اسکن فایل .nexr ──
             EdgeId max_edge = 0;
@@ -328,6 +453,10 @@ namespace nexora {
                         adj_[rec.src].addOut(fwd);
                         AdjEntry rev{rec.src, rec.edge_id, rec.type_id};
                         adj_[rec.dst].addIn(rev);
+                        if (rec.flags & FLAG_UNDIRECTED) {
+                            adj_[rec.dst].addOut({rec.src, rec.edge_id, rec.type_id});
+                            adj_[rec.src].addIn({rec.dst, rec.edge_id, rec.type_id});
+                        }
                     }
                 } else if (rec.isDeleted()) {
                     edge_free_stack_.push(rec.edge_id);
@@ -337,6 +466,7 @@ namespace nexora {
                 return true;
             });
             next_edge_id_.store(max_edge + 1);
+            edge_records_.optimizeDense();
 
             version_.fetch_add(1);
             return true;
@@ -344,9 +474,61 @@ namespace nexora {
 
         size_t LiveGraph::replayWAL() {
             if (!wal_) return 0;
-            return wal_->replay([this](const WalRecord& rec) -> bool {
-                return applyWalRecord(rec);
+            std::unique_lock lock(mutex_);
+            size_t count = 0;
+            for (const auto& rec : wal_->loadUnapplied()) {
+                if (!applyWalRecord(rec)) throw std::runtime_error("Graph WAL replay failed");
+                rebuildReplayState();
+                finishWal(rec.seq);
+                ++count;
+            }
+            return count;
+        }
+
+        bool LiveGraph::checkpointWAL() {
+            std::unique_lock lock(mutex_);
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
+            return wal_ && !wal_->hasPendingEntries() && wal_->checkpoint([&] {
+                return !storage_ || storage_->durableSync();
             });
+        }
+
+        void LiveGraph::rebuildReplayState() {
+            adj_.clear(); adj_.resize(node_records_.size());
+            while (!node_free_stack_.empty()) node_free_stack_.pop();
+            while (!edge_free_stack_.empty()) edge_free_stack_.pop();
+            uint64_t nodes = 0;
+            for (auto& node : node_records_) {
+                node.in_degree = node.out_degree = 0;
+                if (node.isActive()) ++nodes;
+                else if (node.isDeleted()) node_free_stack_.push(node.dense_id);
+            }
+            for (const auto& [eid, edge] : edge_records_) {
+                if (!edge.isActive() || edge.src >= adj_.size() || edge.dst >= adj_.size())
+                    throw std::runtime_error("Invalid WAL edge endpoints");
+                adj_[edge.src].addOut({edge.dst, eid, edge.type_id});
+                adj_[edge.dst].addIn({edge.src, eid, edge.type_id});
+                ++node_records_[edge.src].out_degree; ++node_records_[edge.dst].in_degree;
+                if (edge.flags & FLAG_UNDIRECTED) {
+                    adj_[edge.dst].addOut({edge.src, eid, edge.type_id});
+                    adj_[edge.src].addIn({edge.dst, eid, edge.type_id});
+                    if (edge.src!=edge.dst) {
+                        ++node_records_[edge.dst].out_degree; ++node_records_[edge.src].in_degree;
+                    }
+                }
+            }
+            for (const auto& node : node_records_)
+                if (node.isActive() || node.isDeleted()) persistNode(node);
+            if (storage_) {
+                id_map_=DenseIdMap{};
+                for (const auto& [id,ext] : storage_->identities())
+                    if (id<node_records_.size() && node_records_[id].isActive()) id_map_.getOrCreate(ext,id);
+            }
+            active_node_count_ = nodes; active_edge_count_ = edge_records_.size();
+            next_dense_id_ = node_records_.size();
+            uint64_t max_edge = next_edge_id_;
+            for (const auto& [eid, edge] : edge_records_) max_edge = std::max(max_edge, eid+1);
+            next_edge_id_ = max_edge;
         }
 
         bool LiveGraph::applyWalRecord(const WalRecord& rec) {
@@ -355,20 +537,28 @@ namespace nexora {
                     // در replay، ExtId موجود نیست — فقط DenseId و type_id
                     DenseId id = rec.node_or_edge_id;
                     ensureCapacity(id);
-                    NodeRecord nr{};
+                    NodeRecord nr = node_records_[id];
                     nr.dense_id = id;
                     nr.type_id  = rec.type_id;
                     nr.flags    = rec.flags | FLAG_ACTIVE;
                     node_records_[id] = nr;
-                    active_node_count_.fetch_add(1);
+                    persistNode(nr);
                     return true;
                 }
                 case WalOpType::RemoveNode: {
                     DenseId id = rec.node_or_edge_id;
-                    if (id >= node_records_.size()) return false;
+                    ensureCapacity(id);
+                    // Removing a node is a single redo operation including its
+                    // incident edges, even if a previous crash removed some.
+                    for (auto it = edge_records_.begin(); it != edge_records_.end();) {
+                        if (it->second.src == id || it->second.dst == id) {
+                            auto deleted = it->second; deleted.flags = FLAG_DELETED;
+                            persistEdge(deleted); it = edge_records_.erase(it);
+                        } else ++it;
+                    }
+                    node_records_[id].dense_id = id;
                     node_records_[id].flags = FLAG_DELETED;
-                    active_node_count_.fetch_sub(1);
-                    node_free_stack_.push(id);
+                    persistNode(node_records_[id]); id_map_.remove(id);
                     return true;
                 }
                 case WalOpType::AddEdge: {
@@ -378,25 +568,19 @@ namespace nexora {
                     er.src     = rec.src_id;
                     er.dst     = rec.dst_id;
                     er.type_id = rec.type_id;
-                    er.flags   = FLAG_ACTIVE;
+                    er.flags   = rec.flags | FLAG_ACTIVE;
                     edge_records_[eid] = er;
-                    if (rec.src_id < adj_.size() && rec.dst_id < adj_.size()) {
-                        adj_[rec.src_id].addOut({rec.dst_id, eid, rec.type_id});
-                        adj_[rec.dst_id].addIn({rec.src_id, eid, rec.type_id});
-                    }
-                    active_edge_count_.fetch_add(1);
+                    persistEdge(er);
                     return true;
                 }
                 case WalOpType::RemoveEdge: {
                     EdgeId eid = rec.node_or_edge_id;
                     auto it = edge_records_.find(eid);
-                    if (it == edge_records_.end()) return false;
-                    it->second.flags = FLAG_DELETED;
-                    adj_[it->second.src].removeOut(it->second.dst, it->second.type_id);
-                    adj_[it->second.dst].removeIn(it->second.src, it->second.type_id);
-                    edge_records_.erase(it);
-                    active_edge_count_.fetch_sub(1);
-                    edge_free_stack_.push(eid);
+                    EdgeRecord deleted{}; deleted.edge_id = eid;
+                    deleted.src = rec.src_id; deleted.dst = rec.dst_id;
+                    deleted.type_id = rec.type_id; deleted.flags = FLAG_DELETED;
+                    persistEdge(deleted);
+                    if (it != edge_records_.end()) edge_records_.erase(it);
                     return true;
                 }
                 default:
@@ -412,6 +596,7 @@ namespace nexora {
                                    const std::string& type_name,
                                    bool is_implicit) {
             std::unique_lock lock(mutex_);
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
 
             // بررسی وجود
             DenseId existing = id_map_.get(ext_id);
@@ -420,17 +605,26 @@ namespace nexora {
                 if (is_implicit == false &&
                     existing < node_records_.size() &&
                     node_records_[existing].isImplicit()) {
+                    admitMemory(0,0,type_name.size());
+                    const auto type=node_type_reg_.getOrCreate(type_name);
+                    if (storage_ && !storage_->rememberNode(existing,ext_id,type,type_name))
+                        throw std::runtime_error("Graph promoted identity persistence failed");
+                    const auto seq = appendWal(WalOpType::AddNode, existing, 0, 0,
+                            type,
+                            node_records_[existing].flags & ~FLAG_IMPLICIT);
                     node_records_[existing].flags &= ~FLAG_IMPLICIT;
-                    if (storage_) storage_->updateNodeFlags(existing,
-                                                            node_records_[existing].flags);
+                    node_records_[existing].type_id=type;
+                    version_.fetch_add(1);
+                    persistNode(node_records_[existing]);
+                    finishWal(seq);
                 }
                 return existing;
             }
 
+            admitMemory(1,0,ext_id.size()+type_name.size());
             TypeId type_id = node_type_reg_.getOrCreate(type_name);
             DenseId new_id  = allocDenseId();
             ensureCapacity(new_id);
-            id_map_.getOrCreate(ext_id, new_id);
 
             NodeRecord rec{};
             rec.dense_id  = new_id;
@@ -438,18 +632,25 @@ namespace nexora {
             rec.flags     = FLAG_ACTIVE | (is_implicit ? FLAG_IMPLICIT : 0u);
             rec.out_degree = 0;
             rec.in_degree  = 0;
-            node_records_[new_id] = rec;
+
+            // Durable intent metadata precedes redo. Orphan identities from an
+            // interrupted append are ignored while their node slot is inactive.
+            if (storage_ && !storage_->rememberNode(new_id,ext_id,type_id,type_name))
+                throw std::runtime_error("Graph identity persistence failed: "+storage_->lastError());
 
             // WAL
             uint64_t seq = kInvalidEdgeId;
             if (wal_) {
-                seq = wal_->append(WalOpType::AddNode, new_id, 0, 0, type_id, rec.flags);
+                seq = appendWal(WalOpType::AddNode, new_id, 0, 0, type_id, rec.flags);
             }
+
+            node_records_[new_id] = rec;
+            id_map_.getOrCreate(ext_id, new_id);
 
             // دیسک
             persistNode(rec);
 
-            if (wal_ && seq != UINT64_MAX) wal_->markApplied(seq);
+            finishWal(seq);
 
             active_node_count_.fetch_add(1);
             version_.fetch_add(1);
@@ -468,11 +669,14 @@ namespace nexora {
 
         bool LiveGraph::removeNode(DenseId dense_id) {
             std::unique_lock lock(mutex_);
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
 
             if (dense_id >= node_records_.size()) return false;
             NodeRecord& rec = node_records_[dense_id];
             if (!rec.isActive()) return false;
 
+            const auto seq = appendWal(WalOpType::RemoveNode, dense_id, 0, 0,
+                                       rec.type_id, FLAG_DELETED);
             // حذف تمام edges مرتبط (بدون lock — قبلاً unique_lock داریم)
             removeAllEdgesOfNode(dense_id);
 
@@ -480,18 +684,13 @@ namespace nexora {
             rec.flags = FLAG_DELETED;
 
             // WAL
-            uint64_t seq = kInvalidEdgeId;
-            if (wal_) seq = wal_->append(WalOpType::RemoveNode, dense_id, 0, 0,
-                                         rec.type_id, FLAG_DELETED);
-
             // دیسک
-            if (storage_) storage_->updateNodeFlags(dense_id, FLAG_DELETED);
-
-            if (wal_ && seq != UINT64_MAX) wal_->markApplied(seq);
+            persistNode(rec);
 
             id_map_.remove(dense_id);
             node_free_stack_.push(dense_id);
             active_node_count_.fetch_sub(1);
+            finishWal(seq);
             version_.fetch_add(1);
             return true;
         }
@@ -514,29 +713,37 @@ namespace nexora {
                 EdgeRecord& er = it->second;
                 if (!er.isActive()) continue;
 
+                const bool undirected=(er.flags&FLAG_UNDIRECTED) && er.src!=er.dst;
                 er.flags = FLAG_DELETED;
-                if (storage_) storage_->updateEdgeFlags(eid, FLAG_DELETED);
+                persistEdge(er);
 
-                // حذف از adjacency
-                DenseId other = (er.src == dense_id) ? er.dst : er.src;
-                if (er.src == dense_id) {
-                    adj_[er.dst].removeIn(dense_id, er.type_id);
-                } else {
-                    adj_[er.src].removeOut(dense_id, er.type_id);
+                adj_[er.src].removeOut(er.dst, er.type_id);
+                adj_[er.dst].removeIn(er.src, er.type_id);
+                // The persisted tombstone has no direction flag, so remove
+                // reverse entries too (a no-op for a directed edge).
+                adj_[er.dst].removeOut(er.src, er.type_id);
+                adj_[er.src].removeIn(er.dst, er.type_id);
+                auto& src = node_records_[er.src];
+                auto& dst = node_records_[er.dst];
+                if (src.out_degree) --src.out_degree;
+                if (dst.in_degree) --dst.in_degree;
+                if (undirected) {
+                    if (dst.out_degree) --dst.out_degree;
+                    if (src.in_degree) --src.in_degree;
                 }
+                persistNode(src); persistNode(dst);
 
                 edge_records_.erase(it);
                 edge_free_stack_.push(eid);
                 active_edge_count_.fetch_sub(1);
-                (void)other;
             }
 
             // پاک کردن adjacency خود node
             adj_[dense_id] = NodeAdj{};
 
             // به‌روزرسانی degree روی دیسک
-            if (storage_)
-                storage_->updateNodeDegree(dense_id, 0, 0);
+            if (storage_ && !storage_->updateNodeDegree(dense_id, 0, 0))
+                throw std::runtime_error("Graph degree write failed");
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -546,8 +753,14 @@ namespace nexora {
         EdgeId LiveGraph::addEdge(const ExtId& src_ext, const ExtId& dst_ext,
                                   const std::string& type_name, bool directed) {
             std::unique_lock lock(mutex_);
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
+            const size_t missing=(id_map_.get(src_ext)==kInvalidDenseId)+
+                (src_ext!=dst_ext && id_map_.get(dst_ext)==kInvalidDenseId);
+            admitMemory(missing,1,src_ext.size()+dst_ext.size()+type_name.size());
 
             TypeId edge_type = edge_type_reg_.getOrCreate(type_name);
+            if (storage_ && !storage_->rememberEdgeType(edge_type,type_name))
+                throw std::runtime_error("Graph edge type persistence failed: "+storage_->lastError());
 
             // پیدا کردن یا ساخت src
             DenseId src_id = id_map_.get(src_ext);
@@ -555,13 +768,17 @@ namespace nexora {
                 // implicit node — نیاز به unlock ندارد چون unique_lock داریم
                 src_id = allocDenseId();
                 ensureCapacity(src_id);
-                id_map_.getOrCreate(src_ext, src_id);
                 NodeRecord nr{};
                 nr.dense_id = src_id;
                 nr.type_id  = kInvalidTypeId;
                 nr.flags    = FLAG_ACTIVE | FLAG_IMPLICIT;
+                if (storage_ && !storage_->rememberNode(src_id,src_ext,nr.type_id,{}))
+                    throw std::runtime_error("Graph source identity persistence failed");
+                const auto seq = appendWal(WalOpType::AddNode, src_id, 0, 0, nr.type_id, nr.flags);
+                id_map_.getOrCreate(src_ext, src_id);
                 node_records_[src_id] = nr;
                 persistNode(nr);
+                finishWal(seq);
                 active_node_count_.fetch_add(1);
             }
 
@@ -570,13 +787,17 @@ namespace nexora {
             if (dst_id == kInvalidDenseId) {
                 dst_id = allocDenseId();
                 ensureCapacity(dst_id);
-                id_map_.getOrCreate(dst_ext, dst_id);
                 NodeRecord nr{};
                 nr.dense_id = dst_id;
                 nr.type_id  = kInvalidTypeId;
                 nr.flags    = FLAG_ACTIVE | FLAG_IMPLICIT;
+                if (storage_ && !storage_->rememberNode(dst_id,dst_ext,nr.type_id,{}))
+                    throw std::runtime_error("Graph target identity persistence failed");
+                const auto seq = appendWal(WalOpType::AddNode, dst_id, 0, 0, nr.type_id, nr.flags);
+                id_map_.getOrCreate(dst_ext, dst_id);
                 node_records_[dst_id] = nr;
                 persistNode(nr);
+                finishWal(seq);
                 active_node_count_.fetch_add(1);
             }
 
@@ -596,6 +817,14 @@ namespace nexora {
                 });
                 return found;
             }
+            if (!directed) {
+                EdgeId reverse=kInvalidEdgeId;
+                adj_[dst_id].forEachOut([&](const AdjEntry& entry) {
+                    if (entry.neighbor==src_id && entry.type_id==edge_type) reverse=entry.edge_id;
+                    return reverse==kInvalidEdgeId;
+                });
+                if (reverse!=kInvalidEdgeId) return reverse;
+            }
 
             EdgeId new_eid = allocEdgeId();
 
@@ -604,7 +833,9 @@ namespace nexora {
             er.src     = src_id;
             er.dst     = dst_id;
             er.type_id = edge_type;
-            er.flags   = FLAG_ACTIVE;
+            er.flags   = FLAG_ACTIVE | (directed ? 0U : FLAG_UNDIRECTED);
+            const auto seq = appendWal(WalOpType::AddEdge, new_eid,
+                                       src_id, dst_id, edge_type, er.flags);
             edge_records_[new_eid] = er;
 
             // Adjacency update
@@ -622,23 +853,23 @@ namespace nexora {
             // به‌روزرسانی degree در NodeRecord
             node_records_[src_id].out_degree++;
             node_records_[dst_id].in_degree++;
+            if (!directed && src_id!=dst_id) {
+                ++node_records_[dst_id].out_degree; ++node_records_[src_id].in_degree;
+            }
             if (storage_) {
-                storage_->updateNodeDegree(src_id,
+                if (!storage_->updateNodeDegree(src_id,
                                            node_records_[src_id].out_degree,
-                                           node_records_[src_id].in_degree);
-                storage_->updateNodeDegree(dst_id,
+                                           node_records_[src_id].in_degree) ||
+                    !storage_->updateNodeDegree(dst_id,
                                            node_records_[dst_id].out_degree,
-                                           node_records_[dst_id].in_degree);
+                                           node_records_[dst_id].in_degree))
+                    throw std::runtime_error("Graph degree write failed");
             }
 
             // WAL
-            uint64_t seq = kInvalidEdgeId;
-            if (wal_) seq = wal_->append(WalOpType::AddEdge, new_eid,
-                                         src_id, dst_id, edge_type, FLAG_ACTIVE);
-
             persistEdge(er);
 
-            if (wal_ && seq != UINT64_MAX) wal_->markApplied(seq);
+            finishWal(seq);
 
             active_edge_count_.fetch_add(1);
             version_.fetch_add(1);
@@ -651,6 +882,7 @@ namespace nexora {
 
         bool LiveGraph::removeEdge(EdgeId edge_id) {
             std::unique_lock lock(mutex_);
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
 
             auto it = edge_records_.find(edge_id);
             if (it == edge_records_.end()) return false;
@@ -658,15 +890,20 @@ namespace nexora {
             EdgeRecord& er = it->second;
             if (!er.isActive()) return false;
 
+            const bool undirected=(er.flags&FLAG_UNDIRECTED) && er.src!=er.dst;
+
+            const auto seq = appendWal(WalOpType::RemoveEdge, edge_id,
+                                       er.src, er.dst, er.type_id, FLAG_DELETED);
+
             adj_[er.src].removeOut(er.dst, er.type_id);
             adj_[er.dst].removeIn(er.src, er.type_id);
+            if (er.flags & FLAG_UNDIRECTED) {
+                adj_[er.dst].removeOut(er.src, er.type_id);
+                adj_[er.src].removeIn(er.dst, er.type_id);
+            }
 
             er.flags = FLAG_DELETED;
-            if (storage_) storage_->updateEdgeFlags(edge_id, FLAG_DELETED);
-
-            uint64_t seq = kInvalidEdgeId;
-            if (wal_) seq = wal_->append(WalOpType::RemoveEdge, edge_id,
-                                         er.src, er.dst, er.type_id, FLAG_DELETED);
+            persistEdge(er);
 
             node_records_[er.src].out_degree =
                     (node_records_[er.src].out_degree > 0)
@@ -674,20 +911,25 @@ namespace nexora {
             node_records_[er.dst].in_degree =
                     (node_records_[er.dst].in_degree > 0)
                     ? node_records_[er.dst].in_degree - 1 : 0;
+            if (undirected) {
+                if (node_records_[er.dst].out_degree) --node_records_[er.dst].out_degree;
+                if (node_records_[er.src].in_degree) --node_records_[er.src].in_degree;
+            }
 
             if (storage_) {
-                storage_->updateNodeDegree(er.src,
+                if (!storage_->updateNodeDegree(er.src,
                                            node_records_[er.src].out_degree,
-                                           node_records_[er.src].in_degree);
-                storage_->updateNodeDegree(er.dst,
+                                           node_records_[er.src].in_degree) ||
+                    !storage_->updateNodeDegree(er.dst,
                                            node_records_[er.dst].out_degree,
-                                           node_records_[er.dst].in_degree);
+                                           node_records_[er.dst].in_degree))
+                    throw std::runtime_error("Graph degree write failed");
             }
 
             edge_records_.erase(it);
             edge_free_stack_.push(edge_id);
 
-            if (wal_ && seq != UINT64_MAX) wal_->markApplied(seq);
+            finishWal(seq);
 
             active_edge_count_.fetch_sub(1);
             version_.fetch_add(1);
@@ -959,13 +1201,19 @@ namespace nexora {
             if (!storage_) return false;
 
             std::unique_lock lock(mutex_);
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
+
+            // No WAL containing old physical IDs may remain replayable across
+            // compaction, including volatile Async applied markers.
+            if (wal_ && (wal_->hasPendingEntries() ||
+                !wal_->checkpoint([&] { return storage_->durableSync(); }))) return false;
 
             std::unordered_map<DenseId, DenseId> node_remap;
             std::unordered_map<EdgeId, EdgeId>   edge_remap;
 
             // Compact فایل‌های دیسک
-            if (!storage_->compactNodes(node_remap)) return false;
-            if (!storage_->compactEdges(node_remap, edge_remap)) return false;
+            if (!storage_->compact(node_remap, edge_remap))
+                throw std::runtime_error(storage_->lastError());
 
             // آپدیت RAM با remap
             // ── NodeRecords ──
@@ -988,8 +1236,9 @@ namespace nexora {
             }
 
             // ── EdgeRecords و Adjacency ──
-            std::unordered_map<EdgeId, EdgeRecord> new_edges;
-            for (auto& [old_eid, er] : edge_records_) {
+            EdgeStore new_edges;
+            for (const auto& [old_eid, original] : edge_records_) {
+                auto er=original;
                 auto eit = edge_remap.find(old_eid);
                 if (eit == edge_remap.end()) continue;
                 EdgeId new_eid = eit->second;
@@ -1007,11 +1256,16 @@ namespace nexora {
                 AdjEntry rev{er.src, new_eid, er.type_id};
                 new_adj[er.src].addOut(fwd);
                 new_adj[er.dst].addIn(rev);
+                if (er.flags & FLAG_UNDIRECTED) {
+                    new_adj[er.dst].addOut({er.src,new_eid,er.type_id});
+                    new_adj[er.src].addIn({er.dst,new_eid,er.type_id});
+                }
             }
 
             // جایگزینی ساختارها
             node_records_ = std::move(new_records);
             adj_          = std::move(new_adj);
+            new_edges.optimizeDense();
             edge_records_ = std::move(new_edges);
             id_map_       = std::move(new_id_map);
             active_node_count_.store(node_records_.size());
@@ -1030,6 +1284,7 @@ namespace nexora {
 
         void LiveGraph::clear() {
             std::unique_lock lock(mutex_);
+            if (bulk_failed_) throw std::runtime_error("bulk ingestion failed; reopen graph");
             adj_.clear();
             node_records_.clear();
             edge_records_.clear();

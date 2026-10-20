@@ -22,6 +22,12 @@ cmake_minimum_required(VERSION 3.22)
 # ─────────────────────────────────────────────────────────────
 
 add_library(nexora_query STATIC
+        DocumentView.cpp
+        DocumentView.h
+        CompiledQuery.cpp
+        CompiledQuery.h
+        CompiledUpdate.cpp
+        CompiledUpdate.h
         Evaluator.cpp
         Evaluator.h
         Condition.h
@@ -46,6 +52,12 @@ target_include_directories(nexora_query
 
 target_compile_features(nexora_query PUBLIC cxx_std_20)
 
+target_link_libraries(nexora_query
+        PUBLIC
+        $<IF:$<TARGET_EXISTS:mongo::bson_static>,mongo::bson_static,mongo::bson_shared>
+        nlohmann_json::nlohmann_json
+)
+
 if(NEXORA_DEBUG_LOG)
     target_compile_definitions(nexora_query PUBLIC NEXORA_DEBUG)
 endif()
@@ -62,6 +74,9 @@ install(FILES
         Condition.h
         UpdateSpec.h
         Evaluator.h
+        DocumentView.h
+        CompiledQuery.h
+        CompiledUpdate.h
         DESTINATION include/nexoradb/query
 )
 

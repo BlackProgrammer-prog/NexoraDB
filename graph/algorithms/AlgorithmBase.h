@@ -54,6 +54,9 @@ namespace nexora {
                 std::string error_msg;
                 std::string result_json;    ///< JSON قابل ارسال به Python
                 double      elapsed_ms = 0; ///< زمان اجرا (میلی‌ثانیه)
+                double queue_ms=0;
+                double execution_ms=0;
+                size_t reserved_bytes=0;
             };
 
 // ══════════════════════════════════════════════════════════════

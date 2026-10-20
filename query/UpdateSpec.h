@@ -89,7 +89,8 @@ namespace nexora {
             Float64 = 2,
             Bool    = 3,
             Null    = 4,
-            Array   = 5  ///< برای PushAll/PullAll — در values لیست است
+            Array   = 5,
+            Object  = 6
         };
 
 // ══════════════════════════════════════════════════════════════
@@ -273,6 +274,27 @@ namespace nexora {
                 return Add(UpdateOperation::MakeInc(field, delta, vt));
             }
 
+            UpdateSpec& Mul(const std::string& field, const std::string& factor,
+                            UpdateValueType vt = UpdateValueType::Int64) {
+                return Add({UpdateOp::Mul, field, factor, {}, vt});
+            }
+
+            UpdateSpec& Min(const std::string& field, const std::string& value,
+                            UpdateValueType vt = UpdateValueType::Int64) {
+                return Add({UpdateOp::Min, field, value, {}, vt});
+            }
+
+            UpdateSpec& Max(const std::string& field, const std::string& value,
+                            UpdateValueType vt = UpdateValueType::Int64) {
+                return Add({UpdateOp::Max, field, value, {}, vt});
+            }
+
+            UpdateSpec& Rename(const std::string& field,
+                               const std::string& new_field) {
+                return Add({UpdateOp::Rename, field, new_field, {},
+                            UpdateValueType::String});
+            }
+
             UpdateSpec& Push(const std::string& field, const std::string& element,
                              UpdateValueType vt = UpdateValueType::String) {
                 return Add(UpdateOperation::MakePush(field, element, vt));
@@ -281,6 +303,29 @@ namespace nexora {
             UpdateSpec& Pull(const std::string& field, const std::string& element,
                              UpdateValueType vt = UpdateValueType::String) {
                 return Add(UpdateOperation::MakePull(field, element, vt));
+            }
+
+            UpdateSpec& PushAll(const std::string& field,
+                                std::vector<std::string> values,
+                                UpdateValueType vt = UpdateValueType::String) {
+                return Add({UpdateOp::PushAll, field, "", std::move(values), vt});
+            }
+
+            UpdateSpec& PullAll(const std::string& field,
+                                std::vector<std::string> values,
+                                UpdateValueType vt = UpdateValueType::String) {
+                return Add({UpdateOp::PullAll, field, "", std::move(values), vt});
+            }
+
+            UpdateSpec& AddToSet(const std::string& field,
+                                 const std::string& element,
+                                 UpdateValueType vt = UpdateValueType::String) {
+                return Add({UpdateOp::AddToSet, field, element, {}, vt});
+            }
+
+            UpdateSpec& Pop(const std::string& field, bool first = false) {
+                return Add({UpdateOp::Pop, field, first ? "-1" : "1", {},
+                            UpdateValueType::Int64});
             }
 
             UpdateSpec& TouchDate(const std::string& field) {

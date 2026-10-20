@@ -1,0 +1,11 @@
+function(nexora_add_fuzzer target source)
+    add_executable(${target} ${source})
+    target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(${target} PRIVATE nexora_core)
+    target_compile_options(${target} PRIVATE -fsanitize=fuzzer)
+    target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_compile_features(${target} PRIVATE cxx_std_20)
+endfunction()
+
+nexora_add_fuzzer(nexora_document_parser_fuzz document_parser_fuzz.cpp)
+nexora_add_fuzzer(nexora_update_fuzz update_fuzz.cpp)

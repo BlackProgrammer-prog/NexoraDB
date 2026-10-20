@@ -115,8 +115,7 @@ public:
 
         // DSU با map از DenseId به index
         // (چون DenseId ها ممکن است sparse باشند)
-        std::unordered_map<DenseId, uint32_t> id_to_idx;
-        id_to_idx.reserve(all_nodes.size());
+        std::vector<uint32_t> id_to_idx(snapshot.nodeCount(),UINT32_MAX);
         for (uint32_t i = 0; i < all_nodes.size(); ++i)
             id_to_idx[all_nodes[i]] = i;
 
@@ -148,11 +147,9 @@ public:
         // نه neighbors() — چون می‌خواهیم همه edges را یکجا ببینیم
 
         snapshot.forEachEdge([&](EdgeId, DenseId src, DenseId dst, TypeId) -> bool {
-            auto it_src = id_to_idx.find(src);
-            auto it_dst = id_to_idx.find(dst);
-            if (it_src == id_to_idx.end() || it_dst == id_to_idx.end())
+            if (id_to_idx[src]==UINT32_MAX || id_to_idx[dst]==UINT32_MAX)
                 return true;  // یکی از دو node در فیلتر نبود
-            unite(it_src->second, it_dst->second);
+            unite(id_to_idx[src],id_to_idx[dst]);
             return true;  // ادامه بده
         });
 
@@ -217,10 +214,17 @@ public:
     }
 };
 
+AlgoResult runConnectedComponents(GraphManager& manager,const std::string& graph_name,
+        const std::vector<ExtId>& params,SnapshotOptions options) {
+    auto algorithm=std::make_shared<ConnectedComponents>();
+    auto handle=manager.submitJob(graph_name,algorithm,params,std::move(options));
+    return handle.result();
+}
+
 AlgoResult runConnectedComponents(GraphManager& manager,
                                   const std::string& graph_name,
                                   const std::vector<ExtId>& params) {
-    ConnectedComponents algo;
+    auto algo=std::make_shared<ConnectedComponents>();
     auto handle = manager.submitJob(graph_name, algo, params);
     return handle.result();
 }

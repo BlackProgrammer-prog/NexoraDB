@@ -43,6 +43,9 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <memory>
+#include <utility>
+#include "SmallAdjVector.h"
 
 namespace nexora {
     namespace graph {
@@ -74,14 +77,15 @@ namespace nexora {
             FLAG_ACTIVE   = 0x00000001,  ///< رکورد فعال
             FLAG_DELETED  = 0x00000002,  ///< حذف منطقی — فضا قابل reuse
             FLAG_IMPLICIT = 0x00000004,  ///< node توسط edge ساخته شده، نه مستقیم
+            FLAG_UNDIRECTED = 0x00000008, ///< edge requires reverse adjacency too
         };
 
 /**
  * @struct NodeRecord
- * @brief رکورد ثابت‌طول برای node در فایل .nex
+ * @brief In-memory node value; StorageCodec defines the disk representation.
  *
  * اندازه: 32 بایت — سازگار با cache line alignment
- * دسترسی: offset = dense_id * sizeof(NodeRecord) → O(1)
+ * Disk v2: 32-byte header, then explicit 40-byte checksummed records.
  */
 #pragma pack(push, 1)
         struct NodeRecord {
@@ -102,10 +106,10 @@ namespace nexora {
 
 /**
  * @struct EdgeRecord
- * @brief رکورد ثابت‌طول برای edge در فایل .nexr
+ * @brief In-memory edge value; StorageCodec defines the disk representation.
  *
  * اندازه: 32 بایت
- * دسترسی: offset = edge_id * sizeof(EdgeRecord) → O(1)
+ * Disk v2: 32-byte header, then explicit 40-byte checksummed records.
  */
 #pragma pack(push, 1)
         struct EdgeRecord {
@@ -125,7 +129,8 @@ namespace nexora {
 
 /**
  * @struct GraphMeta
- * @brief متادیتا گراف — ذخیره در فایل graph_meta.nexl
+ * @brief Logical metadata. GraphStorage v2 stores named JSON fields inside a
+ * checksummed, versioned generation file, rather than this native layout.
  *
  * این فایل در startup بررسی می‌شود. اگر وضعیت clean نباشد، rebuild انجام می‌شود.
  */
@@ -178,7 +183,6 @@ namespace nexora {
             Rollback   = 12,
         };
 
-#pragma pack(push, 1)
         struct WalRecord {
             uint64_t  seq;            ///< شماره ترتیبی یکتا
             int64_t   timestamp_ms;   ///< زمان عملیات (unix ms)
@@ -192,8 +196,8 @@ namespace nexora {
             bool      applied;        ///< آیا روی in-memory graph اعمال شده؟
             uint8_t   _pad2[7];
         };
-#pragma pack(pop)
-        static_assert(sizeof(WalRecord) == 60, "WalRecord must be 56 bytes");
+        // In-memory value only. WAL v2 explicitly encodes fields; never persist
+        // this compiler-dependent representation (legacy wire records were 60B).
 
 // ══════════════════════════════════════════════════════════════
 // §4  RAM Adjacency Structures
@@ -261,18 +265,36 @@ namespace nexora {
             bool in_heavy  = false;
 
             // normal mode
-            std::vector<AdjEntry> out_edges;  ///< یال‌های خروجی (sorted by neighbor)
-            std::vector<AdjEntry> in_edges;   ///< یال‌های ورودی
+            SmallAdjVector<AdjEntry> out_edges;
+            SmallAdjVector<AdjEntry> in_edges;
 
             // heavy mode
-            ChunkedSortedVector heavy_out;
-            ChunkedSortedVector heavy_in;
+            std::unique_ptr<ChunkedSortedVector> heavy_out;
+            std::unique_ptr<ChunkedSortedVector> heavy_in;
+            NodeAdj()=default;
+            NodeAdj(NodeAdj&& rhs) noexcept:
+                out_heavy(std::exchange(rhs.out_heavy,false)),in_heavy(std::exchange(rhs.in_heavy,false)),
+                out_edges(std::move(rhs.out_edges)),in_edges(std::move(rhs.in_edges)),
+                heavy_out(std::move(rhs.heavy_out)),heavy_in(std::move(rhs.heavy_in)) {}
+            NodeAdj& operator=(NodeAdj&& rhs) noexcept {
+                if (this!=&rhs) {
+                    out_heavy=std::exchange(rhs.out_heavy,false); in_heavy=std::exchange(rhs.in_heavy,false);
+                    out_edges=std::move(rhs.out_edges); in_edges=std::move(rhs.in_edges);
+                    heavy_out=std::move(rhs.heavy_out); heavy_in=std::move(rhs.heavy_in);
+                }
+                return *this;
+            }
+            NodeAdj(const NodeAdj& rhs):out_heavy(rhs.out_heavy),in_heavy(rhs.in_heavy),
+                out_edges(rhs.out_edges),in_edges(rhs.in_edges),
+                heavy_out(rhs.heavy_out ? std::make_unique<ChunkedSortedVector>(*rhs.heavy_out) : nullptr),
+                heavy_in(rhs.heavy_in ? std::make_unique<ChunkedSortedVector>(*rhs.heavy_in) : nullptr) {}
+            NodeAdj& operator=(const NodeAdj& rhs) { if (this!=&rhs) { NodeAdj copy(rhs); *this=std::move(copy); } return *this; }
 
             size_t out_degree() const noexcept {
-                return out_heavy ? heavy_out.size() : out_edges.size();
+                return out_heavy ? heavy_out->size() : out_edges.size();
             }
             size_t in_degree() const noexcept {
-                return in_heavy ? heavy_in.size() : in_edges.size();
+                return in_heavy ? heavy_in->size() : in_edges.size();
             }
 
             void addOut(const AdjEntry& e);

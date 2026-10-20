@@ -74,6 +74,7 @@ class SchemaFieldDef:
     required: bool = False
     unique: bool = False
     default: Any = None
+    has_default: bool = False
 
 
 @dataclass

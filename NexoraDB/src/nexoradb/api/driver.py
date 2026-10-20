@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -31,8 +32,16 @@ class NexoraDBClient:
         self.token = token
         self.timeout = timeout
 
-    def execute(self, query: str) -> QueryResult:
-        payload = self._request("POST", "/api/v1/query", {"query": query})
+    def execute(self, query: str, parameters: dict[str, Any] | None = None) -> QueryResult:
+        body = {"query": query}
+        if parameters is not None:
+            body["parameters"] = parameters
+        payload = self._request("POST", "/api/v1/query", body)
+        raw = payload.get("raw")
+        if isinstance(raw, dict):
+            for result in raw.get("statements", []):
+                if result.get("success") is False:
+                    raise NexoraDBError(result.get("error") or "Query statement failed")
         return QueryResult(
             columns=[str(column) for column in payload.get("columns", [])],
             rows=list(payload.get("rows", [])),
@@ -45,20 +54,22 @@ class NexoraDBClient:
         return payload.get("message") == "ok"
 
     def create_collection(self, name: str) -> QueryResult:
-        return self.execute(f"CREATE COLLECTION {name};")
+        return self.execute(f"CREATE COLLECTION {_identifier(name)};")
 
     def list_collections(self) -> QueryResult:
         return self.execute("SHOW COLLECTIONS;")
 
     def insert_one(self, collection: str, document: dict[str, Any]) -> QueryResult:
-        document_json = json.dumps(document, separators=(",", ":"))
-        return self.execute(f"INSERT INTO {collection} VALUES ({_quote(document_json)});")
+        return self.execute(f"INSERT INTO {_identifier(collection)} VALUES ($document);",
+                            {"document": document})
 
     def find(self, collection: str, *, limit: int = 100) -> QueryResult:
-        return self.execute(f"SELECT * FROM {collection} LIMIT {limit};")
+        if type(limit) is not int or not 0 <= limit <= 0xffffffff:
+            raise ValueError("limit must be an unsigned 32-bit integer")
+        return self.execute(f"SELECT * FROM {_identifier(collection)} LIMIT $limit;", {"limit": limit})
 
     def count(self, collection: str) -> QueryResult:
-        return self.execute(f"COUNT FROM {collection};")
+        return self.execute(f"COUNT FROM {_identifier(collection)};")
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -96,8 +107,17 @@ def _error_message(exc: urllib.error.HTTPError) -> str:
         return f"NexoraDB API request failed with status {exc.code}"
 
     message = payload.get("message") if isinstance(payload, dict) else None
+    if not message and isinstance(payload, dict):
+        detail = payload.get("detail")
+        message = detail.get("message") if isinstance(detail, dict) else detail
     return str(message or f"NexoraDB API request failed with status {exc.code}")
 
 
 def _quote(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _identifier(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError("Invalid collection identifier")
+    return value

@@ -10,10 +10,21 @@ NexoraDB is licensed under the Apache License 2.0.
 
 ## Platform support
 
-The `0.1.x` binary wheels bundle the native C++ database engine and currently
+The `0.3.0` binary wheels bundle the native C++ database engine and currently
 support **Ubuntu Linux on x86_64 with CPython 3.10 only**. Windows, macOS,
 other Linux distributions, ARM processors, PyPy, and other Python versions
-are not supported by this initial release.
+are not supported by this release. WSL is supported through its Ubuntu Linux environment,
+not as a native Windows wheel.
+
+## Version 0.3.0 upgrade notice
+
+This release changes native interfaces and storage/recovery behavior. Back up
+documents **and** graphs while the old deployment is stopped before opening the
+only copy with a newer engine. Rebuild the native module; do not mix a 0.2.x
+library with 0.3.0 Python files. Legacy raw graph files require explicit source
+rebuild/conversion, and graph-only mutations are not reproduced by source rebuild.
+Rollback uses a pre-upgrade backup in a new directory, not an in-place downgrade.
+See the repository's `docs/releases/v0.3.0.md` and `docs/cpp/PRODUCTION_RECOVERY.md`.
 
 ## Install from PyPI
 

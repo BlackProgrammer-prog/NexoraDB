@@ -83,6 +83,18 @@
       }
     },
     {
+      "name": "tsan-full",
+      "displayName": "ThreadSanitizer including native dependencies",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NEXORA_ENABLE_TSAN": "ON",
+        "NEXORA_BUILD_PYTHON": "OFF",
+        "VCPKG_TARGET_TRIPLET": "x64-linux-tsan",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets"
+      }
+    },
+    {
       "name": "benchmark",
       "displayName": "Native C++ Benchmark",
       "description": "Portable Release build with LTO for native benchmarks",
@@ -124,6 +136,11 @@
       "configurePreset": "tsan"
     },
     {
+      "name": "tsan-full",
+      "configurePreset": "tsan-full",
+      "targets": ["nexora_graph_tests", "nexora_doc_tests"]
+    },
+    {
       "name": "benchmark",
       "configurePreset": "benchmark",
       "targets": [
@@ -162,6 +179,18 @@
       "environment": {
         "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
       }
+    },
+    {
+      "name": "tsan-full",
+      "configurePreset": "tsan-full",
+      "output": { "outputOnFailure": true },
+      "environment": { "TSAN_OPTIONS": "halt_on_error=1:history_size=7" },
+      "filter": {
+        "include": {
+          "name": "cpp\\.(ThreadingContract|JobScheduler|LiveGraphConcurrency|GraphRecovery|GraphSnapshot\\.ConcurrentLazyCscPublicationAndConsistentSourceEpoch|DocEngine|Document|Compiled|IndexCodec|RocksTuning|Maintenance|Operations)"
+        }
+      },
+      "execution": { "jobs": 2 }
     },
     {
       "name": "tsan",

@@ -69,6 +69,8 @@
 #include "GraphIdStore.h"
 #include "Livegraph.h"
 #include "StaticGraph.h"
+#include "JobScheduler.h"
+#include "DirectoryLease.h"
 #include "algorithms/AlgorithmBase.h"
 
 // DocEngine (برای IterateCollection، GetForeignKeys، ExtractField)
@@ -111,8 +113,10 @@ namespace nexora {
         class JobHandle {
         public:
             JobHandle() = default;
-            explicit JobHandle(std::future<algorithms::AlgoResult>&& future)
-                    : future_(std::move(future)) {}
+            explicit JobHandle(std::future<algorithms::AlgoResult>&& future,
+                               std::shared_ptr<std::atomic<bool>> cancellation={})
+                    : future_(std::move(future)),cancellation_(std::move(cancellation)) {}
+            void cancel() const { if (cancellation_) cancellation_->store(true,std::memory_order_relaxed); }
 
             JobHandle(const JobHandle&)            = delete;
             JobHandle& operator=(const JobHandle&) = delete;
@@ -136,6 +140,7 @@ namespace nexora {
 
         private:
             mutable std::future<algorithms::AlgoResult> future_;
+            std::shared_ptr<std::atomic<bool>> cancellation_;
         };
 
 /**
@@ -148,8 +153,20 @@ namespace nexora {
             std::unique_ptr<GraphWAL>     wal;
             std::unique_ptr<GraphIdStore> id_store;
             std::unique_ptr<LiveGraph>    live_graph;  ///< backing graph for Live and Static modes
-            mutable std::shared_mutex     rw_mutex;    ///< محافظت از live_graph
-            bool                          built = false;
+            mutable WriterPreferredMutex     rw_mutex;    ///< محافظت از live_graph
+            std::atomic<bool>             built{false};
+            mutable std::mutex            cache_mutex;
+            mutable std::unique_ptr<StaticGraph> snapshot_cache;
+            mutable std::string snapshot_filter_signature;
+        };
+
+        // Lifetime pin is destroyed after the operation lock, never before it.
+        struct GraphReadLease {
+            std::shared_ptr<GraphHandle> owner;
+            std::shared_lock<WriterPreferredMutex> lock;
+            GraphReadLease()=default;
+            explicit GraphReadLease(std::shared_ptr<GraphHandle> handle)
+                :owner(std::move(handle)),lock(owner->rw_mutex) {}
         };
 
 /**
@@ -179,7 +196,8 @@ namespace nexora {
              * @param graph_dir    پوشه‌ای که .nex/.nexr/.nexl/.wal در آن ذخیره می‌شوند
              */
             explicit GraphManager(nexora::core::DocEngine* doc_engine,
-                                  std::filesystem::path graph_dir = "./graph_data");
+                                  std::filesystem::path graph_dir = "./graph_data",
+                                  WalOptions wal_options = {},SchedulerOptions scheduler_options={});
             ~GraphManager();
 
             // non-copyable
@@ -203,6 +221,8 @@ namespace nexora {
              *  3. LIVE graph‌ها آماده دریافت تغییر می‌شوند
              */
             bool startup();
+            bool recoverStoredGraphs(); // Never rebuild from source implicitly.
+            bool prepareShutdown(); // Quiesce caller mutations first; joins jobs, checkpoints WAL/data.
 
             /**
              * @brief در shutdown دیتابیس فراخوانی می‌شود
@@ -280,6 +300,7 @@ namespace nexora {
              * NexoraQL: RENDER GRAPH social_graph;
              */
             bool renderGraph(const std::string& graph_name);
+            bool checkpointGraph(const std::string& graph_name);
 
             /**
              * @brief rebuild کامل گراف (build + render)
@@ -313,6 +334,7 @@ namespace nexora {
              */
             const LiveGraph* getLiveGraph(const std::string& graph_name) const;
             LiveGraph*       getLiveGraph(const std::string& graph_name);
+            std::shared_ptr<LiveGraph> shareLiveGraph(const std::string& graph_name) const;
 
             /**
              * @brief shared_lock روی LiveGraph می‌گیرد (برای LockAlgorithm)
@@ -330,7 +352,7 @@ namespace nexora {
              * // با خروج از scope، lock آزاد می‌شود
              * ```
              */
-            std::pair<const LiveGraph*, std::shared_lock<std::shared_mutex>>
+            std::pair<const LiveGraph*, GraphReadLease>
             acquireReadLock(const std::string& graph_name) const;
 
             // ──────────────────────────────────────────────────────────
@@ -360,7 +382,8 @@ namespace nexora {
             std::unique_ptr<StaticGraph> createSnapshot(
                     const std::string& graph_name,
                     const std::vector<std::string>& node_types = {},
-                    const std::vector<std::string>& edge_types = {}) const;
+                    const std::vector<std::string>& edge_types = {},
+                    SnapshotOptions options = {}) const;
 
             /**
              * @brief اجرای LockAlgorithm روی LiveGraph با shared_lock.
@@ -384,7 +407,11 @@ namespace nexora {
             JobHandle submitJob(
                     const std::string& graph_name,
                     algorithms::JobAlgorithm& algo,
-                    const std::vector<ExtId>& params) const;
+                    const std::vector<ExtId>& params,SnapshotOptions options={}) const;
+            JobHandle submitJob(const std::string& graph_name,
+                    std::shared_ptr<algorithms::JobAlgorithm> algo,
+                    const std::vector<ExtId>& params,SnapshotOptions options={}) const;
+            SchedulerStats schedulerStats() const { return scheduler_->stats(); }
 
             // ──────────────────────────────────────────────────────────
             // §6  Live Update hooks (DocEngine این‌ها را صدا می‌زند)
@@ -466,10 +493,13 @@ namespace nexora {
         private:
             nexora::core::DocEngine* doc_engine_;   ///< source of truth
             std::filesystem::path    graph_dir_;    ///< پوشه فایل‌های گراف
+            WalOptions wal_options_;
+            std::unique_ptr<detail::DirectoryLease> directory_lease_;
+            std::unique_ptr<JobScheduler> scheduler_;
 
             // ── Graph registry ──
             mutable std::mutex                                       registry_mutex_;
-            std::unordered_map<std::string, std::unique_ptr<GraphHandle>> graphs_;
+            std::unordered_map<std::string, std::shared_ptr<GraphHandle>> graphs_;
 
             // ── Internal helpers ──
 
@@ -478,21 +508,21 @@ namespace nexora {
              */
             bool buildNodeFromDoc(LiveGraph& graph,
                                   const NodeMappingDef& mapping,
-                                  const std::string& bson);
+                                  const std::string& bson,BulkGraphBuilder* bulk=nullptr);
 
             /**
              * @brief edge(ها) را از یک document می‌سازد
              */
             bool buildEdgeFromDoc(LiveGraph& graph,
                                   const EdgeMappingDef& mapping,
-                                  const std::string& bson);
+                                  const std::string& bson,BulkGraphBuilder* bulk=nullptr);
 
             /**
              * @brief UNWIND: از یک array در document چند edge می‌سازد
              */
             bool buildEdgesUnwind(LiveGraph& graph,
                                   const EdgeMappingDef& mapping,
-                                  const std::string& bson);
+                                  const std::string& bson,BulkGraphBuilder* bulk=nullptr);
 
             /**
              * @brief یک فیلد را از BSON با dot-path استخراج می‌کند
@@ -524,7 +554,8 @@ namespace nexora {
             /**
              * @brief یک GraphHandle جدید می‌سازد
              */
-            std::unique_ptr<GraphHandle> makeHandle(const GraphDefinition& def);
+            std::shared_ptr<GraphHandle> makeHandle(const GraphDefinition& def);
+            std::shared_ptr<GraphHandle> findHandle(const std::string& name) const;
 
             /**
              * @brief ارسال event به تمام LIVE graph‌هایی که به این collection علاقه دارند

@@ -1,0 +1,71 @@
+name: Fixed-host performance history
+on:
+  workflow_dispatch:
+    inputs:
+      accept_baseline:
+        type: boolean
+        default: false
+        description: Explicitly approve this run as the baseline
+      full:
+        type: boolean
+        default: false
+        description: Run full matrix and large recovery fixture
+  schedule:
+    - cron: '43 2 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: nexora-fixed-performance
+  cancel-in-progress: false
+jobs:
+  performance:
+    # Never execute PR code on a persistent self-hosted runner.
+    if: vars.NEXORA_PERF_RUNNER_ENABLED == 'true' && (github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: [self-hosted, linux, x64, nexora-perf]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build on dedicated idle host
+        run: |
+          test -x vcpkg/vcpkg || { git clone https://github.com/microsoft/vcpkg.git vcpkg; git -C vcpkg checkout 7476f0d4e77d3333fbb249657df8251c28c4faae; ./vcpkg/bootstrap-vcpkg.sh -disableMetrics; }
+          cmake --preset release
+          cmake --build build/release --target nexora_rocks_workload_probe nexoradb_py --parallel 2
+      - name: Daily short benchmark and explicit regression gate
+        env:
+          ACCEPT: ${{ inputs.accept_baseline }}
+        run: |
+          mkdir -p perf-output
+          ./build/release/tests/cpp/nexora_rocks_workload_probe baseline 5000 20000 5 > perf-output/short.jsonl
+          history="${RUNNER_WORKSPACE}/nexora-perf-history"
+          approve=()
+          if [ "$ACCEPT" = true ]; then approve=(--accept-baseline); fi
+          status=0
+          python3 scripts/benchmark_history.py --input perf-output/short.jsonl --baseline "$history/baseline.json" --history "$history/history.jsonl" --report perf-output/history.html "${approve[@]}" || status=$?
+          cp "$history/history.jsonl" perf-output/history.jsonl
+          exit "$status"
+      - name: Weekly full matrix and large recovery
+        if: always() && (inputs.full || github.event_name == 'schedule')
+        env:
+          PYTHONPATH: build/release
+          FULL: ${{ inputs.full }}
+          ACCEPT: ${{ inputs.accept_baseline }}
+        run: |
+          # Daily schedule runs the full matrix only on Sunday; manual full overrides.
+          if [ "$FULL" = true ] || [ "$(date -u +%u)" = 7 ]; then
+            ./build/release/tests/cpp/nexora_rocks_workload_probe all 50000 50000 3 > perf-output/full.jsonl
+            python3 tests/benchmarks/recovery_probe.py 100000 > perf-output/recovery.json
+            history="${RUNNER_WORKSPACE}/nexora-perf-history"
+            approve=()
+            if [ "$ACCEPT" = true ]; then approve=(--accept-baseline); fi
+            status=0
+            python3 scripts/benchmark_history.py --input perf-output/full.jsonl --baseline "$history/full-baseline.json" --history "$history/full-history.jsonl" --report perf-output/full-history.html "${approve[@]}" || status=$?
+            cp "$history/full-history.jsonl" perf-output/full-history.jsonl
+            exit "$status"
+          fi
+      - name: Archive raw samples and chart
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-${{ github.run_id }}
+          path: perf-output/
+          retention-days: 90

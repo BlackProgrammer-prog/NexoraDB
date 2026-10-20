@@ -51,6 +51,13 @@ class AdminApiSettings:
     )
 
     def validate_for_startup(self) -> None:
+        if self.environment.lower() not in {"development", "test", "production"}:
+            raise RuntimeError("NEXORADB_ENV must be development, test, or production")
+        if self.environment.lower() == "production" and (
+            self.auth_secret == _DEFAULT_DEV_AUTH_SECRET
+            or self.api_token_secret == _DEFAULT_DEV_API_TOKEN_SECRET
+        ):
+            raise RuntimeError("Development signing secrets are forbidden in production")
         if self.environment.lower() == "production" and "NEXORADB_AUTH_SECRET" not in os.environ:
             raise RuntimeError("NEXORADB_AUTH_SECRET is required in production")
         if self.environment.lower() == "production" and "NEXORADB_API_TOKEN_SECRET" not in os.environ:

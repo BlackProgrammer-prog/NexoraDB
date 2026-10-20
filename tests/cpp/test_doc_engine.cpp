@@ -1,14 +1,19 @@
 #include "TestTempDir.h"
 
 #include "core/DocEngine.h"
+#include "core/DocumentCodec.h"
 #include "core/IndexCodec.h"
 #include "query/Condition.h"
+#include "query/CompiledQuery.h"
+#include "query/DocumentView.h"
 #include "query/UpdateSpec.h"
 
 #include <gtest/gtest.h>
+#include <rocksdb/db.h>
 
 #include <atomic>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,6 +21,7 @@
 namespace {
 
     using nexora::core::DocEngine;
+    using nexora::core::DocumentCodec;
     using nexora::core::BulkWriteMode;
     using nexora::core::BulkWriteOptions;
     using nexora::core::FieldType;
@@ -32,6 +38,220 @@ namespace {
     using nexora::query::UpdateSpec;
     using nexora::query::UpdateValueType;
     using nexora::query::ValueType;
+
+    TEST(DocumentCodec, StoresVersionedBsonAndPreservesJsonApi) {
+        const std::string json =
+                R"({"text":"space : unicode \u06f1","empty":"","null":null,"nested":{"ok":true}})";
+        const auto encoded = DocumentCodec::EncodeJson(json);
+        ASSERT_TRUE(encoded.success) << encoded.error;
+        EXPECT_EQ(DocumentCodec::Detect(encoded.value),
+                  DocumentCodec::Format::BsonV1);
+        EXPECT_EQ(encoded.value.substr(0, 4), "NXD1");
+        EXPECT_NE(encoded.value.find('\0'), std::string::npos);
+
+        const auto decoded = DocumentCodec::DecodeToJson(encoded.value);
+        ASSERT_TRUE(decoded.success) << decoded.error;
+        EXPECT_NE(decoded.value.find("\"empty\":\"\""), std::string::npos);
+        EXPECT_NE(decoded.value.find("\"null\":null"), std::string::npos);
+        EXPECT_NE(decoded.value.find("\"nested\":{\"ok\":true}"),
+                  std::string::npos);
+
+        EXPECT_FALSE(DocumentCodec::EncodeJson("not-json").success);
+        EXPECT_FALSE(DocumentCodec::EncodeJson(
+                R"({"duplicate":1,"duplicate":2})").success);
+
+        std::string too_deep;
+        for (std::size_t i = 0; i < 101; ++i) too_deep += R"({"x":)";
+        too_deep += "0";
+        for (std::size_t i = 0; i < 101; ++i) too_deep += "}";
+        EXPECT_FALSE(DocumentCodec::EncodeJson(too_deep).success);
+
+        std::string unknown = encoded.value;
+        unknown[3] = '9';
+        EXPECT_EQ(DocumentCodec::Detect(unknown),
+                  DocumentCodec::Format::UnknownEnvelope);
+        EXPECT_FALSE(DocumentCodec::DecodeToJson(unknown).success);
+        EXPECT_EQ(DocumentCodec::Detect(json),
+                  DocumentCodec::Format::LegacyJson);
+    }
+
+    TEST(CompiledBsonQuery, EvaluatesNestedTypedPredicatesWithoutJsonParsing) {
+        const auto encoded = DocumentCodec::EncodeJson(
+                R"({"profile":{"name":"A, \"B\" \\ {✓}","age":42},"active":true,"tags":["a,b",{"nested":1}]})");
+        ASSERT_TRUE(encoded.success) << encoded.error;
+        const nexora::query::DocumentView view(
+                std::string_view(encoded.value).substr(
+                        DocumentCodec::kEnvelopeSize));
+        ASSERT_TRUE(view.valid());
+
+        const auto condition = Condition::And({
+                Condition::Leaf("profile.age", Op::GTE, "40",
+                                ValueType::Int64),
+                Condition::Leaf("profile.name", Op::REGEX, "^A,.*✓.*$"),
+                Condition::Leaf("profile.name", Op::CONTAINS, R"(\ {)"),
+                Condition::In("profile.age", {"7", "42", "99"}, false,
+                              ValueType::Int64),
+                Condition::Leaf("active", Op::EQ, "true",
+                                ValueType::Bool)});
+        const nexora::query::CompiledQuery compiled(condition);
+        ASSERT_TRUE(compiled.valid()) << compiled.error();
+        EXPECT_TRUE(compiled.Match(view));
+
+        Condition mixed = Condition::In("profile.age", {"forty-two", "42"});
+        mixed.value_types = {ValueType::String, ValueType::Int64};
+        const nexora::query::CompiledQuery mixed_compiled(mixed);
+        ASSERT_TRUE(mixed_compiled.valid()) << mixed_compiled.error();
+        EXPECT_TRUE(mixed_compiled.Match(view));
+
+        const nexora::query::CompiledQuery invalid_regex(
+                Condition::Leaf("profile.name", Op::REGEX, "["));
+        EXPECT_FALSE(invalid_regex.valid());
+    }
+
+    TEST(CompiledUpdate, PreservesNestedObjectsArraysAndCommaValues) {
+        TestTempDir temp("nexora_compiled_update");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "items",
+                R"({"_id":"one","score":3,"tags":["old"],"profile":{"name":"before"}})").success);
+
+        UpdateSpec update;
+        update.Set("profile.details",
+                   R"({"label":"x,y","unicode":"سلام","nested":[1,{"ok":true}]})",
+                   UpdateValueType::Object)
+              .Mul("score", "4", UpdateValueType::Int64)
+              .Push("tags", "a,b")
+              .AddToSet("tags", "a,b")
+              .Set("matrix", R"([[1,2],[3,4]])", UpdateValueType::Array);
+        const auto changed = engine.UpdateById("items", "one", update);
+        ASSERT_TRUE(changed.success) << changed.error_msg;
+
+        const auto found = engine.FindById("items", "one");
+        ASSERT_TRUE(found.success) << found.error_msg;
+        EXPECT_NE(found.data.find(R"("score":12)"), std::string::npos);
+        EXPECT_NE(found.data.find(R"("tags":["old","a,b"])"),
+                  std::string::npos);
+        EXPECT_NE(found.data.find(R"("label":"x,y")"), std::string::npos);
+        EXPECT_NE(found.data.find(R"("nested":[1,{"ok":true}])"),
+                  std::string::npos);
+        EXPECT_NE(found.data.find(R"("matrix":[[1,2],[3,4]])"),
+                  std::string::npos);
+    }
+
+    TEST(CompiledUpdate, RejectsNumericOverflowWithoutMutatingDocument) {
+        TestTempDir temp("nexora_compiled_update_overflow");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne(
+                "items",
+                R"({"_id":"one","value":9223372036854775807})").success);
+
+        UpdateSpec update;
+        update.Inc("value", "1", UpdateValueType::Int64);
+        const auto changed = engine.UpdateById("items", "one", update);
+        EXPECT_FALSE(changed.success);
+        const auto found = engine.FindById("items", "one");
+        ASSERT_TRUE(found.success);
+        EXPECT_NE(found.data.find("9223372036854775807"), std::string::npos);
+
+        const nexora::query::CompiledQuery invalid_float(
+                Condition::Leaf("value", Op::EQ, "NaN",
+                                ValueType::Float64));
+        EXPECT_FALSE(invalid_float.valid());
+        const nexora::query::CompiledQuery infinite_float(
+                Condition::Leaf("value", Op::EQ, "Infinity",
+                                ValueType::Float64));
+        EXPECT_FALSE(infinite_float.valid());
+        EXPECT_FALSE(DocumentCodec::EncodeJson(R"({"value":NaN})").success);
+    }
+
+    TEST(DocumentMigration, ConvertsLegacyJsonAndRemainsApiCompatible) {
+        TestTempDir temp("nexora_document_migration");
+        const auto database_path = temp.path() / "db";
+
+        {
+            DocEngine engine(database_path.string());
+            ASSERT_TRUE(engine.CreateCollection("users").success);
+        }
+
+        {
+            rocksdb::Options options;
+            options.create_if_missing = false;
+            rocksdb::DB* raw = nullptr;
+            ASSERT_TRUE(rocksdb::DB::Open(
+                    options, database_path.string(), &raw).ok());
+            std::unique_ptr<rocksdb::DB> database(raw);
+            ASSERT_TRUE(database->Put(
+                    rocksdb::WriteOptions{},
+                    "data:users:legacy",
+                    R"({"_id":"legacy","name":"old"})").ok());
+            ASSERT_TRUE(database->Put(
+                    rocksdb::WriteOptions{}, "seq:users", "1").ok());
+        }
+
+        {
+            DocEngine engine(database_path.string());
+            const auto before = engine.FindById("users", "legacy");
+            ASSERT_TRUE(before.success) << before.error_msg;
+            EXPECT_EQ(before.data,
+                      R"({"_id":"legacy","name":"old"})");
+
+            const auto migration = engine.MigrateLegacyDocuments();
+            ASSERT_TRUE(migration.success) << migration.error_msg;
+            EXPECT_NE(migration.data.find("\"migrated\":1"),
+                      std::string::npos);
+
+            const auto after = engine.FindById("users", "legacy");
+            ASSERT_TRUE(after.success) << after.error_msg;
+            EXPECT_EQ(after.data,
+                      R"({"_id":"legacy","name":"old"})");
+            ASSERT_TRUE(engine.InsertOne(
+                    "users", R"({"_id":"new","name":"bson"})").success);
+        }
+
+        {
+            rocksdb::Options options;
+            options.create_if_missing = false;
+            rocksdb::DB* raw = nullptr;
+            ASSERT_TRUE(rocksdb::DB::Open(
+                    options, database_path.string(), &raw).ok());
+            std::unique_ptr<rocksdb::DB> database(raw);
+            std::string stored;
+            ASSERT_TRUE(database->Get(
+                    rocksdb::ReadOptions{},
+                    "data:users:legacy",
+                    &stored).ok());
+            EXPECT_EQ(DocumentCodec::Detect(stored),
+                      DocumentCodec::Format::BsonV1);
+            ASSERT_TRUE(database->Get(
+                    rocksdb::ReadOptions{},
+                    "data:users:new",
+                    &stored).ok());
+            EXPECT_EQ(DocumentCodec::Detect(stored),
+                      DocumentCodec::Format::BsonV1);
+        }
+    }
+
+    TEST(DocumentMigration, RejectsAFormatWrittenByANewerBinary) {
+        TestTempDir temp("nexora_future_document_format");
+        const auto database_path = temp.path() / "db";
+        rocksdb::Options options;
+        options.create_if_missing = true;
+        rocksdb::DB* raw = nullptr;
+        ASSERT_TRUE(rocksdb::DB::Open(
+                options, database_path.string(), &raw).ok());
+        std::unique_ptr<rocksdb::DB> database(raw);
+        ASSERT_TRUE(database->Put(
+                rocksdb::WriteOptions{},
+                "meta:format:documents",
+                "999").ok());
+        database.reset();
+
+        EXPECT_THROW(
+                DocEngine engine(database_path.string()),
+                std::runtime_error);
+    }
 
     TEST(DocEngineSmoke, OpensClosesAndReopensDatabase) {
         TestTempDir temp("nexora_doc_smoke");
@@ -1197,6 +1417,97 @@ namespace {
         EXPECT_NE(*colon, *binary);
         EXPECT_FALSE(null_value.has_value());
         EXPECT_FALSE(missing.has_value());
+    }
+
+    TEST(CompiledQueryNumericContract, PreservesInt64OrderingAndMixedEquality) {
+        using nexora::query::CompiledQuery;
+        using nexora::query::DocumentView;
+        const auto encoded = DocumentCodec::EncodeJson(
+                R"({"n":9007199254740993,"max":9223372036854775807})");
+        ASSERT_TRUE(encoded.success) << encoded.error;
+        const DocumentView view(std::string_view(encoded.value).substr(DocumentCodec::kEnvelopeSize));
+        EXPECT_TRUE(CompiledQuery(Condition::Leaf("n", Op::GT,
+                "9007199254740992", ValueType::Int64)).Match(view));
+        EXPECT_FALSE(CompiledQuery(Condition::Leaf("n", Op::EQ,
+                "9007199254740992", ValueType::Float64)).Match(view));
+        EXPECT_TRUE(CompiledQuery(Condition::Leaf("max", Op::LT,
+                "9223372036854775808", ValueType::Float64)).Match(view));
+        EXPECT_FALSE(CompiledQuery(Condition::In("n",
+                {"9007199254740992"}, false, ValueType::Float64)).Match(view));
+    }
+
+    TEST(IndexCodecV2, StringNullIsNotNull) {
+        using nexora::core::indexv2::EncodeValues;
+        using nexora::query::FieldValue;
+        EXPECT_TRUE(EncodeValues({FieldValue{"null", ValueType::String, true}}).has_value());
+        EXPECT_FALSE(EncodeValues({FieldValue{"null", ValueType::Null, true}}).has_value());
+    }
+
+    TEST(DocEngineSchemaContract, DefaultsTypesStrictAndTransactions) {
+        TestTempDir temp("schema_contract");
+        DocEngine engine((temp.path() / "db").string());
+        SchemaDefinition schema;
+        schema.strict = true;
+        SchemaField age;
+        age.name = "age";
+        age.type = FieldType::Int32;
+        age.required = true;
+        age.default_val = "18";
+        schema.fields.push_back(age);
+        ASSERT_TRUE(engine.CreateCollection("users", schema).success);
+        ASSERT_TRUE(engine.InsertOne("users", R"({"_id":"one"})").success);
+        EXPECT_NE(engine.FindById("users", "one").data.find("\"age\":18"), std::string::npos);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","age":"18"})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","age":2147483648})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","other":1})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"bad","age":null})").success);
+        auto tx = engine.BeginTransaction();
+        ASSERT_NE(tx, nullptr);
+        ASSERT_TRUE(engine.InsertOneTx(*tx, "users", R"({"_id":"tx"})").success);
+        EXPECT_NE(engine.FindByIdTx(*tx, "users", "tx").data.find("\"age\":18"), std::string::npos);
+        ASSERT_TRUE(engine.RollbackTransaction(*tx).success);
+        EXPECT_EQ(engine.Count("users", Condition{}).data, "1");
+        const auto generated = engine.InsertOne("users", "{}");
+        ASSERT_TRUE(generated.success) << generated.error_msg;
+        EXPECT_NE(engine.FindById("users", generated.data).data.find(generated.data), std::string::npos);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":null})").success);
+        EXPECT_FALSE(engine.InsertOne("users", R"({"_id":"dupe","age":1,"age":2})").success);
+    }
+
+    TEST(DocEngineUpdateContract, InvalidUpdatesPreserveDocument) {
+        TestTempDir temp("update_contract");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne("items", R"({"_id":"1","data":"keep"})").success);
+        const auto before = engine.FindById("items", "1").data;
+        UpdateSpec nested;
+        nested.Set("data.nested", "oops");
+        EXPECT_FALSE(engine.UpdateById("items", "1", nested).success);
+        UpdateSpec array;
+        array.Push("data", "oops");
+        EXPECT_FALSE(engine.UpdateById("items", "1", array).success);
+        UpdateSpec identity;
+        identity.Set("_id", "changed");
+        EXPECT_FALSE(engine.UpdateById("items", "1", identity).success);
+        EXPECT_EQ(engine.FindById("items", "1").data, before);
+        EXPECT_EQ(engine.FindById("items", "missing").error_code, "not_found");
+    }
+
+    TEST(DocEngineJoinContract, UsesV2TargetIndexAndPreservesEmptyString) {
+        TestTempDir temp("join_contract");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("source").success);
+        ASSERT_TRUE(engine.CreateCollection("target").success);
+        ASSERT_TRUE(engine.InsertOne("source", R"({"_id":"s","ref":""})").success);
+        ASSERT_TRUE(engine.InsertOne("target", R"({"_id":"t","key":""})").success);
+        IndexDefinition index;
+        index.index_name = "by_key";
+        index.fields = {"key"};
+        ASSERT_TRUE(engine.CreateIndex("target", index).success);
+        const auto joined = engine.LookupJoin("source", "ref", "target", "key", Condition{}, 10);
+        ASSERT_TRUE(joined.success) << joined.error_msg;
+        ASSERT_EQ(joined.records.size(), 1U);
+        EXPECT_NE(joined.records.front().find("\"_id\":\"t\""), std::string::npos);
     }
 
 } // namespace
