@@ -148,8 +148,7 @@ namespace nexora {
                     // index پیوسته برای nodes — LPA نیاز به array دارد
                     std::vector<DenseId> nodes;
                     nodes.reserve(N);
-                    std::unordered_map<DenseId, uint32_t> node_to_idx;
-                    node_to_idx.reserve(N);
+                    std::vector<uint32_t> node_to_idx(N,UINT32_MAX);
 
                     snapshot.forEachNode([&](DenseId id, TypeId tid) -> bool {
                         if (filter_tid != kInvalidTypeId && tid != filter_tid)
@@ -180,7 +179,11 @@ namespace nexora {
                     std::mt19937 rng(42);
 
                     int actual_iter = 0;
+                    (void)snapshot.incoming(0);
+                    std::vector<int> label_count(M,0);
+                    std::vector<uint32_t> touched_labels; touched_labels.reserve(M);
                     for (int iter = 0; iter < max_iter; ++iter) {
+                        snapshot.checkCancelled();
                         ++actual_iter;
                         bool changed = false;
 
@@ -191,24 +194,30 @@ namespace nexora {
                             DenseId  cur = nodes[idx];
 
                             // شمارش label همسایگان
-                            std::unordered_map<uint32_t, int> label_count;
+                            for (const auto label:touched_labels) label_count[label]=0;
+                            touched_labels.clear();
 
                             // OUT neighbors
-                            snapshot.forEachNeighbor(cur, Direction::Both,
-                                                     [&](DenseId nbr, TypeId) -> bool {
-                                                         auto it = node_to_idx.find(nbr);
-                                                         if (it != node_to_idx.end())
-                                                             label_count[label[it->second]]++;
-                                                         return true;
-                                                     });
+                            auto count_labels=[&](auto entries) {
+                                for (const auto& edge:entries) {
+                                                         snapshot.checkCancelled(); const auto nbr=edge.neighbor;
+                                                         const auto mapped=node_to_idx[nbr];
+                                                         if (mapped!=UINT32_MAX) {
+                                                             const auto lbl=label[mapped];
+                                                             if (label_count[lbl]++==0) touched_labels.push_back(lbl);
+                                                         }
+                                }
+                            };
+                            count_labels(snapshot.outgoing(cur)); count_labels(snapshot.incoming(cur));
 
-                            if (label_count.empty()) continue; // isolated node
+                            if (touched_labels.empty()) continue;
 
                             // label با بیشترین تعداد (در تساوی، کوچک‌ترین)
                             uint32_t best_label = label[idx];
                             int      best_count = 0;
 
-                            for (const auto& [lbl, cnt] : label_count) {
+                            for (const auto lbl:touched_labels) {
+                                const auto cnt=label_count[lbl];
                                 if (cnt > best_count ||
                                     (cnt == best_count && lbl < best_label)) {
                                     best_count = cnt;
@@ -331,10 +340,17 @@ namespace nexora {
                 }
             };
 
+AlgoResult runCommunityDetection(GraphManager& manager,const std::string& graph_name,
+        const std::vector<ExtId>& params,SnapshotOptions options) {
+    auto algorithm=std::make_shared<CommunityDetection>();
+    auto handle=manager.submitJob(graph_name,algorithm,params,std::move(options));
+    return handle.result();
+}
+
             AlgoResult runCommunityDetection(GraphManager& manager,
                                              const std::string& graph_name,
                                              const std::vector<ExtId>& params) {
-                CommunityDetection algo;
+                auto algo=std::make_shared<CommunityDetection>();
                 auto handle = manager.submitJob(graph_name, algo, params);
                 return handle.result();
             }
