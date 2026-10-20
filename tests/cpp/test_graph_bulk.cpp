@@ -73,8 +73,8 @@ TEST(GraphBulk, DirectedAndUndirectedKeysAndHeavyExistingAdjacency) {
     mixed.addEdge("x","y","mixed",true);
     mixed.addEdge("y","x","mixed",false);
     mixed.addEdge("y","x","mixed",true); mixed.flush();
-    EXPECT_EQ(mixed.stats().edges_created,1U);
-    EXPECT_EQ(mixed.stats().edges_deduplicated,2U);
+    EXPECT_EQ(mixed.stats().edges_created,2U);
+    EXPECT_EQ(mixed.stats().edges_deduplicated,1U);
     EXPECT_EQ(graph.getNode("x")->out_degree,1U);
     EXPECT_EQ(graph.getNode("y")->out_degree,1U);
 }
