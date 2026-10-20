@@ -37,16 +37,34 @@
 #include "Graphtypes.h"
 
 #include <functional>
+#include <array>
+#include <chrono>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <span>
+#include <mutex>
+#include <memory>
+#include "SnapshotMemory.h"
 
 namespace nexora {
     namespace graph {
 
 // forward
         class LiveGraph;
+        struct SnapshotOptions {
+            bool incoming=false;
+            bool use_cache=false;
+            size_t max_build_bytes=0; // preflight + enforced PMR requested-byte cap, not RSS
+            std::shared_ptr<std::atomic<bool>> cancellation;
+            int job_priority=0;
+            uint32_t enqueue_timeout_ms=0;
+            uint32_t timeout_ms=0; // Total deadline: queue + snapshot + algorithm.
+            size_t workspace_reservation_bytes=64*1024*1024;
+            size_t max_result_bytes=16*1024*1024;
+            std::chrono::steady_clock::time_point deadline{};
+        };
 
 /**
  * @class StaticGraph
@@ -58,6 +76,22 @@ namespace nexora {
  */
         class StaticGraph {
         public:
+            // Logical edges, not duplicated outgoing/incoming traversal arcs.
+            std::optional<std::array<uint64_t,5>> edgeAt(size_t offset) const;
+            StaticGraph(const LiveGraph&,const std::vector<std::string>&,
+                        const std::vector<std::string>&,std::string,SnapshotOptions);
+            void checkCancelled() const;
+            void cancel() const;
+            bool hasIncomingIndex() const;
+            size_t plannedPeakBytes() const noexcept { return planned_peak_bytes_; }
+            size_t compressedBytes() const;
+            size_t allocationPeakBytes() const { return data_->memory.peakBytes(); }
+            size_t allocationCurrentBytes() const { return data_->memory.currentBytes(); }
+            std::unique_ptr<StaticGraph> clone(SnapshotOptions options={}) const;
+            bool cacheHit() const noexcept { return cache_hit_; }
+            DenseId originalId(DenseId id) const { return data_->original_ids_.at(id); }
+            std::span<const AdjEntry> outgoing(DenseId id) const;
+            std::span<const AdjEntry> incoming(DenseId id) const;
             // ──────────────────────────────────────────────────────────
             // سازنده‌ها
             // ──────────────────────────────────────────────────────────
@@ -208,6 +242,9 @@ namespace nexora {
             std::unordered_map<std::string, size_t> edgeCountByType() const;
 
         private:
+            friend class GraphManager;
+            StaticGraph(const StaticGraph&,SnapshotOptions);
+            bool cache_hit_=false;
             std::string name_;
 
             // ── ساختار ذخیره‌سازی داخلی ──
@@ -216,32 +253,44 @@ namespace nexora {
                 TypeId   type_id    = kInvalidTypeId;
                 uint64_t out_degree = 0;
                 uint64_t in_degree  = 0;
-                ExtId    ext_id;
+                std::pmr::string ext_id;
                 bool     valid      = false;
+                NodeSnap(TypeId type,std::string_view ext,std::pmr::memory_resource* resource)
+                    :type_id(type),ext_id(ext,resource),valid(true) {}
             };
 
             struct EdgeSnap {
                 DenseId src     = kInvalidDenseId;
                 DenseId dst     = kInvalidDenseId;
                 TypeId  type_id = kInvalidTypeId;
+                bool undirected=false;
             };
 
-            // dense vector — index = DenseId (سریع‌ترین دسترسی)
-            std::vector<NodeSnap>  nodes_;
+            struct StringHash {
+                using is_transparent=void;
+                size_t operator()(std::string_view value) const noexcept { return std::hash<std::string_view>{}(value); }
+            };
+            struct StringEqual {
+                using is_transparent=void;
+                bool operator()(std::string_view a,std::string_view b) const noexcept { return a==b; }
+            };
+            struct Data {
+                SnapshotMemory memory; // Declared first, destroyed after every PMR container.
+                std::pmr::vector<NodeSnap> nodes_{&memory};
+                std::pmr::vector<std::pair<EdgeId,EdgeSnap>> edges_{&memory};
+                std::pmr::vector<uint64_t> out_rows_{&memory},in_rows_{&memory};
+                std::pmr::vector<AdjEntry> out_entries_{&memory},in_entries_{&memory};
+                std::pmr::vector<DenseId> original_ids_{&memory};
+                std::pmr::unordered_map<TypeId,std::pmr::string> node_type_names_{&memory},edge_type_names_{&memory};
+                std::pmr::unordered_map<std::pmr::string,DenseId,StringHash,StringEqual> ext_to_dense_{&memory};
+                explicit Data(size_t limit,size_t baseline=0):memory(limit,baseline) {}
+            };
+            std::unique_ptr<Data> data_;
+            SnapshotOptions options_;
+            size_t planned_peak_bytes_=0;
+            mutable std::shared_ptr<std::mutex> incoming_mutex_=std::make_shared<std::mutex>();
+            void ensureIncoming() const;
 
-            // edge storage
-            std::unordered_map<EdgeId, EdgeSnap> edges_;
-
-            // adjacency lists — برای traversal بدون scan کامل
-            std::vector<std::vector<AdjEntry>> out_adj_;
-            std::vector<std::vector<AdjEntry>> in_adj_;
-
-            // type name maps
-            std::unordered_map<TypeId, std::string> node_type_names_;
-            std::unordered_map<TypeId, std::string> edge_type_names_;
-
-            // ExtId → DenseId برای denseId() lookup
-            std::unordered_map<ExtId, DenseId> ext_to_dense_;
 
             uint64_t node_count_        = 0;
             uint64_t edge_count_        = 0;
