@@ -70,6 +70,7 @@
 #include "Livegraph.h"
 #include "StaticGraph.h"
 #include "JobScheduler.h"
+#include "DirectoryLease.h"
 #include "algorithms/AlgorithmBase.h"
 
 // DocEngine (برای IterateCollection، GetForeignKeys، ExtractField)
@@ -220,6 +221,8 @@ namespace nexora {
              *  3. LIVE graph‌ها آماده دریافت تغییر می‌شوند
              */
             bool startup();
+            bool recoverStoredGraphs(); // Never rebuild from source implicitly.
+            bool prepareShutdown(); // Quiesce caller mutations first; joins jobs, checkpoints WAL/data.
 
             /**
              * @brief در shutdown دیتابیس فراخوانی می‌شود
@@ -491,6 +494,7 @@ namespace nexora {
             nexora::core::DocEngine* doc_engine_;   ///< source of truth
             std::filesystem::path    graph_dir_;    ///< پوشه فایل‌های گراف
             WalOptions wal_options_;
+            std::unique_ptr<detail::DirectoryLease> directory_lease_;
             std::unique_ptr<JobScheduler> scheduler_;
 
             // ── Graph registry ──

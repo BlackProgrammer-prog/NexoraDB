@@ -33,6 +33,7 @@ namespace nexora {
                 : doc_engine_(doc_engine), graph_dir_(std::move(graph_dir)), wal_options_(wal_options),
                   scheduler_(std::make_unique<JobScheduler>(scheduler_options)) {
             std::filesystem::create_directories(graph_dir_);
+            directory_lease_=std::make_unique<detail::DirectoryLease>(graph_dir_);
         }
 
         GraphManager::~GraphManager() {
@@ -46,6 +47,17 @@ namespace nexora {
                 if (handle->wal)     handle->wal->close();
                 if (handle->storage) handle->storage->close();
             }
+        }
+        bool GraphManager::prepareShutdown() {
+            scheduler_->shutdown();
+            std::vector<std::shared_ptr<GraphHandle>> handles;
+            {std::lock_guard lock(registry_mutex_); for(const auto& item:graphs_) handles.push_back(item.second);}
+            for(const auto& handle:handles) {
+                std::unique_lock lock(handle->rw_mutex);
+                if(handle->live_graph && !handle->live_graph->checkpointWAL()) return false;
+                if(handle->storage && !handle->storage->durableSync()) return false;
+            }
+            return true;
         }
 
 // ══════════════════════════════════════════════════════════════
@@ -337,6 +349,33 @@ namespace nexora {
 // ══════════════════════════════════════════════════════════════
 // §5  Startup
 // ══════════════════════════════════════════════════════════════
+
+        bool GraphManager::recoverStoredGraphs() {
+            { std::lock_guard lock(registry_mutex_); if(!graphs_.empty()) return false; }
+            std::unordered_map<std::string,std::shared_ptr<GraphHandle>> recovered;
+            for(const auto& entry:std::filesystem::directory_iterator(graph_dir_)) {
+                if(entry.path().extension()!=".graphdef") continue;
+                const auto name=entry.path().stem().string();
+                const auto definition=loadDefinition(name);
+                if(!definition || definition->name!=name) throw std::runtime_error("corrupt graph definition: "+name);
+                if(!std::filesystem::exists(graph_dir_/name/(name+".manifest")))
+                    throw std::runtime_error("missing graph storage manifest: "+name);
+                auto handle=makeHandle(*definition);
+                const auto meta=handle ? handle->storage->readMeta() : std::nullopt;
+                if(!meta || meta->state==GraphState::Building || meta->state==GraphState::Corrupted)
+                    throw std::runtime_error("incomplete/corrupt graph needs explicit source rebuild: "+name);
+                if(!handle || !handle->live_graph->loadFromDisk()) return false;
+                handle->live_graph->replayWAL();
+                if(handle->wal->hasPendingEntries()) throw std::runtime_error("graph WAL recovery incomplete: "+name);
+                handle->built=true; recovered.emplace(name,std::move(handle));
+            }
+            for(const auto& entry:std::filesystem::directory_iterator(graph_dir_))
+                if(entry.is_directory() && !recovered.count(entry.path().filename().string()))
+                    throw std::runtime_error("orphan graph directory without definition: "+entry.path().string());
+            std::lock_guard lock(registry_mutex_);
+            if(!graphs_.empty()) return false;
+            graphs_=std::move(recovered); return true;
+        }
 
         bool GraphManager::startup() {
             auto defs = loadAllDefinitions();
