@@ -35,6 +35,7 @@
 
 #include <deque>
 #include <shared_mutex>
+#include "WriterPreferredMutex.h"
 #include <stack>
 #include <string>
 #include <unordered_map>
@@ -69,6 +70,9 @@ namespace nexora {
              * @return ExtId یا ""
              */
             ExtId getExt(DenseId dense_id) const;
+            const ExtId* findExt(DenseId id) const noexcept {
+                return hasDense(id) ? &*dense_to_ext_[id] : nullptr;
+            }
 
             bool hasExt(const ExtId& ext_id) const;
             bool hasDense(DenseId dense_id) const;
@@ -334,6 +338,7 @@ namespace nexora {
 
         private:
             friend class BulkGraphBuilder;
+            friend class StaticGraph;
             bool bulk_failed_=false;
             size_t memory_budget_=0,memory_charged_=0;
             GraphMemoryUsage memoryUsageUnlocked() const;
@@ -343,7 +348,7 @@ namespace nexora {
             GraphWAL*      wal_;      ///< owned by GraphManager
 
             // ── RAM Structures ──
-            mutable std::shared_mutex       mutex_;
+            mutable WriterPreferredMutex   mutex_;
 
             /// adjacency lists: DenseId → NodeAdj
             std::vector<NodeAdj>            adj_;

@@ -614,6 +614,7 @@ namespace nexora {
                             node_records_[existing].flags & ~FLAG_IMPLICIT);
                     node_records_[existing].flags &= ~FLAG_IMPLICIT;
                     node_records_[existing].type_id=type;
+                    version_.fetch_add(1);
                     persistNode(node_records_[existing]);
                     finishWal(seq);
                 }
@@ -815,6 +816,14 @@ namespace nexora {
                     return found == kInvalidEdgeId;
                 });
                 return found;
+            }
+            if (!directed) {
+                EdgeId reverse=kInvalidEdgeId;
+                adj_[dst_id].forEachOut([&](const AdjEntry& entry) {
+                    if (entry.neighbor==src_id && entry.type_id==edge_type) reverse=entry.edge_id;
+                    return reverse==kInvalidEdgeId;
+                });
+                if (reverse!=kInvalidEdgeId) return reverse;
             }
 
             EdgeId new_eid = allocEdgeId();
