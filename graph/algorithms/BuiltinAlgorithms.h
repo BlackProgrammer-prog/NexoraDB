@@ -6,6 +6,16 @@
 namespace nexora {
 namespace graph {
 namespace algorithms {
+AlgoResult runConnectedComponents(GraphManager&,const std::string&,
+    const std::vector<ExtId>&,SnapshotOptions);
+AlgoResult runCommunityDetection(GraphManager&,const std::string&,
+    const std::vector<ExtId>&,SnapshotOptions);
+AlgoResult runAllDistances(GraphManager&,const std::string&,
+    const std::vector<ExtId>&,SnapshotOptions);
+AlgoResult runBetweennessCentrality(GraphManager&,const std::string&,
+    const std::vector<ExtId>&,SnapshotOptions);
+AlgoResult runInfluenceMaximization(GraphManager&,const std::string&,
+    const std::vector<ExtId>&,SnapshotOptions);
 
 AlgoResult runMutualFriends(GraphManager& manager,
                             const std::string& graph_name,
