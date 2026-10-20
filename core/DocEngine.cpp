@@ -638,8 +638,8 @@ namespace nexora {
             db_options_.max_write_buffer_number       = 3;
             db_options_.target_file_size_base         = 64 * 1024 * 1024;
 
-            write_options_.sync         = false;  // برای performance
-            read_options_.verify_checksums = true;
+            // Immutable defaults: sync=false, verify_checksums=true. Customize
+            // per-call snapshots, bounds and cache policy on local copies only.
 
             txn_db_options_.transaction_lock_timeout =
                     transaction_settings.lock_timeout_ms;
@@ -950,6 +950,8 @@ namespace nexora {
         DBResult DocEngine::CreateCollection(
                 const std::string& collection_name,
                 const std::optional<SchemaDefinition>& schema) {
+            MetadataChange metadata_change(*this,collection_name);
+            std::unique_lock ddl_lock(index_ddl_mutex_);
 
             if (collection_name.empty())
                 return DBResult::Err("Collection name cannot be empty");
@@ -989,6 +991,8 @@ namespace nexora {
         }
 
         DBResult DocEngine::DropCollection(const std::string& collection_name) {
+            MetadataChange metadata_change(*this,collection_name);
+            std::unique_lock ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
@@ -1044,6 +1048,7 @@ namespace nexora {
 
         DBResult DocEngine::SetSchemaValidation(const std::string&      collection_name,
                                                 const SchemaDefinition& schema) {
+            MetadataChange metadata_change(*this,collection_name);
             std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
@@ -1085,6 +1090,7 @@ namespace nexora {
 
         DBResult DocEngine::CreateIndex(const std::string&     collection_name,
                                         const IndexDefinition& index_def) {
+            MetadataChange metadata_change(*this,collection_name);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
             if (!CollectionExists(collection_name))
@@ -1121,6 +1127,7 @@ namespace nexora {
 
         DBResult DocEngine::DropIndex(const std::string& collection_name,
                                       const std::string& index_name) {
+            MetadataChange metadata_change(*this,collection_name);
             std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
@@ -1177,6 +1184,7 @@ namespace nexora {
         }
 
         DBResult DocEngine::RebuildIndexes(const std::string& collection_name) {
+            MetadataChange metadata_change(*this,collection_name);
             std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
@@ -1248,6 +1256,7 @@ namespace nexora {
         DBResult DocEngine::CleanupIndexBuild(
                 const std::string& collection_name,
                 const std::string& index_name) {
+            MetadataChange metadata_change(*this,collection_name);
             std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             const std::string meta_key = MakeMetaKey(
                     keys::kMetaIdx, collection_name, index_name);
@@ -1288,6 +1297,7 @@ namespace nexora {
         DBResult DocEngine::ResumeIndexBuild(
                 const std::string& collection_name,
                 const std::string& index_name) {
+            MetadataChange metadata_change(*this,collection_name);
             const std::string meta_key = MakeMetaKey(
                     keys::kMetaIdx, collection_name, index_name);
             std::string serialized;
@@ -1437,7 +1447,8 @@ namespace nexora {
 
         DBResult DocEngine::AddForeignKey(const std::string&          collection_name,
                                           const ForeignKeyDefinition& fk_def) {
-            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
+            MetadataChange metadata_change(*this,collection_name);
+            std::unique_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name) ||
                 IsReservedCollectionName(fk_def.ref_collection))
                 return DBResult::Err("reserved collection name");
@@ -1495,6 +1506,8 @@ namespace nexora {
 
         DBResult DocEngine::DropForeignKey(const std::string& collection_name,
                                            const std::string& fk_name) {
+            MetadataChange metadata_change(*this,collection_name);
+            std::unique_lock ddl_lock(index_ddl_mutex_);
             if (IsReservedCollectionName(collection_name))
                 return DBResult::Err("reserved collection name");
             std::string meta_key = MakeMetaKey(keys::kMetaFk, collection_name, fk_name);
@@ -1513,6 +1526,15 @@ namespace nexora {
         rocksdb::Status DocEngine::LoadMutationMetadata(const std::string &collection_name,
                                                         nexora::core::DocEngine::MutationMetadata &metadata) const {
             metadata = MutationMetadata{};
+            uint64_t epoch;
+            {
+                std::lock_guard lock(metadata_cache_mutex_);
+                epoch=metadata_epoch_;
+                if (!metadata_writers_) {
+                    const auto found=metadata_cache_.find(collection_name);
+                    if (found!=metadata_cache_.end()) { metadata=found->second; return rocksdb::Status::OK(); }
+                }
+            }
 
             std::string serialized_schema;
 
@@ -1591,6 +1613,13 @@ namespace nexora {
 
                 if (!status.ok()) {
                     return status;
+                }
+            }
+            {
+                std::lock_guard lock(metadata_cache_mutex_);
+                if (!metadata_writers_ && epoch==metadata_epoch_) {
+                    if (metadata_cache_.size()>=256) metadata_cache_.clear();
+                    metadata_cache_[collection_name]=metadata;
                 }
             }
             return rocksdb::Status::OK();
@@ -2567,6 +2596,7 @@ namespace nexora {
                 std::uint32_t limit,
                 std::uint32_t skip,
                 bool force_full_scan) {
+            std::shared_lock ddl_lock(index_ddl_mutex_);
             QueryExecution execution;
             TouchUserActivity();
             if (IsReservedCollectionName(collection_name))
@@ -2762,7 +2792,7 @@ namespace nexora {
                 const std::string& collection_name,
                 const nexora::query::Condition& condition,
                 std::uint32_t limit,
-                const std::string& continuation_token) {
+                const std::string& continuation_token,size_t max_bytes) {
             PageResult result;
             TouchUserActivity();
             if (limit == 0) {
@@ -2851,7 +2881,8 @@ namespace nexora {
             }
 
             std::string json;
-            json.reserve(std::min<std::size_t>(limit, 4096) * 256 + 2);
+            const auto reserve_bytes=std::min<std::size_t>(limit,4096)*256+2;
+            json.reserve(max_bytes ? std::min(reserve_bytes,max_bytes) : reserve_bytes);
             json.push_back('[');
             bool first = true;
             std::uint32_t emitted = 0;
@@ -2877,6 +2908,12 @@ namespace nexora {
                     page_sessions_.erase(session_id);
                     return result;
                 }
+                if (max_bytes && document.size()+2>max_bytes) {
+                    result.error_msg="document exceeds page byte budget";
+                    txn_db_->ReleaseSnapshot(session->snapshot); page_sessions_.erase(session_id);
+                    return result;
+                }
+                if (max_bytes && json.size()+document.size()+(first ? 0 : 1)+1>max_bytes) break;
                 if (!first) json.push_back(',');
                 first = false;
                 json += document;
@@ -2905,6 +2942,16 @@ namespace nexora {
 // ══════════════════════════════════════════════════════════════
 // §11  CRUD - Update
 // ══════════════════════════════════════════════════════════════
+
+        void DocEngine::ClosePage(const std::string& token) {
+            if (!token.starts_with("s1.")) return;
+            const auto end=token.find('.',3); if (end==std::string::npos) return;
+            std::lock_guard lock(page_sessions_mutex_);
+            const auto found=page_sessions_.find(token.substr(3,end-3));
+            if (found!=page_sessions_.end()) {
+                txn_db_->ReleaseSnapshot(found->second.snapshot); page_sessions_.erase(found);
+            }
+        }
 
         DBResult DocEngine::UpdateById(
                 const std::string& collection_name,
@@ -4458,40 +4505,25 @@ namespace nexora {
         std::optional<SchemaDefinition>
         DocEngine::GetSchema(const std::string& collection_name) const {
             if (IsReservedCollectionName(collection_name)) return std::nullopt;
-            std::string val;
-            rocksdb::Status s = txn_db_->Get(read_options_,
-                                             MakeMetaKey(keys::kMetaCol, collection_name),
-                                             &val);
-            if (!s.ok()) return std::nullopt;
-            return DeserializeSchema(val);
+            MutationMetadata metadata;
+            if (!LoadMutationMetadata(collection_name,metadata).ok()) return std::nullopt;
+            return metadata.schema;
         }
 
         std::vector<ForeignKeyDefinition>
         DocEngine::GetForeignKeys(const std::string& collection_name) const {
-            std::vector<ForeignKeyDefinition> result;
-            if (IsReservedCollectionName(collection_name)) return result;
-            std::string prefix = std::string(keys::kMetaFk) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
-                auto fk = DeserializeFk(it->value().ToString());
-                if (fk) result.push_back(*fk);
-            }
-            return result;
+            if (IsReservedCollectionName(collection_name)) return {};
+            MutationMetadata metadata;
+            if (!LoadMutationMetadata(collection_name,metadata).ok()) return {};
+            return metadata.foreign_keys;
         }
 
         std::vector<IndexDefinition>
         DocEngine::GetIndexes(const std::string& collection_name) const {
-            std::vector<IndexDefinition> result;
-            if (IsReservedCollectionName(collection_name)) return result;
-            std::string prefix = std::string(keys::kMetaIdx) + collection_name + ":";
-            rocksdb::ReadOptions ro;
-            auto it = std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(ro));
-            for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
-                auto idx = DeserializeIndex(it->value().ToString());
-                if (idx) result.push_back(*idx);
-            }
-            return result;
+            if (IsReservedCollectionName(collection_name)) return {};
+            MutationMetadata metadata;
+            if (!LoadMutationMetadata(collection_name,metadata).ok()) return {};
+            return metadata.indexes;
         }
 
         std::vector<std::string> DocEngine::ListCollections() const {

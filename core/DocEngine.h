@@ -349,8 +349,9 @@ namespace nexora {
  * DocEngine تمام عملیات CRUD، مدیریت Schema، Index و Transaction را
  * روی RocksDB پیاده‌سازی می‌کند. این کلاس:
  *
- *  1. **Thread-safe نیست** — هر thread باید instance جداگانه داشته باشد
- *     یا از locking خارجی استفاده شود (Cython layer مسئول این است).
+ *  1. Ordinary APIs support concurrent calls on one live instance. Lifecycle
+ *     and raw RocksDB access require external quiescence; TxHandle is confined
+ *     to its creating thread. See docs/cpp/THREADING.md for the full contract.
  *  2. **Internal API** برای GraphEngine از طریق `IterateCollection` فراهم است.
  *  3. داده‌ها روی دیسک BSON باینری هستند؛ API سازگار فعلی JSON UTF-8 می‌پذیرد.
  *  4. منطق تطابق (Match) و به‌روزرسانی (Apply) به nexora::query::Evaluator
@@ -626,7 +627,8 @@ namespace nexora {
                     const std::string& collection_name,
                     const nexora::query::Condition& condition,
                     std::uint32_t limit,
-                    const std::string& continuation_token = "");
+                    const std::string& continuation_token = "",size_t max_bytes=0);
+            void ClosePage(const std::string& continuation_token);
 
             // ──────────────────────────────────────────────────────────
             // 6.7  CRUD - Update
@@ -990,8 +992,8 @@ namespace nexora {
 
             rocksdb::Options              db_options_;
             rocksdb::TransactionDBOptions txn_db_options_;
-            rocksdb::WriteOptions         write_options_;
-            rocksdb::ReadOptions          read_options_;
+            const rocksdb::WriteOptions   write_options_{};
+            const rocksdb::ReadOptions    read_options_{};
             rocksdb::TransactionOptions   transaction_options_;
             mutable std::shared_mutex index_ddl_mutex_;
             std::atomic<MutationFaultPoint> mutation_fault_point_{
@@ -1014,6 +1016,42 @@ namespace nexora {
                 SchemaDefinition schema;
                 std::vector<ForeignKeyDefinition> foreign_keys;
                 std::vector<IndexDefinition> indexes;
+            };
+
+            mutable std::mutex metadata_cache_mutex_;
+            mutable std::unordered_map<std::string,MutationMetadata> metadata_cache_;
+            mutable uint64_t metadata_epoch_=0;
+            mutable size_t metadata_writers_=0;
+            std::mutex metadata_gates_mutex_;
+            std::unordered_map<std::string,std::weak_ptr<std::recursive_mutex>> metadata_gates_;
+            std::shared_ptr<std::recursive_mutex> MetadataGate(const std::string& collection) {
+                std::lock_guard lock(metadata_gates_mutex_);
+                if (auto existing=metadata_gates_[collection].lock()) return existing;
+                if (metadata_gates_.size()>256) {
+                    for (auto it=metadata_gates_.begin();it!=metadata_gates_.end();) {
+                        if (it->second.expired()) it=metadata_gates_.erase(it); else ++it;
+                    }
+                }
+                auto gate=std::make_shared<std::recursive_mutex>(); metadata_gates_[collection]=gate;
+                return gate;
+            }
+            // Invalidate on entry AND exit, including failed/partial DDL and
+            // online-build state transitions. Nested changes are supported.
+            struct MetadataChange {
+                DocEngine& engine;
+                std::shared_ptr<std::recursive_mutex> gate;
+                std::unique_lock<std::recursive_mutex> guard;
+                MetadataChange(DocEngine& value,const std::string& collection)
+                    :engine(value),gate(value.MetadataGate(collection)),guard(*gate) {
+                    std::lock_guard lock(engine.metadata_cache_mutex_);
+                    ++engine.metadata_writers_; ++engine.metadata_epoch_;
+                    engine.metadata_cache_.clear();
+                }
+                ~MetadataChange() {
+                    std::lock_guard lock(engine.metadata_cache_mutex_);
+                    --engine.metadata_writers_; ++engine.metadata_epoch_;
+                    engine.metadata_cache_.clear();
+                }
             };
 
             class MutationBuilder;
