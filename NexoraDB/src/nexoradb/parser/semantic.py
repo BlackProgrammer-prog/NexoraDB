@@ -440,7 +440,11 @@ class Executor:
 
     def execute(self, stmt) -> dict:
         try:
+            started = time.perf_counter()
             result = self._execute(stmt)
+            if isinstance(stmt, N.Select) and result.get('success'):
+                from .performance import observe_select
+                observe_select(self.engine, stmt, time.perf_counter() - started)
             if result.get("success") is False:
                 self.abort_transaction()
             return result
@@ -644,6 +648,21 @@ class Executor:
                 self.gm.on_document_inserted(s.collection, s.json_doc)
         return self._res(r)
 
+    def _x_ShowPerformance(self, s: N.ShowPerformance) -> dict:
+        from .performance import performance_status
+        return {'success': True, 'data': json.dumps(performance_status(self.engine))}
+
+    def _x_SetPerformance(self, s: N.SetPerformance) -> dict:
+        from .performance import configure_performance
+        try:
+            return {'success': True, 'data': json.dumps(configure_performance(self.engine, {s.option: s.enabled}))}
+        except ValueError as error:
+            raise NexoraQLSemanticError(str(error)) from error
+
+    def _x_ShowIndexAdvice(self, s: N.ShowIndexAdvice) -> dict:
+        from .performance import index_advice
+        return {'success': True, 'data': json.dumps(index_advice(self.engine))}
+
     def _x_InsertBatch(self, s: N.InsertBatch) -> dict:
         for i, doc in enumerate(s.json_docs):
             try:
@@ -725,6 +744,13 @@ class Executor:
         """اعمال projection در سمت Python (MVP — engine projection ندارد)."""
         if projection is None:
             return docs
+        select = Executor._compile_projection(projection)
+        return [select(document) for document in docs]
+
+    @staticmethod
+    def _compile_projection(projection):
+        if projection is None:
+            return lambda document: document
         tree: dict = {}
         for path in sorted(set(projection) | {"_id"}, key=lambda p: (p.count("."), p)):
             branch = tree
@@ -744,7 +770,7 @@ class Executor:
             return {key: (value[key] if children is None else select(value[key], children))
                     for key, children in fields.items() if key in value}
 
-        return [select(document, tree) for document in docs]
+        return lambda document: select(document, tree)
 
     def _x_Count(self, s: N.Count) -> dict:
         cond = build_condition(s.where)
