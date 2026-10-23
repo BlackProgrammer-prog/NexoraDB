@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import time
+import sqlite3
 
 
 def result(value):
@@ -196,6 +197,18 @@ def backup(db, graphs, target, rebuild=False):
             engine.pause_document_migration()
             try:
                 checkpoint = result(engine.create_checkpoint(str(stage / "documents")))
+                journal = db / "api_requests.sqlite3"
+                if journal.is_symlink():
+                    raise RuntimeError("symlink request journal rejected")
+                if journal.exists():
+                    # API must be stopped: captures journal plus any recovered
+                    # SQLite journal state, not a potentially torn raw copy.
+                    with contextlib.closing(sqlite3.connect(journal.resolve().as_uri() + "?mode=ro", uri=True)) as source:
+                        with contextlib.closing(sqlite3.connect(stage / "documents" / journal.name)) as destination:
+                            source.backup(destination)
+                            if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                                raise RuntimeError("corrupt request journal")
+                    os.chmod(stage / "documents" / journal.name, 0o600)
                 list(regular_files(graphs))  # Reject links before copytree follows anything.
                 if rebuild:
                     (stage / "graphs").mkdir()
