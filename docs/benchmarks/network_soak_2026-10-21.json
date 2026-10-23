@@ -1,0 +1,28 @@
+{
+  "seconds": 600.0730869820109,
+  "operations": {"count": 197252, "cursor": 21915},
+  "errors": {},
+  "ops_per_second": 365.2338436010716,
+  "recent_samples": 8192,
+  "recent_p50_ms": 5.036975955590606,
+  "recent_p99_ms": 15.01917198766023,
+  "process_initial_rss": 84254720,
+  "process_final_rss": 95789056,
+  "process_peak_rss": 95789056,
+  "initial_fds": 20,
+  "active_fds": 24,
+  "pool_connections": 2,
+  "passed": true,
+  "scope": "single process client+server; real loopback HTTP/1.1, authenticated native reads; no TLS/WAN/write mix",
+  "revision_note": "Working tree during development, before final byte-batch cap and pool metrics refinements; not a final-release soak",
+  "build": {
+    "project_version": "0.3.0",
+    "build_type": "Release",
+    "compiler_id": "GNU",
+    "compiler_version": "11.4.0",
+    "system": "Linux",
+    "processor": "x86_64",
+    "rocksdb_version": "8.5.3",
+    "python_version": "3.10.12"
+  }
+}
