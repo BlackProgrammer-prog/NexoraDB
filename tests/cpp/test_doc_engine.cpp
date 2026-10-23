@@ -18,6 +18,15 @@
 #include <thread>
 #include <vector>
 
+namespace nexora::core {
+    struct PageSessionTestAccess {
+        static void Advance(DocEngine& engine,std::chrono::seconds amount) {
+            std::lock_guard lock(engine.page_sessions_mutex_);
+            engine.page_clock_offset_for_testing_+=amount;
+        }
+    };
+}
+
 namespace {
 
     using nexora::core::DocEngine;
@@ -375,6 +384,94 @@ namespace {
 
         ASSERT_TRUE(removed.success) << removed.error_msg;
         EXPECT_TRUE(engine.GetIndexes("users").empty());
+    }
+
+    TEST(DocEnginePagination, ConcurrentScanCloseAndIndependentCursors) {
+        TestTempDir temp("nexora_cursor_close_race");
+        DocEngine engine(temp.path().string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        std::vector<std::string> documents;
+        for(int i=0;i<500;++i) documents.push_back(nlohmann::json({{"_id",std::to_string(i)}}).dump());
+        ASSERT_TRUE(engine.InsertMany("items",documents).success);
+        std::atomic<int> failures{0};
+        std::vector<std::thread> readers;
+        for(int worker=0;worker<4;++worker) readers.emplace_back([&] {
+            for(int repeat=0;repeat<8;++repeat) {
+                std::string token; size_t count=0;
+                do {
+                    auto page=engine.FindPage("items",Condition{},17,token,4096);
+                    if(!page.success) { ++failures; break; }
+                    count+=nlohmann::json::parse(page.data).size();
+                    token=page.continuation_token;
+                } while(!token.empty());
+                if(count!=500) ++failures;
+            }
+        });
+        for(auto& reader:readers) reader.join();
+        EXPECT_EQ(failures,0);
+        for(int repeat=0;repeat<32;++repeat) {
+            auto first=engine.FindPage("items",Condition{},1);
+            ASSERT_TRUE(first.success);
+            std::thread scan([&] {
+                auto result=engine.FindPage("items",Condition{},500,first.continuation_token);
+                if(result.success) { EXPECT_EQ(nlohmann::json::parse(result.data).size(),499U); }
+            });
+            engine.ClosePage(first.continuation_token);
+            scan.join();
+        }
+        EXPECT_TRUE(engine.FindPage("items",Condition{},1000).success);
+    }
+
+    TEST(DocEnginePagination, ActiveScanOutlivesFiveMinutesButIdleScanExpires) {
+        TestTempDir temp("long_running_scan");
+        DocEngine engine(temp.path().string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        std::vector<std::string> docs;
+        for(int i=0;i<12;++i) docs.push_back(nlohmann::json({{"_id",std::to_string(i)},{"v",i}}).dump());
+        ASSERT_TRUE(engine.InsertMany("items",docs).success);
+        auto page=engine.FindPage("items",Condition{},1);
+        ASSERT_TRUE(page.success);
+        // Writes after the first page must remain absent from this snapshot.
+        ASSERT_TRUE(engine.InsertOne("items",R"({"_id":"late","v":99})").success);
+        std::vector<int> values;
+        for(;;) {
+            for(const auto& row:nlohmann::json::parse(page.data)) values.push_back(row.at("v").get<int>());
+            if(page.continuation_token.empty()) break;
+            nexora::core::PageSessionTestAccess::Advance(engine,std::chrono::seconds(90));
+            page=engine.FindPage("items",Condition{},1,page.continuation_token);
+            ASSERT_TRUE(page.success)<<page.error_msg;
+        }
+        std::sort(values.begin(),values.end());
+        std::vector<int> expected;for(int i=0;i<12;++i) expected.push_back(i);
+        EXPECT_EQ(values,expected);
+        auto idle=engine.FindPage("items",Condition{},1);
+        ASSERT_TRUE(idle.success);ASSERT_FALSE(idle.continuation_token.empty());
+        nexora::core::PageSessionTestAccess::Advance(engine,std::chrono::seconds(121));
+        EXPECT_FALSE(engine.FindPage("items",Condition{},1,idle.continuation_token).success);
+        EXPECT_EQ(nlohmann::json::parse(engine.MemoryReport())["page_sessions"],0);
+    }
+
+    TEST(DocEnginePagination, BoundsRetainedSnapshotsAndReleasesCapacity) {
+        TestTempDir temp("nexora_doc_cursor_capacity");
+        DocEngine engine((temp.path() / "db").string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertMany("items", {R"({"_id":"a"})", R"({"_id":"b"})"}).success);
+        std::vector<std::string> tokens;
+        for (int i=0;i<128;++i) {
+            auto page=engine.FindPage("items", Condition{}, 1);
+            ASSERT_TRUE(page.success) << page.error_msg;
+            ASSERT_FALSE(page.continuation_token.empty());
+            tokens.push_back(page.continuation_token);
+        }
+        auto rejected=engine.FindPage("items", Condition{}, 1);
+        EXPECT_FALSE(rejected.success);
+        EXPECT_NE(rejected.error_msg.find("capacity"),std::string::npos);
+        EXPECT_TRUE(engine.FindPage("items",Condition{},10,tokens.back()).success);
+        auto accepted=engine.FindPage("items",Condition{},1);
+        ASSERT_TRUE(accepted.success);
+        engine.ClosePage(accepted.continuation_token);
+        for (const auto& token:tokens) engine.ClosePage(token);
+        EXPECT_TRUE(engine.FindPage("items",Condition{},10).success);
     }
 
     TEST(DocEnginePagination, UsesStableExclusiveContinuationTokens) {
