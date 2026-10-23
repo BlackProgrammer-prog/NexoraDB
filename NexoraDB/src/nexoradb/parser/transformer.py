@@ -657,6 +657,9 @@ class NexoraQLTransformer(Transformer):
 
     def system_status(self, _): return N.SystemStatus()
     def system_info(self, _):   return N.SystemInfo()
+    def show_performance(self, _): return N.ShowPerformance()
+    def show_index_advice(self, _): return N.ShowIndexAdvice()
+    def set_performance(self, ch): return N.SetPerformance(str(ch[0]).lower(), ch[1])
 
 
 def _num(s: str):
