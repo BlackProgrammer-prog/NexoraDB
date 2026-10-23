@@ -6,8 +6,9 @@ import hmac
 import json
 import secrets
 import time
+import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException, Request, status
 from fastapi.security import HTTPBearer
@@ -40,6 +41,7 @@ class AppTokenClaims:
     expires_at: int | None
     scopes: tuple[str, ...]
     managed: bool
+    collections: dict[str, list[str]] | None = None
 
 
 class CreateAppTokenRequest(BaseModel):
@@ -47,6 +49,17 @@ class CreateAppTokenRequest(BaseModel):
     appName: str | None = Field(default=None, max_length=120)
     scopes: list[str] = Field(default_factory=lambda: ["query:execute"])
     expiresInSeconds: int | None = Field(default=None, ge=300, le=31_536_000)
+    collections: dict[str, list[Literal["read", "write", "manage"]]] = Field(default_factory=dict, max_length=128)
+
+    @field_validator("collections")
+    @classmethod
+    def validate_collections(cls, value):
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", name) or name.startswith("__nexora_") for name in value):
+            raise ValueError("Invalid collection grant name")
+        normalized = {name: sorted(set(operations)) for name, operations in value.items()}
+        if len(json.dumps(normalized).encode()) > 8192:
+            raise ValueError("Collection grants exceed 8KiB")
+        return normalized
 
     @field_validator("scopes")
     @classmethod
@@ -67,6 +80,7 @@ class CreateAppTokenResponse(BaseModel):
     expiresAt: int | None
     createdAt: int
     scopes: list[str]
+    collections: dict[str, list[str]] | None = None
 
 
 _bearer = HTTPBearer(auto_error=False)
@@ -79,6 +93,7 @@ def create_app_token(
     scopes: list[str],
     secret: str,
     expires_in_seconds: int | None = None,
+    collections: dict[str, list[str]] | None = None,
 ) -> CreateAppTokenResponse:
     issued_at = int(time.time())
     expires_at = issued_at + expires_in_seconds if expires_in_seconds is not None else None
@@ -96,6 +111,7 @@ def create_app_token(
         "scopes": normalized_scopes,
         "typ": "app",
         "managed": True,
+        "collections": collections,
     }
     signing_input = f"{_json_b64(header)}.{_json_b64(payload)}"
     signature = hmac.new(
@@ -112,6 +128,7 @@ def create_app_token(
         expiresAt=expires_at,
         createdAt=issued_at,
         scopes=normalized_scopes,
+        collections=collections,
     )
 
 
@@ -134,6 +151,8 @@ async def require_app_token(
         ) from exc
 
     request.state.nexoradb_app_id = claims.app_id
+    if request.app.state.settings.environment.lower() == "production" and claims.collections is None:
+        raise HTTPException(403, "Reissue application token with explicit collection grants")
     request.state.nexoradb_app_name = claims.app_name
     return claims
 
@@ -177,6 +196,14 @@ def decode_app_token(token: str, secret: str) -> AppTokenClaims:
         raise AppTokenError("invalid application token subject")
 
     scopes = payload.get("scopes")
+    collections = payload.get("collections")
+    if collections is not None:
+        if not isinstance(collections, dict) or len(collections) > 128:
+            raise AppTokenError("invalid collection grants")
+        for name, grants in collections.items():
+            if (not isinstance(name, str) or not isinstance(grants, list)
+                    or any(not isinstance(grant, str) or grant not in {"read", "write", "manage"} for grant in grants)):
+                raise AppTokenError("invalid collection grants")
     return AppTokenClaims(
         token_id=str(payload.get("jti") or ""),
         app_id=app_id,
@@ -185,6 +212,7 @@ def decode_app_token(token: str, secret: str) -> AppTokenClaims:
         expires_at=int(expires_at) if expires_at is not None else None,
         scopes=tuple(str(scope) for scope in scopes) if isinstance(scopes, list) else (),
         managed=payload.get("managed") is True,
+        collections=collections,
     )
 
 
