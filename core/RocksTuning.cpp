@@ -59,7 +59,7 @@ rocksdb::Options MakeRocksOptions(const RocksSettings& settings,const std::share
         settings.max_background_jobs>64 || settings.rate_limit_bytes_per_second<0)
         throw std::invalid_argument("invalid RocksDB tuning limits");
     const auto write_buffer=settings.write_buffer_bytes ? settings.write_buffer_bytes :
-        std::min<size_t>(16*1024*1024,resources->memtable_bytes/settings.max_write_buffers);
+        std::min<size_t>(64*1024*1024,resources->memtable_bytes/settings.max_write_buffers);
     if (write_buffer<256*1024 || write_buffer>resources->memtable_bytes/size_t(settings.max_write_buffers))
         throw std::invalid_argument("write buffers exceed shared memtable budget");
     rocksdb::Options options;
@@ -85,6 +85,12 @@ rocksdb::Options MakeRocksOptions(const RocksSettings& settings,const std::share
     rocksdb::BlockBasedTableOptions table;
     table.block_cache=resources->cache; table.block_size=settings.block_size;
     table.cache_index_and_filter_blocks=true; table.cache_index_and_filter_blocks_with_high_priority=true;
+    // Monolithic index/filter blocks can exceed a strict LRU cache shard,
+    // aborting table verification and making compaction fail permanently.
+    // Keep metadata demand-paged instead of relaxing the memory budget.
+    table.index_type=rocksdb::BlockBasedTableOptions::kTwoLevelIndexSearch;
+    table.partition_filters=true;
+    table.metadata_block_size=4096;
     table.checksum=rocksdb::ChecksumType::kCRC32c;
     if (settings.bloom_filter) table.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10,false));
     table.whole_key_filtering=true;

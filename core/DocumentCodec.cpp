@@ -3,6 +3,7 @@
 #include <bson/bson.h>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -30,7 +31,7 @@ private:
 
 bool ValidateDepth(const bson_t& document,
                    std::uint32_t depth,
-                   std::string& error) {
+                   std::string& error,DocumentCodec::BsonIdentity* identity=nullptr) {
     if (depth > DocumentCodec::kMaxNestingDepth) {
         error = "document nesting exceeds the limit of " +
                 std::to_string(DocumentCodec::kMaxNestingDepth);
@@ -43,7 +44,11 @@ bool ValidateDepth(const bson_t& document,
         return false;
     }
 
-    std::unordered_set<std::string_view> field_names;
+    // Most documents have few fields. Avoid a heap allocation per field while
+    // retaining hash-based checking for large/untrusted objects.
+    std::array<std::string_view,16> small_names;
+    std::size_t name_count=0;
+    std::unordered_set<std::string_view> large_names;
 
     while (bson_iter_next(&iterator)) {
         const std::string_view field_name(bson_iter_key(&iterator));
@@ -51,9 +56,27 @@ bool ValidateDepth(const bson_t& document,
             error = "field name exceeds the 1 KiB limit";
             return false;
         }
-        if (!field_names.insert(field_name).second) {
+        bool unique;
+        if (name_count < small_names.size()) {
+            unique=std::find(small_names.begin(),small_names.begin()+name_count,field_name)==
+                    small_names.begin()+name_count;
+            if (unique) small_names[name_count++]=field_name;
+        } else {
+            if (large_names.empty()) large_names.insert(small_names.begin(),small_names.end());
+            unique=large_names.insert(field_name).second;
+        }
+        if (!unique) {
             error = "duplicate field name: " + std::string(field_name);
             return false;
+        }
+        if(identity && depth==1 && field_name=="_id") {
+            identity->found=true;
+            identity->is_string=BSON_ITER_HOLDS_UTF8(&iterator);
+            if(identity->is_string) {
+                uint32_t length=0;
+                const auto* value=bson_iter_utf8(&iterator,&length);
+                identity->value=std::string_view(value,length);
+            }
         }
         if (BSON_ITER_HOLDS_DOUBLE(&iterator) &&
             !std::isfinite(bson_iter_double(&iterator))) {
@@ -213,6 +236,24 @@ DocumentCodec::Result DocumentCodec::DecodeToJson(
             return {false, {}, "unsupported Nexora document envelope"};
     }
     return {false, {}, "unknown document format"};
+}
+
+DocumentCodec::Result DocumentCodec::EncodeBson(std::string_view payload,BsonIdentity* identity) {
+    if(identity) *identity=BsonIdentity{};
+    if (payload.size() < 5 || payload.size() > kMaxDocumentBytes)
+        return {false, {}, "BSON payload size is outside the supported range"};
+    bson_t document;
+    if (!bson_init_static(&document, reinterpret_cast<const uint8_t*>(payload.data()),
+                          static_cast<uint32_t>(payload.size())))
+        return {false, {}, "invalid BSON payload"};
+    bson_error_t validation_error{};
+    if (!bson_validate_with_error(&document, BSON_VALIDATE_UTF8, &validation_error))
+        return {false, {}, "invalid BSON payload: " + std::string(validation_error.message)};
+    std::string error;
+    if (!ValidateDepth(document, 1, error,identity)) return {false, {}, std::move(error)};
+    std::string stored(kBsonEnvelope.data(), kBsonEnvelope.size());
+    stored.append(payload);
+    return {true, std::move(stored), {}};
 }
 
 } // namespace nexora::core

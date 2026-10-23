@@ -411,10 +411,13 @@ namespace nexora {
             static DBResult InspectStore(const std::string& path);
             void PauseDocumentMigration(); // Offline maintenance; no active caller transaction.
             std::string OperationMetrics() const;
+            void ConfigureQueryTuning(bool read_cache_admission, bool smart_indexes) noexcept;
+            std::string QueryTuning() const;
             std::string DrainSlowQueries();
             void ConfigureSlowQueries(uint64_t threshold_us,size_t capacity=128);
             std::string HealthReport() const;
             DBResult PrepareShutdown(); // Caller must first stop accepting requests.
+            std::string MemoryReport(); // Estimates overlap; not a total RSS accounting.
 
             /** Test-only one-shot fault injection for atomicity tests. */
             void SetMutationFaultPointForTesting(
@@ -582,6 +585,18 @@ namespace nexora {
              */
             DBResult InsertMany(const std::string&              collection_name,
                                 const std::vector<std::string>& bson_documents);
+            // Raw BSON documents; same atomicity, constraints and durability as JSON.
+            DBResult InsertManyBson(const std::string& collection_name,
+                                    const std::vector<std::string>& documents);
+            // Caller pins immutable input storage until this synchronous call
+            // returns. Validation and owned storage encoding are unchanged.
+            DBResult InsertManyBsonViews(const std::string& collection_name,
+                                        const std::vector<std::string_view>& documents);
+            // Explicit bulk-ingestion mode: excludes foreground mutations,
+            // active transactions and migration for one bounded atomic batch.
+            // Complex schemas/FKs/unique/building indexes use the normal path.
+            DBResult InsertManyBsonIngest(const std::string& collection_name,
+                                         const std::vector<std::string_view>& documents);
 
             /**
              * @brief Bulk insert با semantics صریح.
@@ -999,8 +1014,10 @@ namespace nexora {
             // 6.17  پیاده‌سازی‌های داخلی
             // ──────────────────────────────────────────────────────────
 
+            friend struct PageSessionTestAccess;
             std::string db_path_;
             mutable OperationsState operations_;
+            std::atomic<uint8_t> query_tuning_{3}; // Read admission + query index selection. Never disables index maintenance.
             RocksSettings rocks_settings_;
             std::shared_ptr<RocksResources> rocks_resources_;
             mutable std::atomic<uint64_t> multiget_calls_{0},multiget_keys_{0};
@@ -1023,13 +1040,20 @@ namespace nexora {
             std::jthread document_migration_worker_;
 
             struct PageSession {
-                const rocksdb::Snapshot* snapshot = nullptr;
+                std::shared_ptr<const rocksdb::Snapshot> snapshot;
+                std::mutex scan_mutex;
                 std::string collection;
                 nexora::query::Condition condition;
                 std::chrono::steady_clock::time_point expires_at;
             };
             std::mutex page_sessions_mutex_;
-            std::unordered_map<std::string, PageSession> page_sessions_;
+            std::unordered_map<std::string, std::shared_ptr<PageSession>> page_sessions_;
+            std::jthread page_reaper_worker_;
+            // Accessed only under page_sessions_mutex_; no public clock control.
+            std::chrono::steady_clock::duration page_clock_offset_for_testing_{};
+            std::chrono::steady_clock::time_point PageSessionNow() const {
+                return std::chrono::steady_clock::now()+page_clock_offset_for_testing_;
+            }
 
             struct MutationMetadata {
                 SchemaDefinition schema;
@@ -1075,7 +1099,7 @@ namespace nexora {
 
             class MutationBuilder;
             DBResult InsertOneImpl(const std::string&,const std::string&);
-            DBResult InsertManyImpl(const std::string&,const std::vector<std::string>&);
+            DBResult InsertManyImpl(const std::string&,const std::vector<std::string_view>&, bool bson_input = false);
             DBResult FindByIdImpl(const std::string&,const std::string&);
             DBResult UpdateByIdImpl(const std::string&,const std::string&,const nexora::query::UpdateSpec&);
             DBResult DeleteByIdImpl(const std::string&,const std::string&);
@@ -1112,7 +1136,7 @@ namespace nexora {
                     const std::string& json_document,
                     std::string& stored_document);
             static rocksdb::Status DecodeStoredDocument(
-                    const std::string& stored_document,
+                      std::string_view stored_document,
                     std::string& json_document);
             rocksdb::Status MigrateLegacyDocumentsChunk(
                     std::size_t max_documents,
@@ -1156,7 +1180,7 @@ namespace nexora {
                                               std::string&       error_out) const;
 
             bool ApplyInsertDefaults(std::string& document, const SchemaDefinition& schema,
-                                     std::string& error) const;
+                                     std::string& error, std::string* encoded = nullptr) const;
             bool ValidateDocument(const std::string&      bson_document,
                                   const SchemaDefinition& schema,
                                   std::string&            error_out) const;
