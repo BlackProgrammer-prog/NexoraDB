@@ -1,0 +1,23 @@
+{
+  "records": 100000000,
+  "seed": 2026,
+  "batch_size": 1000,
+  "databases": ["nexoradb", "postgresql", "mongodb"],
+  "workloads": ["ycsb-a", "ycsb-b", "ycsb-c", "indexed-read"],
+  "clients": [1, 10, 50, 100, 250, 500],
+  "working_sets": [1.0],
+  "index_policies": ["before-load", "after-load"],
+  "repetitions": 5,
+  "warmup_seconds": 60,
+  "measurement_seconds": 300,
+  "max_operations": null,
+  "load_mode": "closed-loop",
+  "target_rate": null,
+  "max_queue_delay_seconds": 1,
+  "distribution": "uniform",
+  "zipf_theta": 0.99,
+  "cache_mode": "warm-conditioned",
+  "comparison_scope": "local-deployments",
+  "sample_interval_seconds": 1,
+  "job_timeout_seconds": 1209600
+}
