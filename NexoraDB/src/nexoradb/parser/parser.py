@@ -35,6 +35,29 @@ from lark.exceptions import (
 
 from .transformer import NexoraQLTransformer
 from .errors import NexoraQLParseError
+from .syntax_cache import SyntaxCache
+
+_SYNTAX_CACHE = SyntaxCache()
+
+
+def configure_parser_cache(enabled=True, clear=False):
+    return _SYNTAX_CACHE.configure(enabled, clear)
+
+
+def parser_cache_stats():
+    return _SYNTAX_CACHE.stats()
+
+
+def _build_tree(parser, text):
+    tree = parser.parse(text)
+    pending, count = [(tree, 0)], 0
+    while pending:
+        node, depth = pending.pop()
+        count += 1
+        if depth > 256 or count > 100000:
+            raise NexoraQLParseError('Parse tree complexity limit exceeded')
+        pending.extend((child, depth + 1) for child in getattr(node, 'children', ()))
+    return tree
 
 _GRAMMAR_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "grammar", "nexoraql.lark"
@@ -130,7 +153,7 @@ def parse(text: str, parameters: dict | None = None) -> list:
     parser = _get_parser()
 
     try:
-        tree = parser.parse(text)
+        tree = _SYNTAX_CACHE.get_or_build(text, lambda: _build_tree(parser, text))
     except UnexpectedToken as e:
         expected = ", ".join(sorted(e.expected)[:8]) if e.expected else "?"
         raise NexoraQLParseError(
@@ -152,14 +175,6 @@ def parse(text: str, parameters: dict | None = None) -> list:
         ) from None
 
     try:
-        pending = [(tree, 0)]
-        count = 0
-        while pending:
-            node, depth = pending.pop()
-            count += 1
-            if depth > 256 or count > 100000:
-                raise NexoraQLParseError("Parse tree complexity limit exceeded")
-            pending.extend((child, depth + 1) for child in getattr(node, "children", ()))
         result = NexoraQLTransformer(parameters).transform(tree)
         _validate_values(result)
         return result

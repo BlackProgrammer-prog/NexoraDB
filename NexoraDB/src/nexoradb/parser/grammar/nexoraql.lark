@@ -56,6 +56,13 @@ start: (statement ";")+
           | show_jobs
           | system_status
           | system_info
+          | show_performance
+          | set_performance
+          | show_index_advice
+
+show_performance: "SHOW"i "PERFORMANCE"i
+set_performance: "SET"i "PERFORMANCE"i NAME "=" value
+show_index_advice: "SHOW"i "INDEX"i "ADVICE"i
 
 // ──────────────────────────────────────────────────────────────
 // §1  DDL — Collections

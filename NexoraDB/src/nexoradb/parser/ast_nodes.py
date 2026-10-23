@@ -428,3 +428,19 @@ class SystemStatus:
 @dataclass
 class SystemInfo:
     pass
+
+
+@dataclass
+class ShowPerformance:
+    pass
+
+
+@dataclass
+class SetPerformance:
+    option: str
+    enabled: bool
+
+
+@dataclass
+class ShowIndexAdvice:
+    pass
