@@ -1,0 +1,24 @@
+services:
+  postgresql:
+    image: postgres:17.0
+    environment:
+      POSTGRES_DB: scale_lab
+      POSTGRES_USER: scale_lab
+      POSTGRES_PASSWORD: ${SCALE_LAB_POSTGRES_PASSWORD:?Set SCALE_LAB_POSTGRES_PASSWORD}
+    ports: ['127.0.0.1:55432:5432']
+    volumes: ['postgres_data:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U scale_lab -d scale_lab']
+      interval: 5s
+      retries: 20
+  mongodb:
+    image: mongo:8.0.3
+    ports: ['127.0.0.1:57017:27017']
+    volumes: ['mongo_data:/data/db']
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand({ping:1})']
+      interval: 5s
+      retries: 20
+volumes:
+  postgres_data:
+  mongo_data:
