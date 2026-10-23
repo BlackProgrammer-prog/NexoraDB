@@ -62,6 +62,17 @@ jobs:
             cp "$history/full-history.jsonl" perf-output/full-history.jsonl
             exit "$status"
           fi
+      - name: Weekly authenticated network soak
+        if: always() && (inputs.full || github.event_name == 'schedule')
+        env:
+          FULL: ${{ inputs.full }}
+        run: |
+          if [ "$FULL" = true ] || [ "$(date -u +%u)" = 7 ]; then
+            python3 -m venv "${RUNNER_TEMP}/nexora-soak-venv"
+            "${RUNNER_TEMP}/nexora-soak-venv/bin/python" -m pip install fastapi uvicorn 'httpx[http2]>=0.28,<1' 'anyio>=4,<5' python-socketio cryptography argon2-cffi lark
+            install -Dm755 build/release/nexoradb.cpython-310-x86_64-linux-gnu.so NexoraDB/src/nexoradb/native/nexoradb.cpython-310-x86_64-linux-gnu.so
+            "${RUNNER_TEMP}/nexora-soak-venv/bin/python" scripts/benchmark_network_soak.py --seconds 600 > perf-output/network-soak.json
+          fi
       - name: Archive raw samples and chart
         if: always()
         uses: actions/upload-artifact@v4
