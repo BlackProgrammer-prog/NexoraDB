@@ -34,6 +34,8 @@ def worker():
         engine = nexoradb.DocEngine(path)
         assert engine.create_collection("items").success
         tx = engine.begin_transaction()
+        # Regression: nested gil_scoped_release here used to abort CPython.
+        assert not engine.find_by_id_tx(tx, "items", "missing").success
         started, finished = threading.Event(), threading.Event()
         results = []
 
@@ -82,6 +84,28 @@ def worker():
             documents = list(stream)
         assert len(documents) == 200
         assert len({document["_id"] for document in documents}) == 200
+        import json
+        special = {"_id": "raw", "value": 'فارسی },{ [ ] \\"\n',
+                   "nested": [{"list": [True, None, {"a": "}"}]}]}
+        assert engine.insert_one("items", json.dumps(special)).success
+        with engine.iter_documents("items", page_size=7, max_page_bytes=1024) as raw:
+            raw_documents = []
+            while True:
+                chunk, count = raw.next_ndjson_batch(3)
+                assert count <= 3
+                lines = chunk.splitlines()
+                assert len(lines) == count
+                raw_documents.extend(json.loads(line)["document"] for line in lines)
+                if not count:
+                    break
+            assert len(raw_documents) == 201
+            assert special in raw_documents
+            try:
+                next(raw)
+                raise AssertionError("mixed cursor modes accepted")
+            except RuntimeError:
+                pass
+        assert engine.delete_by_id("items", "raw").success
         stream = engine.iter_documents("items", page_size=1)
         assert "_id" in next(stream)
         stream.close()
