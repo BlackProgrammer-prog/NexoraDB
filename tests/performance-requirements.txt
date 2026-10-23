@@ -1,0 +1,8 @@
+pytest>=8,<9
+pymongo>=4.6,<5
+fastapi>=0.111,<1
+httpx[http2]>=0.28,<1
+lark>=1.1.9,<2
+python-socketio>=5.11,<6
+argon2-cffi>=23.1
+cryptography>=42
