@@ -38,6 +38,7 @@
 
 // ── DocEngine ──
 #include "core/DocEngine.h"
+#include "core/DocumentCodec.h"
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
 
@@ -75,6 +76,46 @@ static py::dict result_to_dict(const DBResult& r) {
     return d;
 }
 
+// Concatenated BSON documents, each carrying its own little-endian length.
+// Pin the immutable Python buffer for the entire synchronous native call.
+static DBResult insert_bson_buffer(DocEngine& engine,const std::string& collection,py::bytes buffer) {
+    char* data=nullptr; Py_ssize_t length=0;
+    if(PyBytes_AsStringAndSize(buffer.ptr(),&data,&length)<0) throw py::error_already_set();
+    if(length<=0 || length>64*1024*1024) throw std::invalid_argument("BSON batch buffer must be 1..64MiB");
+    std::vector<std::string_view> documents;
+    size_t offset=0;
+    while(offset<size_t(length)) {
+        if(size_t(length)-offset<4) throw std::invalid_argument("truncated BSON batch length");
+        uint32_t size=0;
+        for(unsigned i=0;i<4;++i) size|=uint32_t(uint8_t(data[offset+i]))<<(i*8);
+        if(size<5 || size>DocumentCodec::kMaxDocumentBytes || size>size_t(length)-offset)
+            throw std::invalid_argument("invalid BSON batch document length");
+        if(documents.size()>=10000) throw std::invalid_argument("BSON batch exceeds 10000 documents");
+        documents.emplace_back(data+offset,size); offset+=size;
+    }
+    py::gil_scoped_release release;
+    return engine.InsertManyBsonViews(collection,documents);
+}
+
+static bool json_bson_types(bson_iter_t& iterator,bool array=false) {
+    size_t position=0;
+    while(bson_iter_next(&iterator)) {
+        if(array && std::string_view(bson_iter_key(&iterator))!=std::to_string(position++)) return false;
+        switch(bson_iter_type(&iterator)) {
+            case BSON_TYPE_DOCUMENT: case BSON_TYPE_ARRAY: {
+                bson_iter_t child;
+                if(!bson_iter_recurse(&iterator,&child) ||
+                   !json_bson_types(child,BSON_ITER_HOLDS_ARRAY(&iterator))) return false;
+                break;
+            }
+            case BSON_TYPE_DOUBLE: case BSON_TYPE_UTF8: case BSON_TYPE_BOOL:
+            case BSON_TYPE_NULL: case BSON_TYPE_INT32: case BSON_TYPE_INT64: break;
+            default: return false;
+        }
+    }
+    return true;
+}
+
 // Lazy, page-bounded document output. Python owns this object; keep_alive on
 // the factory pins DocEngine. One consumer at a time, including close().
 class DocumentStream {
@@ -84,6 +125,7 @@ class DocumentStream {
     uint32_t page_size_;
     size_t max_bytes_,offset_=0;
     bool ended_=false;
+    bool object_mode_=false, raw_mode_=false;
     py::list page_;
     std::mutex mutex_;
 public:
@@ -97,6 +139,8 @@ public:
     py::object next() {
         std::unique_lock lock(mutex_,std::try_to_lock);
         if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
+        if (raw_mode_) throw std::runtime_error("cannot mix object and raw cursor modes");
+        object_mode_=true;
         if (offset_>=py::len(page_)) {
             if (ended_) throw py::stop_iteration();
             PageResult result;
@@ -115,6 +159,57 @@ public:
             if (!py::len(page_)) throw py::stop_iteration();
         }
         return page_[offset_++];
+    }
+    // Owned, bounded NDJSON output: avoid Python JSON decode/encode entirely.
+    // This reduces copies; it is deliberately NOT a borrowed RocksDB buffer.
+    py::tuple next_ndjson_batch(uint32_t requested) {
+        std::unique_lock lock(mutex_,std::try_to_lock);
+        if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
+        if (object_mode_) throw std::runtime_error("cannot mix object and raw cursor modes");
+        if (!requested || requested>4096) throw std::invalid_argument("batch limit must be 1..4096");
+        raw_mode_=true;
+        if (ended_) return py::make_tuple(py::bytes(),0);
+        PageResult result;
+        std::string output;
+        uint32_t count=0;
+        {
+            py::gil_scoped_release release;
+            result=engine_->FindPage(collection_,condition_,std::min(requested,page_size_),token_,max_bytes_);
+            if (result.success) {
+                // FindPage emits a JSON array of objects from the trusted
+                // codec. Split only top-level objects, respecting escapes,
+                // strings and nested arrays/objects (never delimiter replace).
+                output.reserve(result.data.size()+12*std::min(requested,page_size_));
+                size_t start=0;
+                int depth=0;
+                bool quoted=false, escaped=false;
+                for (size_t i=1;i+1<result.data.size();++i) {
+                    const char c=result.data[i];
+                    if (quoted) {
+                        if (escaped) escaped=false;
+                        else if (c=='\\') escaped=true;
+                        else if (c=='"') quoted=false;
+                        continue;
+                    }
+                    if (c=='"') { quoted=true; continue; }
+                    if (c=='{' || c=='[') { if (!depth) start=i; ++depth; }
+                    else if (c=='}' || c==']') {
+                        if (--depth==0) {
+                            output+="{\"document\":";
+                            output.append(result.data,start,i-start+1);
+                            output+="}\n";
+                            ++count;
+                        }
+                    }
+                }
+            }
+        }
+        if (!result.success) {
+            engine_->ClosePage(token_); token_.clear(); ended_=true;
+            throw std::runtime_error(result.error_msg);
+        }
+        token_=std::move(result.continuation_token); ended_=token_.empty();
+        return py::make_tuple(py::bytes(output),count);
     }
     void close() {
         std::unique_lock lock(mutex_,std::try_to_lock);
@@ -185,6 +280,22 @@ static const char* wal_op_to_string(WalOpType op) {
 // ══════════════════════════════════════════════════════════════
 
 PYBIND11_MODULE(nexoradb, m) {
+    m.def("decode_bson_json",[](py::bytes buffer) {
+        const std::string_view bytes(PyBytes_AS_STRING(buffer.ptr()),PyBytes_GET_SIZE(buffer.ptr()));
+        DocumentCodec::Result decoded;
+        {
+            py::gil_scoped_release release;
+            auto validated=DocumentCodec::EncodeBson(bytes);
+            if(!validated.success) throw std::invalid_argument(validated.error);
+            bson_t document; bson_iter_t iterator;
+            if(!bson_init_static(&document,reinterpret_cast<const uint8_t*>(bytes.data()),bytes.size()) ||
+               !bson_iter_init(&iterator,&document) || !json_bson_types(iterator))
+                throw std::invalid_argument("BSON query envelope must contain only JSON-compatible types and canonical arrays");
+            decoded=DocumentCodec::DecodeToJson(validated.value);
+        }
+        if(!decoded.success) throw std::invalid_argument(decoded.error);
+        return decoded.value;
+    },py::arg("buffer"));
 #ifdef NEXORA_BUILD_GRAPH
     py::class_<SnapshotEdgeStream>(m,"SnapshotEdgeStream")
         .def("__iter__",[](SnapshotEdgeStream& stream)->SnapshotEdgeStream& { return stream; },py::return_value_policy::reference_internal)
@@ -193,6 +304,7 @@ PYBIND11_MODULE(nexoradb, m) {
     py::class_<DocumentStream>(m,"DocumentStream")
         .def("__iter__",[](DocumentStream& stream)->DocumentStream& { return stream; },py::return_value_policy::reference_internal)
         .def("__next__",&DocumentStream::next)
+        .def("next_ndjson_batch",&DocumentStream::next_ndjson_batch,py::arg("limit")=128)
         .def("close",&DocumentStream::close)
         .def("__enter__",[](DocumentStream& stream)->DocumentStream& { return stream; },py::return_value_policy::reference_internal)
         .def("__exit__",[](DocumentStream& stream,py::object,py::object,py::object) { stream.close(); });
@@ -741,10 +853,13 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_static("inspect_store",&DocEngine::InspectStore,py::call_guard<py::gil_scoped_release>())
             .def("pause_document_migration",&DocEngine::PauseDocumentMigration,py::call_guard<py::gil_scoped_release>())
             .def("operation_metrics",&DocEngine::OperationMetrics,py::call_guard<py::gil_scoped_release>())
+            .def("configure_query_tuning",&DocEngine::ConfigureQueryTuning,py::arg("read_cache_admission"),py::arg("smart_indexes"),py::call_guard<py::gil_scoped_release>())
+            .def("query_tuning",&DocEngine::QueryTuning,py::call_guard<py::gil_scoped_release>())
             .def("drain_slow_queries",&DocEngine::DrainSlowQueries,py::call_guard<py::gil_scoped_release>())
             .def("configure_slow_queries",&DocEngine::ConfigureSlowQueries,py::arg("threshold_us"),py::arg("capacity")=128,py::call_guard<py::gil_scoped_release>())
             .def("health_report",&DocEngine::HealthReport,py::call_guard<py::gil_scoped_release>())
             .def("prepare_shutdown",&DocEngine::PrepareShutdown,py::call_guard<py::gil_scoped_release>())
+            .def("memory_report",&DocEngine::MemoryReport,py::call_guard<py::gil_scoped_release>())
             .def("is_healthy", &DocEngine::IsHealthy,
                  "بررسی سلامت اتصال RocksDB")
 
@@ -774,11 +889,11 @@ PYBIND11_MODULE(nexoradb, m) {
                  py::arg("collection"),
                  "حذف Collection (برگشت‌ناپذیر)")
 
-            .def("collection_exists", &DocEngine::CollectionExists,
+            .def("collection_exists", &DocEngine::CollectionExists,py::call_guard<py::gil_scoped_release>(),
                  py::arg("collection"),
                  "بررسی وجود Collection → bool")
 
-            .def("list_collections", &DocEngine::ListCollections,
+            .def("list_collections", &DocEngine::ListCollections,py::call_guard<py::gil_scoped_release>(),
                  "لیست همه Collections → list[str]")
 
             .def("set_schema", [](DocEngine& e,std::string name,SchemaDefinition schema) {
@@ -810,6 +925,7 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("get_indexes",
                  [](DocEngine& e, const std::string& col) {
+                     py::gil_scoped_release release;
                      return e.GetIndexes(col);
                  },
                  py::arg("collection"),
@@ -828,6 +944,7 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("get_foreign_keys",
                  [](DocEngine& e, const std::string& col) {
+                     py::gil_scoped_release release;
                      return e.GetForeignKeys(col);
                  },
                  py::arg("collection"),
@@ -873,6 +990,28 @@ PYBIND11_MODULE(nexoradb, m) {
                 DBResult: data = '["id1","id2","id3"]'
             )doc")
 
+            .def("insert_many_bson",
+                 [](DocEngine& e, const std::string& col,
+                    const std::vector<py::bytes>& docs) {
+                     std::vector<std::string_view> encoded;
+                     encoded.reserve(docs.size());
+                     // Strong references pin immutable CPython bytes until
+                     // the synchronous GIL-free call returns. Never borrow
+                     // mutable bytearray/memoryview exporters in this path.
+                     for (const auto& doc : docs) encoded.emplace_back(PyBytes_AS_STRING(doc.ptr()),PyBytes_GET_SIZE(doc.ptr()));
+                     py::gil_scoped_release rel;
+                     return e.InsertManyBsonViews(col, encoded);
+                 }, py::arg("collection"), py::arg("bson_list"),
+                 "Atomic validated BSON insertion; preserves JSON insert constraints and durability.")
+            .def("insert_many_bson_buffer",&insert_bson_buffer,py::arg("collection"),py::arg("buffer"),
+                 "Atomic validated concatenated BSON batch from one immutable bytes buffer (max 64MiB/10000 docs).")
+            .def("insert_many_bson_ingest",[](DocEngine& engine,const std::string& collection,const std::vector<py::bytes>& docs) {
+                std::vector<std::string_view> views;views.reserve(docs.size());
+                for(const auto& doc:docs) views.emplace_back(PyBytes_AS_STRING(doc.ptr()),PyBytes_GET_SIZE(doc.ptr()));
+                py::gil_scoped_release release;
+                return engine.InsertManyBsonIngest(collection,views);
+            },py::arg("collection"),py::arg("documents"),
+              "Explicit exclusive ingestion; bounded atomic batch, ordinary-path fallback; success data is acknowledged record count, not IDs.")
             .def("insert_many_bulk",
                  [](DocEngine& e, const std::string& col,
                     const std::vector<std::string>& docs,
@@ -1042,7 +1181,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("get_ram_usage_bytes", &DocEngine::GetRamUsageBytes,
                  "RAM فعلی مصرف‌شده توسط process دیتابیس، بر حسب byte")
 
-            .def("get_disk_usage_bytes", &DocEngine::GetDiskUsageBytes,
+            .def("get_disk_usage_bytes", &DocEngine::GetDiskUsageBytes,py::call_guard<py::gil_scoped_release>(),
                  "فضای دیسک اشغال‌شده توسط دایرکتوری دیتابیس، بر حسب byte")
 
             .def("create_internal_user", &DocEngine::CreateInternalUser,
@@ -1076,7 +1215,8 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("get_schema",
                  [](DocEngine& e, const std::string& col) -> py::object {
-                     auto s = e.GetSchema(col);
+                     std::optional<SchemaDefinition> s;
+                     { py::gil_scoped_release release; s = e.GetSchema(col); }
                      if (!s) return py::none();
                      return py::cast(*s);
                  },
@@ -1156,7 +1296,8 @@ PYBIND11_MODULE(nexoradb, m) {
                     // ── Transaction ──
             .def("begin_transaction",
                  [](DocEngine& e) -> py::object {
-                     auto tx = e.BeginTransaction();
+                     std::unique_ptr<TxHandle> tx;
+                     { py::gil_scoped_release release; tx = e.BeginTransaction(); }
                      if (!tx) return py::none();
                      return py::cast(tx.release(),
                                      py::return_value_policy::take_ownership);
@@ -1166,12 +1307,14 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("commit_transaction",
                  [](DocEngine& e, TxHandle* tx) -> DBResult {
                      if (!tx) return DBResult::Err("null transaction");
+                     py::gil_scoped_release release;
                      return e.CommitTransaction(*tx);
                  }, py::arg("tx"))
 
             .def("rollback_transaction",
                  [](DocEngine& e, TxHandle* tx) -> DBResult {
                      if (!tx) return DBResult::Err("null transaction");
+                     py::gil_scoped_release release;
                      return e.RollbackTransaction(*tx);
                  }, py::arg("tx"))
 
@@ -1211,7 +1354,7 @@ PYBIND11_MODULE(nexoradb, m) {
                  [](DocEngine& e, TxHandle* tx,
                     const std::string& col, const std::string& id) -> DBResult {
                      if (!tx) return DBResult::Err("null transaction");
-                     py::gil_scoped_release rel;
+                     py::gil_scoped_release release;
                      return e.FindByIdTx(*tx, col, id);
                  },
                  py::arg("tx"), py::arg("collection"), py::arg("doc_id"),
