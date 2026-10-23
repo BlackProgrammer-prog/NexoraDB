@@ -15,6 +15,9 @@ def _split_csv(value: str) -> list[str]:
 
 @dataclass(frozen=True)
 class AdminApiSettings:
+    rocks_memory_mb: int = field(default_factory=lambda: int(os.getenv('NEXORADB_ROCKS_MEMORY_MB', '256')))
+    rocks_cache_mb: int = field(default_factory=lambda: int(os.getenv('NEXORADB_ROCKS_CACHE_MB', '0')))
+    api_max_inflight: int = field(default_factory=lambda: int(os.getenv("NEXORADB_API_MAX_INFLIGHT", "16")))
     db_path: Path = field(
         default_factory=lambda: Path(os.getenv("NEXORADB_DB_PATH", "./nexoradb-data"))
     )
@@ -51,6 +54,11 @@ class AdminApiSettings:
     )
 
     def validate_for_startup(self) -> None:
+        if (type(self.rocks_memory_mb) is not int or not 4 <= self.rocks_memory_mb <= 16384
+                or type(self.rocks_cache_mb) is not int or not 0 <= self.rocks_cache_mb < self.rocks_memory_mb):
+            raise RuntimeError('Rocks memory must be 4..16384 MiB; cache must be 0 (half) or below total budget')
+        if not 1 <= self.api_max_inflight <= 1024:
+            raise RuntimeError("NEXORADB_API_MAX_INFLIGHT must be 1..1024")
         if self.environment.lower() not in {"development", "test", "production"}:
             raise RuntimeError("NEXORADB_ENV must be development, test, or production")
         if self.environment.lower() == "production" and (
