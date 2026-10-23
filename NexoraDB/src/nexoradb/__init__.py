@@ -29,6 +29,7 @@ def _load_bundled_native() -> None:
         if name.startswith("__") and name != "__version__":
             continue
         setattr(package, name, getattr(native_module, name))
+    package.__native_module_path__ = str(native_path.resolve())
 
 
 _load_bundled_native()
