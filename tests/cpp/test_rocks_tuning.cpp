@@ -1,15 +1,204 @@
 #include "TestTempDir.h"
 #include "core/DocEngine.h"
 #include "core/IndexCodec.h"
+#include "core/DocumentCodec.h"
 #include <rocksdb/slice_transform.h>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <rocksdb/write_batch.h>
+#include <rocksdb/table.h>
+#include <bson/bson.h>
 using namespace nexora::core;
 using namespace nexora::query;
 
+TEST(RocksTuning, UnchangedIndexTuplesAvoidRewriteAndQueryControlsKeepConstraints) {
+    TestTempDir temp("smart_update_index_tuning");
+    DocEngine engine(temp.path().string());
+    ASSERT_TRUE(engine.CreateCollection("items").success);
+    IndexDefinition index; index.index_name="unique_name"; index.fields={"name"}; index.type=IndexType::Unique;
+    ASSERT_TRUE(engine.CreateIndex("items",index).success);
+    const std::string name(200,'a'), replacement(200,'b');
+    ASSERT_TRUE(engine.InsertOne("items",nlohmann::json({{"_id","one"},{"name",name},{"status","a"}}).dump()).success);
+    auto before=engine.GetRocksMetrics().logical_write_bytes;
+    UpdateSpec update; update.Set("status","b");
+    ASSERT_TRUE(engine.UpdateById("items","one",update).success);
+    const auto unchanged=engine.GetRocksMetrics().logical_write_bytes-before;
+    before=engine.GetRocksMetrics().logical_write_bytes;
+    UpdateSpec rename; rename.Set("name",replacement);
+    ASSERT_TRUE(engine.UpdateById("items","one",rename).success);
+    const auto changed=engine.GetRocksMetrics().logical_write_bytes-before;
+    EXPECT_LT(unchanged,changed);
+    for (bool enabled: {false,true}) {
+        engine.ConfigureQueryTuning(enabled,enabled);
+        auto tuning=nlohmann::json::parse(engine.QueryTuning());
+        EXPECT_EQ(tuning["smart_indexes"],enabled);
+        auto found=engine.FindMany("items",Condition::Leaf("name",Op::EQ,replacement),10,0);
+        ASSERT_TRUE(found.success)<<found.error_msg;
+        EXPECT_EQ(nlohmann::json::parse(found.data).size(),1U);
+        auto plan=engine.ExplainPlan("items",Condition::Leaf("name",Op::EQ,replacement));
+        ASSERT_TRUE(plan.success)<<plan.error_msg;
+        EXPECT_EQ(nlohmann::json::parse(plan.data)["scan_type"]=="full_scan",!enabled);
+        EXPECT_FALSE(engine.InsertOne("items",nlohmann::json({{"_id","duplicate"},{"name",replacement}}).dump()).success);
+    }
+    auto old=engine.FindMany("items",Condition::Leaf("name",Op::EQ,name),10,0);
+    ASSERT_TRUE(old.success);
+    EXPECT_TRUE(nlohmann::json::parse(old.data).empty());
+}
+
+TEST(RocksTuning, DropCollectionUsesBoundedAtomicRangeDeletesAndReopens) {
+    TestTempDir temp("bounded_collection_drop");
+    RocksSettings settings; settings.durability=DocumentDurability::Durable;
+    settings.memory_budget_bytes=8*1024*1024;
+    {
+        DocEngine engine(temp.path().string(),{},settings);
+        ASSERT_TRUE(engine.CreateCollection("drop").success);
+        ASSERT_TRUE(engine.CreateCollection("drop_neighbor").success);
+        ASSERT_TRUE(engine.InsertOne("drop_neighbor",R"({"_id":"keep","value":42})").success);
+        IndexDefinition index; index.index_name="by_name"; index.fields={"name"}; index.type=IndexType::Unique;
+        ASSERT_TRUE(engine.CreateIndex("drop",index).success);
+        for (int batch=0;batch<80;++batch) {
+            std::vector<std::string> values;
+            for (int item=0;item<500;++item) {
+                auto id=std::to_string(batch*500+item);
+                values.push_back("{\"_id\":\""+id+"\",\"name\":\"name_"+id+"\"}");
+            }
+            auto inserted=engine.InsertMany("drop",values);
+            ASSERT_TRUE(inserted.success)<<inserted.error_msg;
+        }
+        ASSERT_TRUE(engine.FlushStorage().success);
+        const auto before=engine.GetRocksMetrics().wal_write_bytes;
+        auto dropped=engine.DropCollection("drop");
+        ASSERT_TRUE(dropped.success)<<dropped.error_msg;
+        // Seven records (five ranges plus two exact metadata keys), not 80,000
+        // point tombstones. This bound detects the old unbounded batch algorithm.
+        const auto bytes=engine.GetRocksMetrics().wal_write_bytes-before;
+        EXPECT_GT(bytes,0U);
+        EXPECT_LT(bytes,16*1024U);
+        EXPECT_FALSE(engine.CollectionExists("drop"));
+        EXPECT_TRUE(engine.FindById("drop_neighbor","keep").success);
+        EXPECT_FALSE(engine.DropCollection("drop").success);
+        ASSERT_TRUE(engine.CreateCollection("drop").success);
+        EXPECT_EQ(engine.Count("drop",Condition{}).data,"0");
+        EXPECT_TRUE(engine.GetIndexes("drop").empty());
+        ASSERT_TRUE(engine.CreateIndex("drop",index).success);
+        auto reused=engine.InsertOne("drop",R"({"_id":"0","name":"name_0"})");
+        ASSERT_TRUE(reused.success)<<reused.error_msg;
+        EXPECT_EQ(engine.Count("drop",Condition{}).data,"1");
+        ASSERT_TRUE(engine.PrepareShutdown().success);
+    }
+    DocEngine reopened(temp.path().string(),{},settings);
+    EXPECT_EQ(reopened.Count("drop",Condition{}).data,"1");
+    EXPECT_TRUE(reopened.FindById("drop","0").success);
+    EXPECT_FALSE(reopened.FindById("drop","39999").success);
+    EXPECT_TRUE(reopened.FindById("drop_neighbor","keep").success);
+    auto lookup=reopened.FindMany("drop",Condition::Leaf("name",Op::EQ,"name_0"));
+    ASSERT_TRUE(lookup.success)<<lookup.error_msg;
+    EXPECT_EQ(nlohmann::json::parse(lookup.data).size(),1U);
+}
+
+TEST(RocksTuning, RangeDropWaitsForOpenTransactionBeforeDeletingCommittedData) {
+    TestTempDir temp("range_drop_transaction_gate");
+    DocEngine engine(temp.path().string());
+    ASSERT_TRUE(engine.CreateCollection("items").success);
+    auto transaction=engine.BeginTransaction();
+    ASSERT_TRUE(transaction && transaction->IsValid());
+    ASSERT_TRUE(engine.InsertOneTx(*transaction,"items",R"({"_id":"pending"})").success);
+    std::atomic<bool> started=false,finished=false;
+    DBResult dropped;
+    std::thread dropper([&] {
+        started=true;
+        dropped=engine.DropCollection("items");
+        finished=true;
+    });
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(finished.load());
+    auto committed=engine.CommitTransaction(*transaction);
+    transaction.reset();
+    dropper.join();
+    ASSERT_TRUE(committed.success)<<committed.error_msg;
+    ASSERT_TRUE(dropped.success)<<dropped.error_msg;
+    ASSERT_TRUE(engine.CreateCollection("items").success);
+    EXPECT_EQ(engine.Count("items",Condition{}).data,"0");
+    EXPECT_FALSE(engine.FindById("items","pending").success);
+}
+
+TEST(RocksTuning, BsonInsertPreservesValidationAtomicityDefaultsAndIndexes) {
+    TestTempDir temp("bson_insert_contract");
+    RocksSettings settings; settings.durability=DocumentDurability::Durable;
+    DocEngine engine(temp.path().string(),{},settings);
+    const auto bson=[](const std::string& json) {
+        auto encoded=DocumentCodec::EncodeJson(json);
+        if (!encoded.success) throw std::runtime_error(encoded.error);
+        return encoded.value.substr(DocumentCodec::kEnvelopeSize);
+    };
+    ASSERT_TRUE(engine.CreateCollection("items").success);
+    IndexDefinition index; index.index_name="name"; index.fields={"name"}; index.type=IndexType::Unique;
+    ASSERT_TRUE(engine.CreateIndex("items",index).success);
+    ASSERT_TRUE(engine.InsertManyBson("items",{bson(R"({"_id":"a","name":"alpha","nested":{"x":null}})")}).success);
+    EXPECT_NE(engine.FindById("items","a").data.find("alpha"),std::string::npos);
+    auto lookup=engine.FindMany("items",Condition::Leaf("name",Op::EQ,"alpha"));
+    ASSERT_TRUE(lookup.success)<<lookup.error_msg;
+    EXPECT_EQ(nlohmann::json::parse(lookup.data).size(),1U);
+    EXPECT_FALSE(engine.InsertManyBson("items",{bson(R"({"_id":"b","name":"beta"})"),
+                                               bson(R"({"_id":"c","name":"alpha"})")}).success);
+    EXPECT_FALSE(engine.FindById("items","b").success);
+    EXPECT_FALSE(engine.InsertManyBson("items",{bson(R"({"_id":"b","name":"beta"})"),"invalid"}).success);
+    EXPECT_FALSE(engine.FindById("items","b").success);
+    EXPECT_FALSE(engine.InsertManyBson("items",{bson(R"({"_id":12})")}).success);
+    EXPECT_FALSE(engine.InsertManyBson("items",{bson(R"({"_id":"same"})"),bson(R"({"_id":"same"})")}).success);
+    EXPECT_EQ(engine.Count("items",Condition{}).data,"1");
+    SchemaDefinition schema; schema.strict=true;
+    SchemaField age; age.name="age"; age.type=FieldType::Int32; age.required=true; age.default_val="18";
+    schema.fields.push_back(age);
+    ASSERT_TRUE(engine.CreateCollection("defaults",schema).success);
+    auto result=engine.InsertManyBson("defaults",{bson("{}")});
+    ASSERT_TRUE(result.success)<<result.error_msg;
+    auto id=nlohmann::json::parse(result.data)[0].get<std::string>();
+    EXPECT_NE(engine.FindById("defaults",id).data.find("\"age\":18"),std::string::npos);
+    EXPECT_FALSE(engine.InsertManyBson("defaults",{bson(R"({"_id":"bad","age":"wrong"})")}).success);
+    ASSERT_TRUE(engine.CreateCollection("children").success);
+    ForeignKeyDefinition fk; fk.fk_name="parent_name"; fk.local_field="parent";
+    fk.ref_collection="items"; fk.ref_field="name";
+    ASSERT_TRUE(engine.AddForeignKey("children",fk).success);
+    EXPECT_TRUE(engine.InsertManyBson("children",{bson(R"({"_id":"ok","parent":"alpha"})")}).success);
+    EXPECT_FALSE(engine.InsertManyBson("children",{bson(R"({"_id":"bad","parent":"absent"})")}).success);
+    auto quoted=engine.InsertManyBson("items",{bson(R"({"_id":"quote\"slash\\","name":"quoted"})")});
+    ASSERT_TRUE(quoted.success)<<quoted.error_msg;
+    EXPECT_EQ(nlohmann::json::parse(quoted.data)[0].get<std::string>(),"quote\"slash\\");
+    bson_t raw;
+    bson_init(&raw);
+    BSON_APPEND_UTF8(&raw,"_id","duplicate");
+    BSON_APPEND_INT32(&raw,"value",1);
+    BSON_APPEND_INT32(&raw,"value",2);
+    const std::string duplicated(reinterpret_cast<const char*>(bson_get_data(&raw)),raw.len);
+    EXPECT_FALSE(engine.InsertManyBson("items",{duplicated}).success);
+    bson_destroy(&raw);
+    bson_init(&raw);
+    BSON_APPEND_UTF8(&raw,"_id","large_object");
+    for (int i=0;i<20;++i) BSON_APPEND_INT32(&raw,("field"+std::to_string(i)).c_str(),i);
+    BSON_APPEND_INT32(&raw,"field19",20);
+    const std::string large_duplicate(reinterpret_cast<const char*>(bson_get_data(&raw)),raw.len);
+    EXPECT_FALSE(engine.InsertManyBson("items",{large_duplicate}).success);
+    bson_destroy(&raw);
+    auto truncated=bson(R"({"_id":"truncated","value":1})");
+    // Malformed/truncated payload must fail before any mutation.
+    truncated.pop_back();
+    EXPECT_FALSE(engine.InsertManyBson("items",{truncated}).success);
+    ASSERT_TRUE(engine.PrepareShutdown().success);
+}
+
 TEST(RocksTuning, BudgetOptionsProfilesAndPrefixDomain) {
+    {
+        auto large=std::make_shared<RocksResources>(5120ULL*1024*1024,4096ULL*1024*1024);
+        auto auto_options=MakeRocksOptions(RocksSettings{},large);
+        EXPECT_EQ(auto_options.write_buffer_size,64U*1024*1024);
+        EXPECT_LE(auto_options.write_buffer_size*auto_options.max_write_buffer_number,large->memtable_bytes);
+        RocksSettings explicit_settings;
+        explicit_settings.write_buffer_bytes=16*1024*1024;
+        EXPECT_EQ(MakeRocksOptions(explicit_settings,large).write_buffer_size,16U*1024*1024);
+    }
     EXPECT_THROW(RocksResources(1024),std::invalid_argument);
     EXPECT_THROW(RocksResources(8*1024*1024,9*1024*1024),std::invalid_argument);
     auto resources=std::make_shared<RocksResources>(16*1024*1024);
@@ -26,6 +215,11 @@ TEST(RocksTuning, BudgetOptionsProfilesAndPrefixDomain) {
     EXPECT_TRUE(MakeScanReadOptions(MakeDocumentReadOptions()).total_order_seek);
     EXPECT_FALSE(MakeScanReadOptions(MakeDocumentReadOptions()).fill_cache);
     EXPECT_NE(options.statistics,nullptr);
+    auto* table=options.table_factory->GetOptions<rocksdb::BlockBasedTableOptions>();
+    ASSERT_NE(table,nullptr);
+    EXPECT_EQ(table->index_type,rocksdb::BlockBasedTableOptions::kTwoLevelIndexSearch);
+    EXPECT_TRUE(table->partition_filters);
+    EXPECT_EQ(table->metadata_block_size,4096U);
     settings.statistics_enabled=false;
     EXPECT_EQ(MakeRocksOptions(settings,resources).statistics,nullptr);
     settings.write_buffer_bytes=resources->memtable_bytes;
@@ -80,6 +274,34 @@ TEST(RocksTuning, SharedResourcesMetricsMultigetAndReopen) {
     DocEngine reopened((temp.path()/"one").string(),{},settings);
     EXPECT_TRUE(reopened.FindById("items","n149").success);
     EXPECT_EQ(reopened.GetIndexes("items").size(),1U);
+}
+TEST(RocksTuning, PartitionedMetadataCompactsWithStrictSmallCache) {
+    TestTempDir temp("rocks_partitioned_metadata");
+    auto resources=std::make_shared<RocksResources>(4*1024*1024,1024*1024);
+    RocksSettings settings;
+    auto options=MakeRocksOptions(settings,resources);
+    rocksdb::DB* raw=nullptr;
+    ASSERT_TRUE(rocksdb::DB::Open(options,temp.path().string(),&raw).ok());
+    std::unique_ptr<rocksdb::DB> db(raw);
+    for (int start=0;start<40000;start+=500) {
+        rocksdb::WriteBatch batch;
+        for (int i=start;i<start+500;++i)
+            batch.Put(std::to_string(i)+std::string(256,char('a'+i%26)),std::string(1024,char('A'+i%26)));
+        auto status=db->Write(rocksdb::WriteOptions(),&batch);
+        ASSERT_TRUE(status.ok())<<status.ToString();
+    }
+    rocksdb::FlushOptions flush; flush.wait=true;
+    auto status=db->Flush(flush);
+    ASSERT_TRUE(status.ok())<<status.ToString();
+    status=db->CompactRange(rocksdb::CompactRangeOptions(),nullptr,nullptr);
+    ASSERT_TRUE(status.ok())<<status.ToString();
+    for (int i: {0,19999,39999}) {
+        std::string value;
+        status=db->Get(rocksdb::ReadOptions(),std::to_string(i)+std::string(256,char('a'+i%26)),&value);
+        ASSERT_TRUE(status.ok())<<status.ToString();
+        EXPECT_EQ(value,std::string(1024,char('A'+i%26)));
+    }
+    EXPECT_LE(resources->cache->GetUsage(),resources->cache_bytes);
 }
 TEST(RocksTuning, DisabledStatisticsRetainsPropertiesAndSafeEmptyRates) {
     TestTempDir temp("rocks_no_stats"); RocksSettings settings;
