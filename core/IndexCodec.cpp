@@ -153,6 +153,29 @@ std::optional<std::string> EncodeValues(
     return tuple;
 }
 
+std::optional<std::string> EncodeTuple(
+        const query::DocumentView& document,
+        const std::vector<query::CompiledFieldPath>& fields) {
+    if (!document.valid()) return std::nullopt;
+    std::string tuple;
+    for (const auto& field : fields)
+        if (!field.valid() || !AppendDocumentValue(tuple, document.Get(field)))
+            return std::nullopt;
+    return tuple;
+}
+
+std::string EntryKeyFromPrefix(const std::string& prefix,
+                              const std::string& tuple,
+                              const std::string& document_id) {
+    std::string key;
+    key.reserve(prefix.size()+1+tuple.size()+document_id.size()*2+2);
+    key.append(prefix);
+    key.push_back('E');
+    key.append(tuple);
+    AppendEscapedString(key,document_id);
+    return key;
+}
+
 std::string IndexPrefix(const std::string& collection,
                         const std::string& index_id) {
     std::string key = CollectionPrefix(collection);
@@ -170,11 +193,7 @@ std::string EntryKey(const std::string& collection,
                      const std::string& index_id,
                      const std::string& tuple,
                      const std::string& document_id) {
-    std::string key = IndexPrefix(collection, index_id);
-    key.push_back('E');
-    key.append(tuple);
-    AppendEscapedString(key, document_id);
-    return key;
+    return EntryKeyFromPrefix(IndexPrefix(collection,index_id),tuple,document_id);
 }
 
 std::string UniqueKey(const std::string& collection,

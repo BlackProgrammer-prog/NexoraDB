@@ -40,8 +40,14 @@ public:
         std::string error;
     };
 
+    // Optional identity captured during validation; borrows the input payload.
+    struct BsonIdentity {
+        bool found=false,is_string=false;
+        std::string_view value;
+    };
     [[nodiscard]] static Format Detect(std::string_view stored) noexcept;
     [[nodiscard]] static Result EncodeJson(std::string_view json);
+    [[nodiscard]] static Result EncodeBson(std::string_view payload,BsonIdentity* identity=nullptr);
     [[nodiscard]] static Result DecodeToJson(std::string_view stored);
 
 private:
