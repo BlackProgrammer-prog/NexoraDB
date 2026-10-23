@@ -10,6 +10,7 @@ import unittest
 import random
 import base64
 import shutil
+import sqlite3
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("nexora_admin", ROOT / "scripts/nexora_admin.py")
@@ -85,6 +86,9 @@ class AdminRecovery(unittest.TestCase):
             root = Path(temporary)
             source, bundle, restored = root / "source", root / "bundle", root / "restored"
             fixture(source)
+            with sqlite3.connect(source / "documents/api_requests.sqlite3") as journal:
+                journal.execute("CREATE TABLE requests (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT)")
+                journal.execute("INSERT INTO requests VALUES ('receipt','fingerprint','{\"ok\":true}')")
             # Cross-process backup must fail while a manager owns the root lease.
             db = nexoradb.DocEngine(str(source / "documents"))
             manager = nexoradb.GraphManager(db, str(source / "graphs"))
@@ -98,6 +102,8 @@ class AdminRecovery(unittest.TestCase):
             self.assertEqual(before, after, "dry run modified source bytes")
             self.command("backup", "--db", source / "documents", "--graphs", source / "graphs", "--output", bundle)
             self.command("restore", "--bundle", bundle, "--output", restored)
+            with sqlite3.connect(restored / "documents/api_requests.sqlite3") as journal:
+                self.assertEqual(journal.execute("SELECT response FROM requests WHERE id='receipt'").fetchone()[0], '{"ok":true}')
             report = admin.verify_bundle(restored)["report"]
             self.assertEqual(report["graphs"]["social"]["nodes"], 100)
             self.assertEqual(report["graphs"]["social"]["edges"], 100)
