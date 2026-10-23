@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import socketio
+import anyio
 
 from .config import AdminApiSettings
 from .security import TokenError, decode_access_token
@@ -131,6 +132,7 @@ class MonitoringSocketServer:
             cors_allowed_origins=list(settings.allowed_origins),
         )
         self._background_task_started = False
+        self._metrics_limiter = anyio.CapacityLimiter(1)
         self._configure_handlers()
 
     def asgi_app(self, fastapi_app: Any) -> socketio.ASGIApp:
@@ -145,6 +147,12 @@ class MonitoringSocketServer:
 
     async def collect_metrics(self) -> dict[str, Any]:
         requests_per_second, active_connections = await self.state.snapshot()
+        return await anyio.to_thread.run_sync(
+            self._collect_metrics_sync, requests_per_second, active_connections,
+            limiter=self._metrics_limiter,
+        )
+
+    def _collect_metrics_sync(self, requests_per_second, active_connections) -> dict[str, Any]:
 
         database_engine_healthy = False
         database_metrics_available = False
