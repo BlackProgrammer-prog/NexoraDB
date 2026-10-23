@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from threading import RLock
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,7 @@ from .api_bridge import (
     create_app_token,
 )
 from .config import AdminApiSettings
+from .admission import AdmissionMiddleware
 from .document_store import (
     CreateCollectionRequest,
     DocumentRequest,
@@ -60,6 +62,7 @@ from .models import (
 from .monitoring import MonitoringSocketServer, MonitoringState
 from .native import create_doc_engine, create_graph_manager, load_native_module
 from .query_runner import QueryExecuteRequest, QueryExecuteResponse, execute_query
+from .performance import PerformanceUpdate
 from .security import TokenError, decode_access_token
 from .service import (
     InternalUserEngine,
@@ -95,9 +98,12 @@ def create_app(
         allow_origins=list(app_settings.allowed_origins),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
     app.state.settings = app_settings
+    initialization_lock = RLock()
+    app.add_middleware(AdmissionMiddleware, max_inflight=app_settings.api_max_inflight,
+                       require_https=app_settings.environment.lower() == "production")
     app.state.engine = engine
     app.state.graph_manager = None
     app.state.native_module = None
@@ -107,28 +113,31 @@ def create_app(
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
         if isinstance(exc.detail, dict) and "message" in exc.detail:
-            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+            return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=exc.headers)
         if isinstance(exc.detail, str):
-            return JSONResponse(status_code=exc.status_code, content={"message": exc.detail})
-        return JSONResponse(status_code=exc.status_code, content={"message": "request failed"})
+            return JSONResponse(status_code=exc.status_code, content={"message": exc.detail}, headers=exc.headers)
+        return JSONResponse(status_code=exc.status_code, content={"message": "request failed"}, headers=exc.headers)
 
     def get_settings() -> AdminApiSettings:
         return app.state.settings
 
     def get_engine() -> InternalUserEngine:
-        if app.state.engine is None:
-            app.state.engine = resolved_engine_factory(app.state.settings)
-        return app.state.engine
+        with initialization_lock:
+            if app.state.engine is None:
+                app.state.engine = resolved_engine_factory(app.state.settings)
+            return app.state.engine
 
     def get_native_module() -> Any:
-        if app.state.native_module is None:
-            app.state.native_module = load_native_module(app.state.settings)
-        return app.state.native_module
+        with initialization_lock:
+            if app.state.native_module is None:
+                app.state.native_module = load_native_module(app.state.settings)
+            return app.state.native_module
 
     def get_graph_manager() -> Any:
-        if app.state.graph_manager is None:
-            app.state.graph_manager = create_graph_manager(app.state.settings, get_engine())
-        return app.state.graph_manager
+        with initialization_lock:
+            if app.state.graph_manager is None:
+                app.state.graph_manager = create_graph_manager(app.state.settings, get_engine())
+            return app.state.graph_manager
 
     def get_graph_metadata_store() -> GraphMetadataStore:
         return app.state.graph_metadata_store
@@ -237,6 +246,7 @@ def create_app(
             scopes=payload.scopes,
             secret=current_settings.api_token_secret,
             expires_in_seconds=payload.expiresInSeconds,
+            collections=payload.collections,
         )
         store_app_token(
             current_engine,
@@ -249,6 +259,7 @@ def create_app(
             expires_at=issued.expiresAt,
             created_at=issued.createdAt,
             secret=current_settings.api_token_secret,
+            collections=issued.collections,
         )
         return issued
 
@@ -277,6 +288,37 @@ def create_app(
         _: dict[str, Any] = Depends(current_token_payload),
     ) -> dict[str, list[str]]:
         return {"scopes": list(AVAILABLE_APP_SCOPES)}
+
+    def performance_admin(payload: dict[str, Any] = Depends(current_token_payload)) -> dict[str, Any]:
+        if payload.get('role') != 'admin':
+            raise HTTPException(403, 'Performance controls require an administrator')
+        return payload
+
+    @app.get('/performance')
+    def get_performance(
+        _: dict[str, Any] = Depends(performance_admin),
+        current_engine: Any = Depends(get_engine),
+    ) -> dict[str, Any]:
+        from .query_runner import _load_nexoraql_package
+        import importlib
+        package = _load_nexoraql_package()
+        controls = importlib.import_module(package.__name__ + '.performance')
+        return controls.performance_status(current_engine)
+
+    @app.put('/performance')
+    def set_performance(
+        payload: PerformanceUpdate,
+        _: dict[str, Any] = Depends(performance_admin),
+        current_engine: Any = Depends(get_engine),
+    ) -> dict[str, Any]:
+        from .query_runner import _load_nexoraql_package
+        import importlib
+        package = _load_nexoraql_package()
+        controls = importlib.import_module(package.__name__ + '.performance')
+        try:
+            return controls.configure_performance(current_engine, payload.model_dump(exclude_none=True))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
 
     @app.get("/collections")
     def collections(
@@ -368,13 +410,14 @@ def create_app(
     @app.post("/query/execute", response_model=QueryExecuteResponse)
     def execute_query_route(
         payload: QueryExecuteRequest,
-        _: dict[str, Any] = Depends(current_token_payload),
+        access: dict[str, Any] = Depends(current_token_payload),
         current_engine: Any = Depends(get_engine),
     ) -> QueryExecuteResponse:
         return execute_query(
             engine=current_engine,
             graph_manager=get_optional_graph_manager(),
             payload=payload,
+            allow_performance_controls=access.get('role') == 'admin',
         )
 
     @app.get("/graphs")
