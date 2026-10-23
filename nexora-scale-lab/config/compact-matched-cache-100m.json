@@ -1,0 +1,22 @@
+{
+  "records": 100000000,
+  "seed": 2026,
+  "batch_size": 1000,
+  "databases": ["mongodb", "nexoradb", "postgresql"],
+  "database_order": "listed",
+  "contain_memory": true,
+  "load_prefetch_batches": 2,
+  "native_memory_budget_mb": 5120,
+  "native_block_cache_mb": 4096,
+  "workloads": ["ycsb-a", "ycsb-b", "ycsb-c", "indexed-read"],
+  "clients": [1, 10, 50],
+  "working_sets": [1.0],
+  "index_policies": ["before-load"],
+  "repetitions": 1,
+  "warmup_seconds": 10,
+  "measurement_seconds": 60,
+  "max_operations": null,
+  "validation_mode": "sampled",
+  "validation_samples": 1000,
+  "job_timeout_seconds": null
+}
