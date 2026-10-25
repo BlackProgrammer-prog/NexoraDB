@@ -1,6 +1,6 @@
 # NexoraDB
 
-Current version: **0.4.0**. [Release notes](https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/releases/v0.4.0.md).
+Current version: **0.4.1**. [Release notes](https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/releases/v0.4.1.md).
 
 NexoraDB is a hybrid document and graph database engine with a Python API,
 FastAPI administration service, NexoraQL parser, CLI, and bundled web dashboard.
