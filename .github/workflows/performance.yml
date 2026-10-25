@@ -10,8 +10,6 @@ on:
         type: boolean
         default: false
         description: Run full matrix and large recovery fixture
-  schedule:
-    - cron: '43 2 * * *'
 permissions:
   contents: read
 concurrency:
@@ -20,7 +18,7 @@ concurrency:
 jobs:
   performance:
     # Never execute PR code on a persistent self-hosted runner.
-    if: vars.NEXORA_PERF_RUNNER_ENABLED == 'true' && (github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    if: github.event_name == 'workflow_dispatch' && vars.NEXORA_PERF_RUNNER_ENABLED == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: [self-hosted, linux, x64, nexora-perf]
     timeout-minutes: 120
     steps:
