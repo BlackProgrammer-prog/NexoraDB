@@ -53,11 +53,16 @@ def versions() -> dict[str, str]:
 
 
 def main() -> int:
+    from release_version import plan
     parser = argparse.ArgumentParser()
     parser.add_argument("--expected", help="Expected release version without a v prefix")
     arguments = parser.parse_args()
+    canonical, drift = plan()
+    if drift:
+        print('Version metadata drift: '+', '.join(drift)+'. Run scripts/release_version.py --sync', file=sys.stderr)
+        return 1
     discovered = versions()
-    expected = arguments.expected or next(iter(discovered.values()))
+    expected = arguments.expected or canonical
     mismatches = {
         source: version
         for source, version in discovered.items()
