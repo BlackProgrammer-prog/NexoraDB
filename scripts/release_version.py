@@ -47,7 +47,14 @@ def plan(root=ROOT, requested=None):
         output = json.dumps(data, indent=2, ensure_ascii=False)+'\n'
         return output.replace('\n', '\r\n') if '\r\n' in text else output
     rewrite('frontend/package-lock.json', lockfile)
-    rewrite('README.md', lambda s: substitute(s, r'(pip install NexoraDataBase==)[0-9]+\.[0-9]+\.[0-9]+', lambda m: m[1]+version))
+    def readme(text):
+        text = substitute(text, r'(pip install NexoraDataBase==)[0-9]+\.[0-9]+\.[0-9]+', lambda m: m[1]+version)
+        return substitute(text, r'^Release [0-9]+\.[0-9]+\.[0-9]+: \[changes and upgrade precautions\]\(docs/releases/v[^)]+\.md\)\.',
+                          'Release '+version+': [changes and upgrade precautions](docs/releases/v'+version+'.md).')
+    rewrite('README.md', readme)
+    rewrite('NexoraDB/README.md', lambda s: substitute(s,
+        r'^Current version: \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*\. \[Release notes\]\(https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/releases/v[^)]+\.md\)\.',
+        'Current version: **'+version+'**. [Release notes](https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/releases/v'+version+'.md).'))
     return version, updates
 
 

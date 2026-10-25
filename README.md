@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![RocksDB](https://img.shields.io/badge/Storage-RocksDB-orange.svg?style=flat)](https://rocksdb.org/)
 [![pybind11](https://img.shields.io/badge/Bindings-pybind11-green.svg?style=flat)](https://github.com/pybind/pybind11)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey.svg?style=flat)](#-license)
+[![License](https://img.shields.io/badge/License-Apache--2.0-lightgrey.svg?style=flat)](#-license)
 
 [Features](#-features) •
 [Architecture](#-architecture) •
@@ -22,7 +22,7 @@
 
 </div>
 
-Release 0.3.0: [changes and upgrade precautions](docs/releases/v0.3.0.md).
+Release 0.4.0: [changes and upgrade precautions](docs/releases/v0.4.0.md).
 Published wheels target Linux x86_64 and CPython 3.10 only.
 
 ---
@@ -619,7 +619,7 @@ Contributions are welcome!
 
 ## 📄 License
 
-Released under the **MIT License** — see [LICENSE](LICENSE) for details.
+Released under the **Apache License 2.0** — see [LICENSE](LICENSE) for details.
 
 ---
 
