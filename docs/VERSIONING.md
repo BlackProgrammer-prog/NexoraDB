@@ -28,7 +28,8 @@ python3 scripts/release_version.py --check
 | `vcpkg.json` | نسخهٔ خود پروژه همگام؛ نسخهٔ dependencyها تغییر نمی‌کند. |
 | `frontend/package.json` | نسخهٔ frontend همگام می‌شود. |
 | `frontend/package-lock.json` | نسخهٔ ریشه و root package همگام؛ dependencyها حفظ می‌شوند. |
-| `README.md` | دستور نصب دقیق نسخهٔ جاری همگام می‌شود. |
+| `README.md` | معرفی Release، لینک release notes و دستور نصب دقیق نسخهٔ جاری همگام می‌شوند. |
+| `NexoraDB/README.md` | معرفی نسخهٔ جاری و لینک release notes برای توضیحات PyPI همگام می‌شوند. |
 | CLI، API و admin | محل‌هایی که `_version` را import می‌کنند نسخهٔ جدید را می‌گیرند؛ literal تازه اضافه نکنید. |
 | GitHub release workflow | checker موجود اکنون drift تمام فایل‌های بالا را هم رد می‌کند؛ tag باید با نسخه مطابق باشد. |
 
@@ -39,8 +40,9 @@ python3 scripts/release_version.py --check
 
 نسخهٔ schema، storage format، protocol، dependencyها و benchmarkهای تاریخی مستقل
 هستند و نباید همراه شمارهٔ محصول کورکورانه تغییر کنند. release noteهای قبلی،
-گزارش‌های اندازه‌گیری و source snapshotها سابقه‌اند. لینک release قبلی README
-نیز سابقه است و ابزار آن را به فایل ناموجود نسخهٔ بعد تغییر نمی‌دهد.
+گزارش‌های اندازه‌گیری و source snapshotها سابقه‌اند. معرفی نسخهٔ جاری در README
+همگام می‌شود؛ release notes همان نسخه باید پیش از انتشار آماده باشد. بخش‌های
+تاریخی مانند راهنمای upgrade نسخهٔ ۰.۳.۰ حفظ می‌شوند.
 
 ## قبل از انتشار ۰.۴.۰
 

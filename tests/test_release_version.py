@@ -11,7 +11,7 @@ spec.loader.exec_module(tool)
 
 def fixture_repo(tmp_path):
     for name in (tool.CANONICAL, 'CMakeLists.txt', 'NexoraDB/pyproject.toml',
-                 'vcpkg.json', 'frontend/package.json', 'frontend/package-lock.json', 'README.md'):
+                 'vcpkg.json', 'frontend/package.json', 'frontend/package-lock.json', 'README.md', 'NexoraDB/README.md'):
         destination = tmp_path / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, destination)
@@ -24,7 +24,7 @@ def test_bump_updates_all_consumers_and_is_idempotent(tmp_path):
     target = '99.4.0'  # Independent of the actual version of this checkout.
     version, updates = tool.plan(root, target)
     assert version == target
-    assert len(updates) == 7
+    assert len(updates) == 8
     for name, data in updates.items():
         (root / name).write_bytes(data)
     assert tool.plan(root) == (target, {})
@@ -34,8 +34,12 @@ def test_bump_updates_all_consumers_and_is_idempotent(tmp_path):
         if name:
             assert lock['packages'][name] == original_lock['packages'][name]
     readme = (root / 'README.md').read_text()
-    assert 'docs/releases/v0.3.0.md' in readme
+    assert 'Release '+target+':' in readme
+    assert 'docs/releases/v'+target+'.md' in readme
     assert 'pip install NexoraDataBase=='+target in readme
+    package_readme = (root / 'NexoraDB/README.md').read_text()
+    assert 'Current version: **'+target+'**' in package_readme
+    assert '## Version 0.3.0 upgrade notice' in package_readme
 
 
 def test_plan_rejects_invalid_version_without_writes(tmp_path):

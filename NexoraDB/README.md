@@ -1,5 +1,7 @@
 # NexoraDB
 
+Current version: **0.4.0**. [Release notes](https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/releases/v0.4.0.md).
+
 NexoraDB is a hybrid document and graph database engine with a Python API,
 FastAPI administration service, NexoraQL parser, CLI, and bundled web dashboard.
 
@@ -10,7 +12,7 @@ NexoraDB is licensed under the Apache License 2.0.
 
 ## Platform support
 
-The `0.3.0` binary wheels bundle the native C++ database engine and currently
+The binary wheels bundle the native C++ database engine and currently
 support **Ubuntu Linux on x86_64 with CPython 3.10 only**. Windows, macOS,
 other Linux distributions, ARM processors, PyPy, and other Python versions
 are not supported by this release. WSL is supported through its Ubuntu Linux environment,
