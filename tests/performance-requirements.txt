@@ -1,5 +1,5 @@
 pytest>=8,<9
-pymongo>=4.6,<5
+pymongo>=4.18.3,<5
 fastapi>=0.111,<1
 httpx[http2]>=0.28,<1
 lark>=1.1.9,<2
