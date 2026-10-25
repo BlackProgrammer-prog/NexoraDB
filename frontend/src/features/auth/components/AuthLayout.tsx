@@ -21,7 +21,7 @@ export function AuthLayout({ children, eyebrow, subtitle, title }: AuthLayoutPro
           <div className="absolute inset-0 bg-[linear-gradient(120deg,rgba(2,6,23,0.92),rgba(15,23,42,0.5),rgba(22,101,52,0.52))]" />
           <div className="relative flex h-full flex-col justify-between p-12">
             <div>
-              <p className="text-lg font-bold text-white">NexoraDB</p>
+              <img src="/brand/nexoradb-logo-mono.svg" alt="NexoraDB" width="204" height="60" className="h-14 w-auto brightness-0 invert" />
               <p className="mt-1 text-sm text-green-100">Database admin workspace</p>
             </div>
             <div className="max-w-xl">
@@ -40,7 +40,7 @@ export function AuthLayout({ children, eyebrow, subtitle, title }: AuthLayoutPro
         <section className="flex min-h-screen items-center justify-center px-5 py-10 sm:px-8">
           <div className="w-full max-w-md">
             <div className="mb-9 lg:hidden">
-              <p className="text-lg font-bold text-green-700">NexoraDB</p>
+              <img src="/brand/nexoradb-logo.svg" alt="NexoraDB" width="204" height="60" className="h-14 w-auto" />
               <p className="mt-1 text-sm text-slate-500">Database admin workspace</p>
             </div>
             <p className="text-sm font-semibold uppercase tracking-[0.16em] text-green-700">
