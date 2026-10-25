@@ -1,4 +1,9 @@
 #include "DocEngine.h"
+#include "DocumentCodec.h"
+#include "IndexCodec.h"
+#include "query/DocumentView.h"
+#include <charconv>
+#include <unordered_set>
 #include <algorithm>
 #include <limits>
 namespace nexora::core {
@@ -29,7 +34,146 @@ DBResult DocEngine::InsertOne(const std::string& collection,const std::string& d
     return Observe(OperationsState::Insert,[&]{return InsertOneImpl(collection,doc);});
 }
 DBResult DocEngine::InsertMany(const std::string& collection,const std::vector<std::string>& docs) {
-    return Observe(OperationsState::BatchInsert,[&]{return InsertManyImpl(collection,docs);});
+    std::vector<std::string_view> views(docs.begin(),docs.end());
+    return Observe(OperationsState::BatchInsert,[&]{return InsertManyImpl(collection,views);});
+}
+DBResult DocEngine::InsertManyBson(const std::string& collection,const std::vector<std::string>& docs) {
+    return InsertManyBsonViews(collection,std::vector<std::string_view>(docs.begin(),docs.end()));
+}
+DBResult DocEngine::InsertManyBsonViews(const std::string& collection,const std::vector<std::string_view>& docs) {
+    return Observe(OperationsState::BatchInsert,[&]{return InsertManyImpl(collection,docs,true);});
+}
+DBResult DocEngine::InsertManyBsonIngest(const std::string& collection,const std::vector<std::string_view>& docs) {
+    return Observe(OperationsState::BatchInsert,[&]() -> DBResult {
+        const auto RocksFailure=[](const std::string& operation,const rocksdb::Status& status) {
+            return DBResult::Err("[RocksDB] "+operation+": "+status.ToString(),
+                status.IsCorruption()?"corruption":status.IsIOError()?"io_error":"operation_failed");
+        };
+        TouchUserActivity();
+        if(docs.empty() || docs.size()>10000) return DBResult::Err("Ingestion batch requires 1..10000 documents");
+        size_t bytes=0;
+        for(const auto doc:docs) {
+            if(doc.size()>64*1024*1024-bytes) return DBResult::Err("Ingestion batch exceeds 64MiB");
+            bytes+=doc.size();
+        }
+        std::unique_lock ddl(index_ddl_mutex_);
+        if(IsReservedCollectionName(collection)) return DBResult::Err("reserved collection name");
+        MutationMetadata metadata;
+        auto status=LoadMutationMetadata(collection,metadata);
+        if(!status.ok()) return RocksFailure("Ingest metadata",status);
+        const auto fallback=[&] {
+            ddl.unlock();
+            auto result=InsertManyImpl(collection,docs,true);
+            if(result.success) result.data=std::to_string(docs.size());
+            return result;
+        };
+        if(metadata.schema.strict || !metadata.schema.fields.empty() || !metadata.foreign_keys.empty()) return fallback();
+        for(const auto& index:metadata.indexes) {
+            if(index.type==IndexType::Unique || index.state!=IndexState::Ready ||
+               index.format_version!=indexv2::kFormatVersion || index.index_id.empty()) return fallback();
+        }
+        struct Index { std::string prefix; std::vector<query::CompiledFieldPath> fields; };
+        std::vector<Index> indexes;
+        for(const auto& source:metadata.indexes) {
+            Index index{indexv2::IndexPrefix(collection,source.index_id),{}};
+            for(const auto& field:source.fields) index.fields.emplace_back(field);
+            indexes.push_back(std::move(index));
+        }
+        std::vector<std::string> encoded,ids,keys;
+        encoded.reserve(docs.size());ids.reserve(docs.size());keys.reserve(docs.size());
+        for(const auto doc:docs) {
+            DocumentCodec::BsonIdentity id;
+            auto validated=DocumentCodec::EncodeBson(doc,&id);
+            if(!validated.success) return DBResult::Err(validated.error,"validation_failed");
+            encoded.push_back(std::move(validated.value));
+            if(!id.found) return fallback();
+            if(!id.is_string || id.value.empty() || id.value.size()>1024)
+                return DBResult::Err("Document _id must be a nonempty string of at most 1 KiB","validation_failed");
+            ids.emplace_back(id.value);
+            keys.push_back(MakeDocKey(collection,ids.back()));
+        }
+        if(std::is_sorted(ids.begin(),ids.end())) {
+            if(std::adjacent_find(ids.begin(),ids.end())!=ids.end())
+                return DBResult::Err("Duplicate document _id in ingestion batch");
+        } else {
+            std::unordered_set<std::string_view> seen;seen.reserve(ids.size());
+            for(const auto& id:ids) if(!seen.emplace(id).second)
+                return DBResult::Err("Duplicate document _id in ingestion batch");
+        }
+        // Same exclusivity proof used by DropCollection: every foreground
+        // mutation/TxHandle holds the shared DDL gate. Migration is separate.
+        // Never use this bypass in the ordinary concurrent transaction path.
+        std::lock_guard migration(document_migration_mutex_);
+        bool range_proves_absent=false;
+        {
+            // A fresh, bounded primary-key range fence (never a cached max-ID).
+            // Under both mutation gates, min(new keys)>max(existing keys)
+            // proves absence for the whole batch. Random/backfill keys still
+            // take exact MultiGet checks. Do not infer absence from COUNT.
+            const auto prefix=MakeDocKey(collection,"");
+            auto upper_value=prefix; ++upper_value.back(); // final ':' -> ';'
+            const rocksdb::Slice lower(prefix),upper(upper_value);
+            auto options=MakeScanReadOptions(read_options_);
+            options.iterate_lower_bound=&lower;options.iterate_upper_bound=&upper;
+            auto iterator=std::unique_ptr<rocksdb::Iterator>(txn_db_->NewIterator(options));
+            iterator->SeekToLast();
+            if(!iterator->status().ok()) return RocksFailure("Ingest primary range fence",iterator->status());
+            if(!iterator->Valid()) range_proves_absent=true;
+            else if(iterator->key().starts_with(prefix)) {
+                const auto minimum=std::min_element(keys.begin(),keys.end());
+                range_proves_absent=rocksdb::Slice(*minimum).compare(iterator->key())>0;
+            }
+        }
+        if(!range_proves_absent) {
+            std::vector<rocksdb::Slice> slices;slices.reserve(keys.size());
+            for(const auto& key:keys) slices.emplace_back(key);
+            std::vector<std::string> previous;
+            const auto statuses=txn_db_->MultiGet(read_options_,slices,&previous);
+            for(const auto& found:statuses) {
+                if(found.ok()) return DBResult::Err("Duplicate document _id in ingestion store");
+                if(!found.IsNotFound()) return RocksFailure("Ingest existence check",found);
+            }
+        }
+        std::string stored_count;
+        const std::string counter="seq:"+collection;
+        status=txn_db_->Get(read_options_,counter,&stored_count);
+        if(!status.ok()) return RocksFailure("Ingest counter",status);
+        int64_t count=0;
+        const auto parsed=std::from_chars(stored_count.data(),stored_count.data()+stored_count.size(),count);
+        if(parsed.ec!=std::errc{} || parsed.ptr!=stored_count.data()+stored_count.size() || count<0 ||
+           uint64_t(count)>uint64_t(std::numeric_limits<int64_t>::max())-docs.size())
+            return DBResult::Err("Invalid or overflowing ingestion counter","corruption");
+        rocksdb::WriteBatch batch(bytes+docs.size()*128);
+        // Keep primary-key writes together, then each index keyspace. Avoid
+        // bouncing the memtable insertion path between data/index per row.
+        for(size_t i=0;i<docs.size();++i) {
+            status=batch.Put(keys[i],encoded[i]);
+            if(!status.ok()) return RocksFailure("Ingest document staging",status);
+            status=InjectMutationFaultIfRequested(MutationFaultPoint::AfterDocument);
+            if(!status.ok()) return RocksFailure("Ingest document fault",status);
+        }
+        for(const auto& index:indexes) {
+            for(size_t i=0;i<docs.size();++i) {
+                query::DocumentView view{std::string_view(encoded[i]).substr(DocumentCodec::kEnvelopeSize)};
+                const auto tuple=indexv2::EncodeTuple(view,index.fields);
+                if(tuple) {
+                    status=batch.Put(indexv2::EntryKeyFromPrefix(index.prefix,*tuple,ids[i]),ids[i]);
+                    if(!status.ok()) return RocksFailure("Ingest index staging",status);
+                }
+            }
+        }
+        status=InjectMutationFaultIfRequested(MutationFaultPoint::AfterIndexes);
+        if(!status.ok()) return RocksFailure("Ingest index fault",status);
+        status=batch.Put(counter,std::to_string(count+int64_t(docs.size())));
+        if(!status.ok()) return RocksFailure("Ingest counter staging",status);
+        status=InjectMutationFaultIfRequested(MutationFaultPoint::AfterCounter);
+        if(!status.ok()) return RocksFailure("Ingest counter fault",status);
+        rocksdb::TransactionDBWriteOptimizations exclusive;
+        exclusive.skip_concurrency_control=true;
+        status=txn_db_->Write(write_options_,exclusive,&batch);
+        if(!status.ok()) return RocksFailure("Ingest atomic commit",status);
+        return DBResult::Ok(std::to_string(ids.size()));
+    });
 }
 DBResult DocEngine::FindById(const std::string& collection,const std::string& id) {
     return Observe(OperationsState::PointRead,[&]{return FindByIdImpl(collection,id);});
@@ -75,7 +219,37 @@ std::string DocEngine::OperationMetrics() const {
             {"duration_seconds_sum",double(item.sum_us)/1e6},{"max_seconds",double(item.max_us)/1e6},{"buckets",buckets},
             {"throughput_per_second",seconds>0?item.calls/seconds:0},{"error_rate",item.calls?double(item.errors)/item.calls:0}};
     }
+    output["write_path"]={{"durable_ack",write_options_.sync},{"wal_enabled",!write_options_.disableWAL},
+        {"unordered_write",db_options_.unordered_write},{"pipelined_write",db_options_.enable_pipelined_write},
+        {"write_buffer_bytes",db_options_.write_buffer_size},{"max_background_jobs",db_options_.max_background_jobs},
+        {"statistics_available",bool(db_options_.statistics)}};
+    if(const auto& stats=db_options_.statistics) {
+        auto& path=output["write_path"];
+        path["wal_syncs"]=stats->getTickerCount(rocksdb::WAL_FILE_SYNCED);
+        path["wal_bytes"]=stats->getTickerCount(rocksdb::WAL_FILE_BYTES);
+        path["writes_by_leader"]=stats->getTickerCount(rocksdb::WRITE_DONE_BY_SELF);
+        path["writes_by_follower"]=stats->getTickerCount(rocksdb::WRITE_DONE_BY_OTHER);
+        const auto histogram=[&](uint32_t kind) {
+            rocksdb::HistogramData value{};
+            stats->histogramData(kind,&value);
+            return nlohmann::json{{"count",value.count},{"sum_us",value.sum},
+                {"average_us",value.average},{"p50_us",value.median},
+                {"p95_us",value.percentile95},{"p99_us",value.percentile99},{"max_us",value.max}};
+        };
+        path["wal_sync_latency"]=histogram(rocksdb::WAL_FILE_SYNC_MICROS);
+        path["db_write_latency"]=histogram(rocksdb::DB_WRITE);
+        path["db_get_latency"]=histogram(rocksdb::DB_GET);
+    }
     return output.dump();
+}
+void DocEngine::ConfigureQueryTuning(bool admission,bool indexes) noexcept {
+    query_tuning_.store(uint8_t((admission?1:0)|(indexes?2:0)),std::memory_order_relaxed);
+}
+std::string DocEngine::QueryTuning() const {
+    const auto flags=query_tuning_.load(std::memory_order_relaxed);
+    return nlohmann::json({{"read_cache_admission",bool(flags&1)},{"smart_indexes",bool(flags&2)},
+        {"scope","this engine, runtime only; existing cache hits/metadata caching remain possible"},
+        {"index_constraints_always_enforced",true}}).dump();
 }
 std::string DocEngine::HealthReport() const {
     uint64_t errors=0,stopped=0,versions=0;
@@ -87,9 +261,46 @@ std::string DocEngine::HealthReport() const {
         {"corruption_latched",operations_.corruption},{"io_error_latched",operations_.io_error},{"quiescing",operations_.quiescing},
         {"scope","observed state; not a full integrity scan"}}).dump();
 }
+std::string DocEngine::MemoryReport() {
+    nlohmann::json output;
+    const auto metrics=GetRocksMetrics();
+    output["cache_capacity_bytes"]=metrics.cache_capacity;
+    output["cache_usage_bytes"]=metrics.cache_usage;
+    output["cache_pinned_bytes"]=metrics.cache_pinned;
+    output["memtable_budget_bytes"]=metrics.memtable_budget;
+    output["memtable_usage_bytes"]=metrics.memtable_usage;
+    const auto property=[&](const char* name,const char* label) {
+        uint64_t value=0;
+        if(txn_db_->GetIntProperty(name,&value)) output[label]=value;
+        else output[label]=nullptr;
+    };
+    property("rocksdb.estimate-table-readers-mem","table_readers_estimate_bytes");
+    property("rocksdb.cur-size-all-mem-tables","all_memtables_bytes");
+    property("rocksdb.size-all-mem-tables","retained_memtables_bytes");
+    property("rocksdb.num-snapshots","rocksdb_snapshots");
+    property("rocksdb.oldest-snapshot-time","oldest_snapshot_unix_seconds");
+    {
+        std::lock_guard lock(page_sessions_mutex_);
+        const auto now=PageSessionNow();
+        for(auto it=page_sessions_.begin();it!=page_sessions_.end();) {
+            if(it->second->expires_at<=now && it->second.use_count()==1) it=page_sessions_.erase(it);
+            else ++it;
+        }
+        output["page_sessions"]=page_sessions_.size();
+        output["page_session_capacity"]=128;
+    }
+    output["scope"]="overlapping RocksDB estimates; cache includes index/filter blocks; excludes Python, allocator overhead and graph";
+    return output.dump();
+}
 DBResult DocEngine::PrepareShutdown() {
     {std::lock_guard lock(operations_.mutex); operations_.quiescing=true;}
     PauseDocumentMigration(); // Caller quiesces requests/transactions before entry.
+    page_reaper_worker_.request_stop();
+    if(page_reaper_worker_.joinable()) page_reaper_worker_.join();
+    // Release registry-owned snapshots before flushing. In-flight users retain
+    // their shared ownership; callers must drain requests before shutdown.
+    {std::lock_guard lock(page_sessions_mutex_);page_sessions_.clear();}
+    rocks_resources_->cache->EraseUnRefEntries();
     const auto health=nlohmann::json::parse(HealthReport());
     if(health["io_error_latched"]==true || health["corruption_latched"]==true || health["background_errors"]!=0)
         return DBResult::Err("storage degraded; refusing implicit WAL retry; use recovery runbook","io_error");

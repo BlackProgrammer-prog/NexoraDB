@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any, NoReturn
+from threading import RLock
 
 from fastapi import HTTPException, status
 from pydantic import BaseModel, Field
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 _PARSER_PACKAGE_ALIAS = "_nexoradb_admin_nexoraql"
 _MAX_QUERY_LENGTH = 200_000
 _MAX_STATEMENTS = 256
+_PARSER_LOCK = RLock()
 
 # An application execution scope is not permission to execute arbitrary DDL.
 # Unknown statement types are denied until their access requirements are defined.
@@ -46,6 +48,36 @@ def _authorize_statements(statements: list, granted_scopes: frozenset[str]) -> N
                 "message": f"Application token is not authorized for {name}"})
 
 
+def authorize_collection(grants, collection, operation):
+    if collection.startswith("__nexora_"):
+        raise HTTPException(403, "Reserved collection")
+    if grants is not None and operation not in grants.get(collection, []):
+        raise HTTPException(403, "Collection access denied")
+
+
+def authorize_collections(statements, grants):
+    if grants is None:
+        return  # Legacy broad tokens; production rejects these at auth.
+    read = {"Select", "Count", "ExistsStmt", "ShowIndexes", "ShowForeignKeys"}
+    write = {"Insert", "InsertBatch", "Update", "Delete"}
+    manage = {"CreateCollection", "DropCollection", "AlterCollection", "CreateIndex", "DropIndex", "AddForeignKey", "DropForeignKey"}
+    named_read = {"CollectionExists", "DescribeCollection"}
+    for statement in statements:
+        name = type(statement).__name__
+        if name in {"BeginTx", "CommitTx", "RollbackTx"}:
+            continue
+        if name not in read | write | manage | named_read:
+            # Graph/metadata/global queries can indirectly expose other data.
+            raise HTTPException(403, "Operation unavailable to collection-restricted tokens")
+        collection = getattr(statement, "collection", None) or getattr(statement, "name", "")
+        operation = "read" if name in read | named_read else "write" if name in write else "manage"
+        authorize_collection(grants, collection, operation)
+        for target, _, _ in getattr(statement, "joins", []):
+            authorize_collection(grants, target, "read")
+        if name == "AddForeignKey":
+            authorize_collection(grants, statement.ref_collection, "read")
+
+
 def _validate_transaction_blocks(statements: list) -> None:
     active = False
     for statement in statements:
@@ -65,6 +97,7 @@ def _validate_transaction_blocks(statements: list) -> None:
 class QueryExecuteRequest(BaseModel):
     query: str = Field(min_length=1, max_length=_MAX_QUERY_LENGTH)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    include_raw: bool = True
 
 
 class QueryExecuteResponse(BaseModel):
@@ -73,10 +106,16 @@ class QueryExecuteResponse(BaseModel):
     raw: Any
     executionTimeMs: int
     statementCount: int
+    statementErrors: list[str] = Field(default_factory=list)
 
 
 @lru_cache(maxsize=1)
 def _load_nexoraql_package() -> ModuleType:
+    with _PARSER_LOCK:
+        return _load_nexoraql_package_locked()
+
+
+def _load_nexoraql_package_locked() -> ModuleType:
     """Load the parser under an alias so it does not occupy the native nexoradb module name."""
     if _PARSER_PACKAGE_ALIAS in sys.modules:
         return sys.modules[_PARSER_PACKAGE_ALIAS]
@@ -103,6 +142,8 @@ def execute_query(
     graph_manager: Any | None,
     payload: QueryExecuteRequest,
     granted_scopes: frozenset[str] | None = None,
+    granted_collections: dict[str, list[str]] | None = None,
+    allow_performance_controls: bool = True,
 ) -> QueryExecuteResponse:
     query = _normalize_query(payload.query)
     nexoraql = _load_nexoraql_package()
@@ -111,11 +152,18 @@ def execute_query(
     started_at = time.perf_counter()
     try:
         statements = nexoraql.parse(query, payload.parameters)
+        if not allow_performance_controls and any(type(s).__name__ in
+                {'ShowPerformance', 'SetPerformance', 'ShowIndexAdvice'} for s in statements):
+            raise HTTPException(403, 'Performance controls require an administrator')
         if len(statements) > _MAX_STATEMENTS:
             raise HTTPException(status_code=400, detail="Too many query statements")
         _validate_transaction_blocks(statements)
         if granted_scopes is not None:
             _authorize_statements(statements, granted_scopes)
+        authorize_collections(statements, granted_collections)
+        # Preserve query semantics: LIMIT is a total-result limit, not a batch
+        # size. The buffered response byte guard below must never silently
+        # rewrite the user's SELECT or report a truncated result as complete.
         statement_results = executor.execute_statements(statements)
     except Exception as exc:
         _raise_query_error(exc, nexoraql)
@@ -124,12 +172,16 @@ def execute_query(
     execution_time_ms = max(0, round((time.perf_counter() - started_at) * 1000))
 
     rows = _rows_from_results(statement_results)
+    if len(json.dumps(statement_results, ensure_ascii=False).encode("utf-8")) > 16 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Query response exceeds 16MiB; use document streaming")
     return QueryExecuteResponse(
         columns=_columns_from_rows(rows),
         rows=rows,
-        raw={"statements": statement_results},
+        raw={"statements": statement_results} if payload.include_raw else None,
         executionTimeMs=execution_time_ms,
         statementCount=len(statement_results),
+        statementErrors=[str(result.get("error") or "Query statement failed")
+                         for result in statement_results if result.get("success") is False],
     )
 
 

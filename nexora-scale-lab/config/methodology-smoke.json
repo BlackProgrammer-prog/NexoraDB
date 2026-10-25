@@ -1,0 +1,12 @@
+{
+  "records": 23,
+  "databases": ["nexoradb", "postgresql", "mongodb"],
+  "workloads": ["ycsb-a", "ycsb-b", "ycsb-c", "indexed-read"],
+  "clients": [2],
+  "index_policies": ["before-load", "after-load"],
+  "repetitions": 1,
+  "warmup_seconds": 0.005,
+  "measurement_seconds": 0.03,
+  "max_operations": 16,
+  "sample_interval_seconds": 0.02
+}

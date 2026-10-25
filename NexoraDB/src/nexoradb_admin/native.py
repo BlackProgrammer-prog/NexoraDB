@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import hashlib
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -29,6 +30,16 @@ def _load_native_from_path(path: Path) -> ModuleType:
     if "nexoradb" in sys.modules:
         module = sys.modules["nexoradb"]
         if hasattr(module, "DocEngine"):
+            loaded = getattr(module, '__native_module_path__', getattr(module, '__file__', None))
+            if loaded and Path(loaded).suffix == '.so' and Path(loaded).resolve() != path.resolve():
+                def digest(binary):
+                    checksum = hashlib.sha256()
+                    with Path(binary).open('rb') as source:
+                        for block in iter(lambda: source.read(1024*1024), b''):
+                            checksum.update(block)
+                    return checksum.digest()
+                if digest(loaded) != digest(path):
+                    raise RuntimeError('A different native engine is already loaded. Synchronize the packaged Release binary and restart; hot swapping native types is unsafe.')
             return module
         if hasattr(module, "__path__"):
             return _load_native_into_package(path, module)
@@ -59,6 +70,7 @@ def _load_native_into_package(path: Path, package: ModuleType) -> ModuleType:
         if name in {"__name__", "__package__", "__loader__", "__spec__"}:
             continue
         setattr(package, name, getattr(native_module, name))
+    package.__native_module_path__ = str(path.resolve())
     if not hasattr(package, "DocEngine"):
         raise RuntimeError(f"native NexoraDB module loaded from {path} without DocEngine")
     return package
@@ -80,7 +92,10 @@ def load_native_module(settings: AdminApiSettings) -> ModuleType:
 
 def create_doc_engine(settings: AdminApiSettings) -> Any:
     native = load_native_module(settings)
-    engine = native.DocEngine(str(settings.db_path))
+    rocks = native.RocksSettings()
+    rocks.memory_budget_bytes = settings.rocks_memory_mb * 1024**2
+    rocks.block_cache_bytes = settings.rocks_cache_mb * 1024**2
+    engine = native.DocEngine(str(settings.db_path), native.TransactionSettings(), rocks)
     if hasattr(engine, "is_healthy") and not engine.is_healthy():
         raise RuntimeError(f"DocEngine failed to open: {settings.db_path}")
     return engine

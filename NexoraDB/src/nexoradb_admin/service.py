@@ -200,6 +200,7 @@ def store_app_token(
     expires_at: int | None,
     created_at: int,
     secret: str,
+    collections: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Encrypt and persist an issued token in the C++ system collection."""
     record = {
@@ -212,6 +213,7 @@ def store_app_token(
         "createdAt": created_at,
         "expiresAt": expires_at,
         "scopes": sorted(set(scopes)),
+        "collections": collections,
     }
     result = engine.create_internal_app_token(
         token_id,
@@ -304,5 +306,6 @@ def _token_response(record: dict[str, Any], secret: str) -> dict[str, Any]:
         "createdAt": int(record.get("createdAt") or 0),
         "expiresAt": int(expires_at) if expires_at is not None else None,
         "scopes": [str(scope) for scope in record.get("scopes", [])],
+        "collections": record.get("collections"),
         "status": "expired" if expired else "active",
     }

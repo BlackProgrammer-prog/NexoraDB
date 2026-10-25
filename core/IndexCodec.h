@@ -1,6 +1,7 @@
 #pragma once
 
 #include "query/Evaluator.h"
+#include "query/DocumentView.h"
 
 #include <cstdint>
 #include <optional>
@@ -14,6 +15,12 @@ constexpr std::uint32_t kFormatVersion = 2;
 std::optional<std::string> EncodeTuple(
         const std::string& document,
         const std::vector<std::string>& fields);
+std::optional<std::string> EncodeTuple(
+        const query::DocumentView& document,
+        const std::vector<query::CompiledFieldPath>& fields);
+std::string EntryKeyFromPrefix(const std::string& prefix,
+                              const std::string& encoded_tuple,
+                              const std::string& document_id);
 
 std::optional<std::string> EncodeValues(
         const std::vector<query::FieldValue>& values);

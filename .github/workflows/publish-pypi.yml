@@ -62,6 +62,22 @@ jobs:
             git clone https://github.com/microsoft/vcpkg.git vcpkg
             ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
           fi
+          git -C vcpkg checkout 7476f0d4e77d3333fbb249657df8251c28c4faae
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Set up dashboard toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build and audit dashboard from the release source
+        working-directory: frontend
+        run: |
+          npm ci --registry=https://registry.npmjs.org
+          npm audit --audit-level=high --registry=https://registry.npmjs.org
+          npm run build
 
       - name: Build native extension
         env:

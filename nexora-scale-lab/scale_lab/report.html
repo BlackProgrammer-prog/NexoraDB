@@ -1,0 +1,36 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexora Scale Lab comparison</title>
+<style>body{font:15px system-ui;background:#f5f7fa;color:#172331;margin:30px auto;max-width:1400px;padding:0 20px}h1{font-size:28px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:20px}.card{background:white;border:1px solid #dce2ea;border-radius:12px;padding:18px}svg{width:100%;height:300px}select{margin:8px;padding:8px}table{border-collapse:collapse;width:100%;font-size:12px}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}.scroll{overflow:auto}.warning{background:#fff2d9;padding:16px;border-radius:8px}text{font:10px system-ui}button{padding:8px;cursor:pointer}pre{white-space:pre-wrap}</style>
+<h1>Nexora Scale Lab</h1><p id="status" class="warning"></p><p id="stats"></p>
+<label>Workload <select id="workload"></select></label><label>Index policy <select id="policy"></select></label>
+<label>Working set <select id="working"></select></label><label>Clients <select id="clients"></select></label>
+<p>Hover a bar or data point for its value. Whiskers show 95% Student t intervals across repetitions.</p>
+<div class="grid" id="charts"></div><h2>Verified trials</h2><div class="scroll"><table id="table"></table></div>
+<h2>Protocol checks</h2><pre id="checks"></pre><h2>Failed and incomplete attempts</h2><pre id="failures"></pre><h2>Methodology and scope</h2><ul id="notes"></ul>
+<script type="application/json" id="data">__REPORT_DATA__</script>
+<script>
+'use strict';const data=JSON.parse(document.getElementById('data').textContent),colors={nexoradb:'#076d8b',postgresql:'#8053b3',mongodb:'#218048'};
+const node=(tag,text)=>{let x=document.createElement(tag);if(text!==undefined)x.textContent=text;return x};
+document.getElementById('status').textContent=`Completed ${data.completed_trials}/${data.expected_trials} trials. Protocol checks: ${data.protocol_passed?'passed':'NOT passed'}. ${data.publication_status}`;
+document.getElementById('stats').textContent=data.statistics;document.getElementById('checks').textContent=JSON.stringify(data.protocol_checks,null,2);document.getElementById('failures').textContent=data.failure_accounting+'\n'+JSON.stringify(data.failed_or_incomplete_attempts,null,2);
+for(const note of [...data.claims,...data.scope_notes,...data.unsupported])document.getElementById('notes').append(node('li',note));
+for(const [id,key] of [['workload','workload'],['policy','index_policy'],['working','working_set'],['clients','clients']]){let el=document.getElementById(id);for(let value of [...new Set(data.aggregates.map(r=>r[key]))]){let o=node('option',String(value));o.value=value;el.append(o)}el.onchange=draw}
+const svgTag=(name,attrs)=>{let e=document.createElementNS('http://www.w3.org/2000/svg',name);for(let [k,v]of Object.entries(attrs))e.setAttribute(k,v);return e};
+function plot(title,rows,metric,lines=false){
+ if(lines)rows=rows.map(r=>({...r,clients:Number(r.label.split(' / ')[1])}));
+ let card=node('div');card.className='card';card.append(node('h3',title));let svg=svgTag('svg',{viewBox:'0 0 600 310',role:'img','aria-label':title});card.append(svg);document.getElementById('charts').append(card);
+ if(!rows.length){let empty=svgTag('text',{x:30,y:70});empty.textContent='No completed measurements';svg.append(empty);return}
+ let max=Math.max(...rows.map(r=>r.stats.ci95_high??r.stats.mean),1)*1.1;const y=v=>260-Math.max(0,v)/max*220;
+ for(let i=0;i<5;i++){let v=max*i/4;let t=svgTag('text',{x:2,y:y(v)});t.textContent=v.toPrecision(3);svg.append(t);svg.append(svgTag('line',{x1:65,x2:580,y1:y(v),y2:y(v),stroke:'#eee'}))}
+ const levels=[...new Set(rows.map(r=>r.clients))].sort((a,b)=>a-b),points={},labels=new Set();
+ rows.forEach((r,i)=>{let x=lines?90+levels.indexOf(r.clients)*460/Math.max(1,levels.length-1):80+(i+.5)*480/rows.length,val=r.stats.mean;
+  let shape=lines?svgTag('circle',{cx:x,cy:y(val),r:5,fill:colors[r.database],tabindex:0}):svgTag('rect',{x:x-150/rows.length,y:y(val),width:300/rows.length,height:260-y(val),fill:colors[r.database],tabindex:0});
+  let tooltip=svgTag('title',{});tooltip.textContent=`${r.label}: ${val}; n=${r.stats.n}; SD=${r.stats.stddev}; CI95=[${r.stats.ci95_low},${r.stats.ci95_high}]`;shape.append(tooltip);svg.append(shape);
+  if(r.stats.ci95_low!==null)svg.append(svgTag('line',{x1:x,x2:x,y1:y(r.stats.ci95_low),y2:y(r.stats.ci95_high),stroke:'#222'}));
+  if(!lines||!labels.has(r.clients)){let t=svgTag('text',{x:x,y:280,'text-anchor':'middle'});t.textContent=lines?`${r.clients} clients`:r.label;svg.append(t);labels.add(r.clients)}
+  (points[r.database]??=[]).push([x,y(val)])
+ });
+ if(lines){let i=0;for(let[engine,p]of Object.entries(points)){svg.prepend(svgTag('polyline',{points:p.map(x=>x.join(',')).join(' '),fill:'none',stroke:colors[engine]}));let legend=svgTag('text',{x:70+i++*160,y:22,fill:colors[engine]});legend.textContent=engine;svg.append(legend)}}
+}
+function draw(){document.getElementById('charts').replaceChildren();let w=document.getElementById('workload').value,p=document.getElementById('policy').value,f=document.getElementById('working').value,c=document.getElementById('clients').value;let filtered=data.aggregates.filter(r=>r.workload===w&&r.index_policy===p&&String(r.working_set)===f),chosen=filtered.filter(r=>String(r.clients)===c);const bars=(title,metric,rows=chosen,line=false)=>plot(title,rows.filter(r=>r.metrics[metric]).map(r=>({database:r.database,label:line?`${r.database} / ${r.clients}`:r.database,stats:r.metrics[metric]})),metric,line);let ingestion=data.ingestion.filter(r=>r.index_policy===p);plot('Ingestion records/s',ingestion.map(r=>({database:r.database,label:r.database,stats:r.records_per_second})),'records_per_second');bars('Read operations/s','reads_per_second');bars('Write operations/s','updates_per_second');for(const q of ['p50','p95','p99'])bars(`${q.toUpperCase()} response latency (ms)`,q+'_ms');bars('Throughput vs concurrency','successful_per_second',filtered.sort((a,b)=>a.database.localeCompare(b.database)||a.clients-b.clients),true);bars('P99 latency vs concurrency','p99_ms',filtered,true);bars('Total deployment CPU seconds','deployment_cpu_seconds');bars('Sampled total deployment peak PSS bytes','deployment_peak_pss_bytes');plot('Storage bytes — differing scopes; see notes',ingestion.map(r=>({database:r.database,label:r.database,stats:r.storage_bytes})),'storage_bytes');bars('Indexed equality lookups/s','successful_per_second',data.aggregates.filter(r=>r.workload==='indexed-read'&&r.index_policy===p&&String(r.clients)===c&&String(r.working_set)===f));bars('Error fraction','error_fraction');let table=document.getElementById('table');table.replaceChildren();let header=node('tr');for(let text of ['Database','Workload','Clients','Repetitions','Completed ops','Mean ops/s','P99 ms'])header.append(node('th',text));table.append(header);for(let r of chosen){let tr=node('tr');for(let value of [r.database,r.workload,r.clients,r.repetitions,r.counts.successful,r.metrics.successful_per_second.mean.toFixed(2),r.metrics.p99_ms.mean.toFixed(3)])tr.append(node('td',String(value)));table.append(tr)}}draw();
+</script></html>
