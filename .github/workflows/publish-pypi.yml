@@ -75,6 +75,7 @@ jobs:
       - name: Build and audit dashboard from the release source
         working-directory: frontend
         run: |
+          node scripts/check-lockfile.mjs
           npm ci --registry=https://registry.npmjs.org
           npm audit --audit-level=high --registry=https://registry.npmjs.org
           npm run build
