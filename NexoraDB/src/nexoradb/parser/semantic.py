@@ -1257,6 +1257,8 @@ class Executor:
         return {"success": True,
                 "version": getattr(nx, "__version__", "?"),
                 "graph_enabled": getattr(nx, "GRAPH_ENABLED", False),
+                "document_durability": (json.loads(self.engine.durability_report())
+                                        if hasattr(self.engine, 'durability_report') else None),
                 "collections": self.engine.list_collections(),
                 "graphs": (self.gm.list_graphs() if self.gm else []),
                 "algorithms": sorted(ALGO_SPECS.keys())}

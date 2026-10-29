@@ -100,6 +100,8 @@ def performance_status(engine):
                            'memtable_budget', 'memtable_usage', 'pending_compaction_bytes', 'stall_micros')}
                          if metrics is not None else None)
         return dict(parser_cache=parser_cache_stats(),
+                    document_durability=(json.loads(engine.durability_report())
+                                         if hasattr(engine,'durability_report') else None),
                     storage_cache=storage_cache,
                     write_path=(json.loads(engine.operation_metrics()).get('write_path')
                                 if native and hasattr(engine,'operation_metrics') else None),
