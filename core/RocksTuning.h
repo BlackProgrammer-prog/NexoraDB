@@ -24,7 +24,7 @@ struct RocksSettings {
     int max_write_buffers=3;
     size_t block_size=4096;
     int max_background_jobs=0; // zero = conservative disk/CPU policy
-    unsigned cpu_threads=0; // zero = hardware_concurrency, not an affinity claim
+    unsigned cpu_threads=0; // zero = current Linux affinity when available, else hardware_concurrency
     DiskClass disk=DiskClass::Unknown;
     bool dynamic_level_bytes=true;
     HotCompression hot_compression=HotCompression::Lz4;
@@ -36,7 +36,7 @@ struct RocksSettings {
     bool prefix_extractor=true;
     bool statistics_enabled=true;
     rocksdb::Env* env_for_testing=nullptr; // Non-owning fault-injection hook; must outlive engine.
-    DocumentDurability durability=DocumentDurability::Buffered;
+    DocumentDurability durability=DocumentDurability::Durable;
     std::shared_ptr<RocksResources> shared_resources;
 };
 // A stable transform for existing textual keyspaces + length-prefixed idx2.

@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <stdexcept>
 #include <thread>
+#ifdef __linux__
+#include <sched.h>
+#endif
 
 namespace nexora::core {
 RocksResources::RocksResources(size_t budget,size_t cache_budget)
@@ -54,6 +57,7 @@ public:
 }
 std::shared_ptr<const rocksdb::SliceTransform> MakeKeyspacePrefixExtractor() { return std::make_shared<KeyspacePrefix>(); }
 rocksdb::Options MakeRocksOptions(const RocksSettings& settings,const std::shared_ptr<RocksResources>& resources) {
+    (void)MakeDocumentWriteOptions(settings.durability); // Reject invalid enum before opening storage.
     if (!resources || settings.max_write_buffers<2 || settings.max_write_buffers>16 ||
         settings.block_size<512 || settings.block_size>128*1024 || settings.max_background_jobs<0 ||
         settings.max_background_jobs>64 || settings.rate_limit_bytes_per_second<0)
@@ -65,10 +69,18 @@ rocksdb::Options MakeRocksOptions(const RocksSettings& settings,const std::share
     rocksdb::Options options;
     if(settings.env_for_testing) options.env=settings.env_for_testing;
     options.create_if_missing=true; options.create_missing_column_families=true;
+    options.manual_wal_flush=false; // Buffered ACK still flushes WAL to the OS, not just process memory.
     options.max_open_files=500;
     options.write_buffer_size=write_buffer; options.max_write_buffer_number=settings.max_write_buffers;
     options.write_buffer_manager=resources->write_buffers;
-    const auto cpus=std::max(1U,settings.cpu_threads ? settings.cpu_threads : std::thread::hardware_concurrency());
+    unsigned detected_cpus=std::max(1U,std::thread::hardware_concurrency());
+#ifdef __linux__
+    cpu_set_t affinity;
+    CPU_ZERO(&affinity);
+    if (sched_getaffinity(0,sizeof(affinity),&affinity)==0)
+        detected_cpus=std::max(1U,unsigned(CPU_COUNT(&affinity)));
+#endif
+    const auto cpus=settings.cpu_threads ? settings.cpu_threads : detected_cpus;
     const auto requested=settings.max_background_jobs ? unsigned(settings.max_background_jobs) : (settings.disk==DiskClass::SSD ? 4U : 2U);
     options.max_background_jobs=int(std::min(cpus,requested));
     options.level_compaction_dynamic_level_bytes=settings.dynamic_level_bytes;
@@ -105,7 +117,14 @@ rocksdb::Options MakeRocksOptions(const RocksSettings& settings,const std::share
     return options;
 }
 rocksdb::WriteOptions MakeDocumentWriteOptions(DocumentDurability profile) {
-    rocksdb::WriteOptions options; options.sync=profile==DocumentDurability::Durable; return options;
+    rocksdb::WriteOptions options;
+    options.disableWAL=false;
+    switch(profile) {
+        case DocumentDurability::Durable: options.sync=true; break;
+        case DocumentDurability::Buffered: options.sync=false; break;
+        default: throw std::invalid_argument("invalid document durability profile");
+    }
+    return options;
 }
 rocksdb::ReadOptions MakeDocumentReadOptions() {
     rocksdb::ReadOptions options; options.verify_checksums=true;
