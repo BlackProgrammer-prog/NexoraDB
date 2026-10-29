@@ -132,8 +132,9 @@ public:
     DocumentStream(DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes)
         :engine_(&engine),collection_(std::move(collection)),condition_(std::move(condition)),
          page_size_(page_size),max_bytes_(max_bytes) {
-        if (!page_size || page_size>4096 || max_bytes<2 || max_bytes>64*1024*1024)
-            throw std::invalid_argument("stream requires page_size 1..4096 and max_page_bytes 2..64MiB");
+        if (!page_size || page_size>nexora::core::pagination::kMaxRecords ||
+                max_bytes<nexora::core::pagination::kMinBytes || max_bytes>nexora::core::pagination::kMaxBytes)
+            throw std::invalid_argument("stream requires page_size 1..1000 and max_page_bytes 2..64MiB");
     }
     ~DocumentStream() { if (!token_.empty()) engine_->ClosePage(token_); }
     py::object next() {
@@ -166,7 +167,8 @@ public:
         std::unique_lock lock(mutex_,std::try_to_lock);
         if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
         if (object_mode_) throw std::runtime_error("cannot mix object and raw cursor modes");
-        if (!requested || requested>4096) throw std::invalid_argument("batch limit must be 1..4096");
+        if (!requested || requested>nexora::core::pagination::kMaxRecords)
+            throw std::invalid_argument("batch limit must be 1..1000");
         raw_mode_=true;
         if (ended_) return py::make_tuple(py::bytes(),0);
         PageResult result;
@@ -179,7 +181,7 @@ public:
                 // FindPage emits a JSON array of objects from the trusted
                 // codec. Split only top-level objects, respecting escapes,
                 // strings and nested arrays/objects (never delimiter replace).
-                output.reserve(result.data.size()+12*std::min(requested,page_size_));
+                output.reserve(result.data.size()+13*std::min(requested,page_size_));
                 size_t start=0;
                 int depth=0;
                 bool quoted=false, escaped=false;
@@ -280,6 +282,10 @@ static const char* wal_op_to_string(WalOpType op) {
 // ══════════════════════════════════════════════════════════════
 
 PYBIND11_MODULE(nexoradb, m) {
+    m.attr("PAGE_MAX_RECORDS") = py::int_(nexora::core::pagination::kMaxRecords);
+    m.attr("PAGE_MIN_BYTES") = py::int_(nexora::core::pagination::kMinBytes);
+    m.attr("PAGE_DEFAULT_BYTES") = py::int_(nexora::core::pagination::kDefaultBytes);
+    m.attr("PAGE_MAX_BYTES") = py::int_(nexora::core::pagination::kMaxBytes);
     m.def("decode_bson_json",[](py::bytes buffer) {
         const std::string_view bytes(PyBytes_AS_STRING(buffer.ptr()),PyBytes_GET_SIZE(buffer.ptr()));
         DocumentCodec::Result decoded;
@@ -853,6 +859,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_static("inspect_store",&DocEngine::InspectStore,py::call_guard<py::gil_scoped_release>())
             .def("pause_document_migration",&DocEngine::PauseDocumentMigration,py::call_guard<py::gil_scoped_release>())
             .def("operation_metrics",&DocEngine::OperationMetrics,py::call_guard<py::gil_scoped_release>())
+            .def("durability_report",&DocEngine::DurabilityReport,py::call_guard<py::gil_scoped_release>())
             .def("configure_query_tuning",&DocEngine::ConfigureQueryTuning,py::arg("read_cache_admission"),py::arg("smart_indexes"),py::call_guard<py::gil_scoped_release>())
             .def("query_tuning",&DocEngine::QueryTuning,py::call_guard<py::gil_scoped_release>())
             .def("drain_slow_queries",&DocEngine::DrainSlowQueries,py::call_guard<py::gil_scoped_release>())
@@ -1062,18 +1069,21 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("iter_documents",[](DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes) {
                 return std::make_unique<DocumentStream>(engine,std::move(collection),std::move(condition),page_size,max_bytes);
             },py::arg("collection"),py::arg("condition")=Condition{},py::arg("page_size")=128,
-               py::arg("max_page_bytes")=4*1024*1024,py::keep_alive<0,1>())
+               py::arg("max_page_bytes")=nexora::core::pagination::kDefaultBytes,py::keep_alive<0,1>())
             .def("find_page",
                  [](DocEngine& e, const std::string& collection,
                     Condition condition, std::uint32_t limit,
-                    const std::string& token) {
+                    const std::string& token, std::size_t max_bytes) {
                      py::gil_scoped_release release;
-                     return e.FindPage(collection, condition, limit, token);
+                     return e.FindPage(collection, condition, limit, token, max_bytes);
                  },
                  py::arg("collection"),
                  py::arg("condition") = Condition{},
                  py::arg("limit") = 100,
-                 py::arg("continuation_token") = "")
+                 py::arg("continuation_token") = "",
+                 py::arg("max_page_bytes") = nexora::core::pagination::kDefaultBytes)
+            .def("close_page", &DocEngine::ClosePage, py::arg("continuation_token"),
+                 py::call_guard<py::gil_scoped_release>())
 
             .def("explain_plan", &DocEngine::ExplainPlan,
                  py::arg("collection"), py::arg("condition"),
