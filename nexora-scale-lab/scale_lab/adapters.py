@@ -8,6 +8,7 @@ import re
 import threading
 from pathlib import Path
 from contextlib import contextmanager
+from .pagination import MAX_PAGE_RECORDS, DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, validate_page_size, validate_page_bytes
 
 
 class NotSupported(RuntimeError):
@@ -77,8 +78,14 @@ class NexoraAdapter(Adapter):
     def connect(self):
         import nexoradb as native
         self.native = native
+        if (getattr(native, 'PAGE_MAX_RECORDS', None) != MAX_PAGE_RECORDS or
+                getattr(native, 'PAGE_DEFAULT_BYTES', None) != DEFAULT_PAGE_BYTES or
+                getattr(native, 'PAGE_MAX_BYTES', None) != MAX_PAGE_BYTES):
+            raise RuntimeError('Native pagination contract is missing or incompatible; rebuild the extension')
         if not hasattr(native, 'DocumentDurability'):
             raise RuntimeError('Native extension lacks explicit durability; rebuild current source')
+        if not hasattr(native.DocEngine, 'durability_report'):
+            raise RuntimeError('Native durability reporting missing; rebuild extension before opening storage')
         settings = native.RocksSettings()
         settings.durability = native.DocumentDurability.Durable
         settings.memory_budget_bytes = self.memory_budget_bytes
@@ -86,6 +93,12 @@ class NexoraAdapter(Adapter):
         settings.wal_bytes_per_sync = self.wal_range_sync_mb*1024**2
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.engine = native.DocEngine(self.path, native.TransactionSettings(), settings)
+        if not hasattr(self.engine, 'durability_report'):
+            raise RuntimeError('Native durability reporting missing; rebuild extension')
+        effective = json.loads(self.engine.durability_report())
+        if (effective.get('profile') != 'durable' or effective.get('sync_on_ack') is not True
+                or effective.get('wal_enabled') is not True or effective.get('manual_wal_flush') is not False):
+            raise RuntimeError('Benchmark requires effective durable WAL ACKs')
 
     def disconnect(self):
         if hasattr(self, 'engine'):
@@ -159,8 +172,10 @@ class NexoraAdapter(Adapter):
     def count(self):
         return int(native_result(self.engine.count(self.namespace)))
 
-    def iter_records(self, batch_size=1000):
-        stream = self.engine.iter_documents(self.namespace, page_size=min(batch_size, 1000))
+    def iter_records(self, batch_size=MAX_PAGE_RECORDS, max_page_bytes=DEFAULT_PAGE_BYTES):
+        validate_page_size(batch_size)
+        validate_page_bytes(max_page_bytes)
+        stream = self.engine.iter_documents(self.namespace, page_size=batch_size, max_page_bytes=max_page_bytes)
         try:
             for value in stream:
                 yield logical(value)
@@ -177,6 +192,7 @@ class NexoraAdapter(Adapter):
     def metadata(self):
         import os
         return {'deployment': 'embedded', 'durability': 'RocksDB WAL sync=true',
+                'effective_durability': json.loads(self.engine.durability_report()),
                 'native_build': self.native.build_info(),
                 'native_binary': str(Path(self.native.__file__).resolve()),
                 'resource_roots': [os.getpid()], 'resource_attribution': 'engine_and_generator_combined',
@@ -279,6 +295,7 @@ class PostgreSQLAdapter(Adapter):
         return self.connection().execute(f'SELECT count(*) FROM {self.namespace}').fetchone()[0]
 
     def iter_records(self, batch_size=1000):
+        validate_page_size(batch_size)
         import psycopg
         with psycopg.connect(self.dsn, connect_timeout=10) as connection:
             with connection.cursor(name='scale_lab_validation') as cursor:
@@ -383,6 +400,7 @@ class MongoDBAdapter(Adapter):
         return self.collection.count_documents({})
 
     def iter_records(self, batch_size=1000):
+        validate_page_size(batch_size)
         with self.collection.find({}, batch_size=batch_size, no_cursor_timeout=False) as cursor:
             for value in cursor:
                 yield logical(value)
