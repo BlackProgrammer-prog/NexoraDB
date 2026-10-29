@@ -672,7 +672,7 @@ namespace nexora {
                   write_options_(MakeDocumentWriteOptions(rocks_settings.durability)),read_options_(MakeDocumentReadOptions()) {
 
 
-            // Immutable defaults: sync=false, verify_checksums=true. Customize
+            // Immutable profile-specific writes; reads verify checksums. Customize
             // per-call snapshots, bounds and cache policy on local copies only.
 
             txn_db_options_.transaction_lock_timeout =
@@ -729,11 +729,7 @@ namespace nexora {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     if(stop.stop_requested()) break;
                     std::lock_guard lock(page_sessions_mutex_);
-                    const auto now=PageSessionNow();
-                    for(auto it=page_sessions_.begin();it!=page_sessions_.end();) {
-                        if(it->second->expires_at<=now && it->second.use_count()==1) it=page_sessions_.erase(it);
-                        else ++it;
-                    }
+                    PrunePageSessionsLocked();
                 }
             });
 
@@ -1943,10 +1939,11 @@ namespace nexora {
 
                 std::string stored_value;
 
-                rocksdb::Status status = transaction_->GetForUpdate(
-                        engine_.read_options_,
-                        counter_key,
-                        &stored_value);
+                rocksdb::Status status;
+                {
+                    WriteStageTimer timer(engine_.operations_,OperationsState::CounterLookupStage);
+                    status = transaction_->GetForUpdate(engine_.read_options_,counter_key,&stored_value);
+                }
 
                 if (status.IsNotFound()) {
                     return rocksdb::Status::Corruption(
@@ -2011,6 +2008,7 @@ namespace nexora {
                             "Mutation transaction is not initialized");
                 }
 
+                WriteStageTimer timer(engine_.operations_,OperationsState::CommitStage,!uses_savepoint_);
                 const rocksdb::Status status = uses_savepoint_
                         ? transaction_->PopSavePoint()
                         : transaction_->Commit();
@@ -2288,7 +2286,8 @@ namespace nexora {
                 const std::string& input_document) {
             std::string bson_document = input_document;
             TouchUserActivity();
-            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_,std::defer_lock);
+            {WriteStageTimer timer(operations_,OperationsState::DdlWaitStage);ddl_lock.lock();}
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -2416,7 +2415,8 @@ namespace nexora {
                                        const std::vector<std::string_view>& bson_documents,
                                        bool bson_input) {
             TouchUserActivity();
-            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_);
+            std::shared_lock<std::shared_mutex> ddl_lock(index_ddl_mutex_,std::defer_lock);
+            {WriteStageTimer timer(operations_,OperationsState::DdlWaitStage);ddl_lock.lock();}
             if (IsReservedCollectionName(collection_name)) {
                 return DBResult::Err("reserved collection name");
             }
@@ -2910,30 +2910,22 @@ namespace nexora {
                 std::uint32_t limit,
                 const std::string& continuation_token,size_t max_bytes) {
             PageResult result;
-            TouchUserActivity();
             if (limit == 0) {
                 result.error_msg = "Page limit must be greater than zero";
                 return result;
             }
-            if(limit>1000 || max_bytes>64U*1024U*1024U) {
+            if(limit>pagination::kMaxRecords || max_bytes<pagination::kMinBytes || max_bytes>pagination::kMaxBytes) {
                 result.error_msg="Page exceeds bounded limit (1000 records / 64MiB)";
                 return result;
             }
-            if(max_bytes==0) max_bytes=4U*1024U*1024U;
+            TouchUserActivity();
             if (!CollectionExists(collection_name)) {
                 result.error_msg = "Collection '" + collection_name + "' does not exist";
                 return result;
             }
             std::unique_lock<std::mutex> sessions_lock(page_sessions_mutex_);
+            PrunePageSessionsLocked();
             const auto now = PageSessionNow();
-            for (auto iterator = page_sessions_.begin();
-                 iterator != page_sessions_.end();) {
-                if (iterator->second->expires_at <= now && iterator->second.use_count()==1) {
-                    iterator = page_sessions_.erase(iterator);
-                } else {
-                    ++iterator;
-                }
-            }
 
             std::string session_id;
             std::string cursor_key;
@@ -2941,17 +2933,27 @@ namespace nexora {
             if (continuation_token.empty()) {
                 // Native callers bypass HTTP admission. Bound retained
                 // snapshots here too, before allocating another session.
-                if (page_sessions_.size() >= 128) {
+                if (page_live_snapshots_->load() >= pagination::kMaxSnapshots) {
                     result.error_msg = "Page snapshot capacity exhausted; close existing cursors";
                     return result;
                 }
                 session_id = GenerateDocId();
                 session = std::make_shared<PageSession>();
-                session->snapshot = std::shared_ptr<const rocksdb::Snapshot>(txn_db_->GetSnapshot(),
-                    [db=txn_db_.get()](const rocksdb::Snapshot* snapshot) { if(snapshot) db->ReleaseSnapshot(snapshot); });
+                const auto* snapshot = txn_db_->GetSnapshot();
+                if (!snapshot) {
+                    result.error_msg = "Unable to acquire page snapshot";
+                    return result;
+                }
+                page_live_snapshots_->fetch_add(1);
+                session->snapshot = std::shared_ptr<const rocksdb::Snapshot>(snapshot,
+                    [db=txn_db_.get(), live=page_live_snapshots_](const rocksdb::Snapshot* value) {
+                        db->ReleaseSnapshot(value);
+                        live->fetch_sub(1);
+                    });
                 session->collection = collection_name;
                 session->condition = condition;
-                session->expires_at = now + std::chrono::minutes(2);
+                session->created_at = now;
+                session->expires_at = now + std::chrono::seconds(pagination::kIdleLeaseSeconds);
                 page_sessions_.emplace(session_id, session);
             } else {
                 if (!continuation_token.starts_with("s1.")) {
@@ -2976,7 +2978,7 @@ namespace nexora {
                 session = found->second;
                 // A progressing scan keeps its original snapshot. Expire idle
                 // cursors rather than truncating valid full scans at five minutes.
-                session->expires_at = now + std::chrono::minutes(2);
+                session->expires_at = now + std::chrono::seconds(pagination::kIdleLeaseSeconds);
             }
             // Registry lock protects membership/expiry only. Independent
             // cursors scan concurrently; close/expiry cannot free an active
@@ -3018,7 +3020,7 @@ namespace nexora {
             }
 
             std::string json;
-            const auto reserve_bytes=std::min<std::size_t>(limit,4096)*256+2;
+            const auto reserve_bytes=static_cast<std::size_t>(limit)*256+2;
             json.reserve(max_bytes ? std::min(reserve_bytes,max_bytes) : reserve_bytes);
             json.push_back('[');
             bool first = true;
@@ -3067,6 +3069,17 @@ namespace nexora {
             result.success = true;
             result.data = std::move(json);
             if (!last_key.empty() && iterator->Valid()) {
+                // Idle time starts after successful work, not before a slow page.
+                // ClosePage/PrepareShutdown must never be undone by this renewal.
+                std::lock_guard registry_lock(page_sessions_mutex_);
+                const auto found = page_sessions_.find(session_id);
+                if (found==page_sessions_.end() || found->second!=session) {
+                    result.success = false;
+                    result.data = "[]";
+                    result.error_msg = "Page session closed during scan";
+                    return result;
+                }
+                session->expires_at = PageSessionNow() + std::chrono::seconds(pagination::kIdleLeaseSeconds);
                 result.continuation_token = "s1." + session_id + "." +
                         EncodeCursorToken(last_key);
             } else {
@@ -4064,8 +4077,14 @@ namespace nexora {
         DBResult DocEngine::CommitTransaction(TxHandle& tx_handle) {
             if (!tx_handle.IsValid())
                 return DBResult::Err("Invalid transaction handle");
-            rocksdb::Status s = tx_handle.Get()->Commit();
+            rocksdb::Status s;
+            {WriteStageTimer timer(operations_,OperationsState::CommitStage);s=tx_handle.Get()->Commit();}
             if (!s.ok()) {
+                {
+                    std::lock_guard lock(operations_.mutex);
+                    operations_.io_error |= s.IsIOError();
+                    operations_.corruption |= s.IsCorruption();
+                }
                 tx_handle.Reset();
                 return RocksFailure("CommitTransaction", s);
             }
@@ -4078,6 +4097,11 @@ namespace nexora {
                 return DBResult::Err("Invalid transaction handle");
             rocksdb::Status s = tx_handle.Get()->Rollback();
             if (!s.ok()) {
+                {
+                    std::lock_guard lock(operations_.mutex);
+                    operations_.io_error |= s.IsIOError();
+                    operations_.corruption |= s.IsCorruption();
+                }
                 tx_handle.Reset();
                 return RocksFailure("RollbackTransaction", s);
             }

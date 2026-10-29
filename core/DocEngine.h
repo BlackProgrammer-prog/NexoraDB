@@ -43,6 +43,7 @@
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
 #include "RocksTuning.h"
+#include "PaginationLimits.h"
 #include "Operations.h"
 
 // ─── RocksDB ───
@@ -418,6 +419,7 @@ namespace nexora {
             std::string HealthReport() const;
             DBResult PrepareShutdown(); // Caller must first stop accepting requests.
             std::string MemoryReport(); // Estimates overlap; not a total RSS accounting.
+            std::string DurabilityReport() const; // Effective document settings, not a graph/replication guarantee.
 
             /** Test-only one-shot fault injection for atomicity tests. */
             void SetMutationFaultPointForTesting(
@@ -657,7 +659,8 @@ namespace nexora {
                     const std::string& collection_name,
                     const nexora::query::Condition& condition,
                     std::uint32_t limit,
-                    const std::string& continuation_token = "",size_t max_bytes=0);
+                    const std::string& continuation_token = "",
+                    size_t max_bytes=pagination::kDefaultBytes);
             void ClosePage(const std::string& continuation_token);
 
             // ──────────────────────────────────────────────────────────
@@ -1045,14 +1048,26 @@ namespace nexora {
                 std::string collection;
                 nexora::query::Condition condition;
                 std::chrono::steady_clock::time_point expires_at;
+                std::chrono::steady_clock::time_point created_at;
             };
             std::mutex page_sessions_mutex_;
             std::unordered_map<std::string, std::shared_ptr<PageSession>> page_sessions_;
             std::jthread page_reaper_worker_;
+            // Includes snapshots retired by ClosePage but still held by a call.
+            std::shared_ptr<std::atomic<std::size_t>> page_live_snapshots_ =
+                std::make_shared<std::atomic<std::size_t>>(0);
+            void PrunePageSessionsLocked() {
+                const auto now = PageSessionNow();
+                for (auto it=page_sessions_.begin(); it!=page_sessions_.end();) {
+                    if (it->second->expires_at<=now && it->second.use_count()==1)
+                        it=page_sessions_.erase(it);
+                    else ++it;
+                }
+            }
             // Accessed only under page_sessions_mutex_; no public clock control.
-            std::chrono::steady_clock::duration page_clock_offset_for_testing_{};
+            std::optional<std::chrono::steady_clock::time_point> page_now_for_testing_;
             std::chrono::steady_clock::time_point PageSessionNow() const {
-                return std::chrono::steady_clock::now()+page_clock_offset_for_testing_;
+                return page_now_for_testing_.value_or(std::chrono::steady_clock::now());
             }
 
             struct MutationMetadata {
