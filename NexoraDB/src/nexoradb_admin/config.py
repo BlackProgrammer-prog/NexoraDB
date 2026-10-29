@@ -53,7 +53,14 @@ class AdminApiSettings:
         )
     )
 
+    rocks_auto_tune: bool = field(default_factory=lambda: os.getenv('NEXORADB_ROCKS_AUTO_TUNE', 'true').lower() == 'true')
+    rocks_durability: str = field(default_factory=lambda: os.getenv('NEXORADB_ROCKS_DURABILITY', 'durable').lower())
+
     def validate_for_startup(self) -> None:
+        if type(self.rocks_durability) is not str or self.rocks_durability not in {'durable', 'buffered'}:
+            raise RuntimeError('NEXORADB_ROCKS_DURABILITY must be durable or buffered')
+        if type(self.rocks_auto_tune) is not bool or os.getenv('NEXORADB_ROCKS_AUTO_TUNE', 'true').lower() not in {'true', 'false'}:
+            raise RuntimeError('NEXORADB_ROCKS_AUTO_TUNE must be true or false')
         if (type(self.rocks_memory_mb) is not int or not 4 <= self.rocks_memory_mb <= 16384
                 or type(self.rocks_cache_mb) is not int or not 0 <= self.rocks_cache_mb < self.rocks_memory_mb):
             raise RuntimeError('Rocks memory must be 4..16384 MiB; cache must be 0 (half) or below total budget')
