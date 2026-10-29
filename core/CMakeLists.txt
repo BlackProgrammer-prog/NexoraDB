@@ -98,7 +98,7 @@ install(TARGETS nexora_core
         RUNTIME DESTINATION bin
 )
 
-install(FILES DocEngine.h DocumentCodec.h
+install(FILES DocEngine.h DocumentCodec.h PaginationLimits.h
         DESTINATION include/nexoradb/core
 )
 
