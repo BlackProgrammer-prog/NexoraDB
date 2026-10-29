@@ -56,7 +56,8 @@ DBResult DocEngine::InsertManyBsonIngest(const std::string& collection,const std
             if(doc.size()>64*1024*1024-bytes) return DBResult::Err("Ingestion batch exceeds 64MiB");
             bytes+=doc.size();
         }
-        std::unique_lock ddl(index_ddl_mutex_);
+        std::unique_lock ddl(index_ddl_mutex_,std::defer_lock);
+        {WriteStageTimer timer(operations_,OperationsState::DdlWaitStage);ddl.lock();}
         if(IsReservedCollectionName(collection)) return DBResult::Err("reserved collection name");
         MutationMetadata metadata;
         auto status=LoadMutationMetadata(collection,metadata);
@@ -170,7 +171,8 @@ DBResult DocEngine::InsertManyBsonIngest(const std::string& collection,const std
         if(!status.ok()) return RocksFailure("Ingest counter fault",status);
         rocksdb::TransactionDBWriteOptimizations exclusive;
         exclusive.skip_concurrency_control=true;
-        status=txn_db_->Write(write_options_,exclusive,&batch);
+        {WriteStageTimer timer(operations_,OperationsState::CommitStage);
+         status=txn_db_->Write(write_options_,exclusive,&batch);}
         if(!status.ok()) return RocksFailure("Ingest atomic commit",status);
         return DBResult::Ok(std::to_string(ids.size()));
     });
@@ -223,6 +225,15 @@ std::string DocEngine::OperationMetrics() const {
         {"unordered_write",db_options_.unordered_write},{"pipelined_write",db_options_.enable_pipelined_write},
         {"write_buffer_bytes",db_options_.write_buffer_size},{"max_background_jobs",db_options_.max_background_jobs},
         {"statistics_available",bool(db_options_.statistics)}};
+    auto& stages=output["write_path"]["stages"];
+    const char* stage_names[]={"commit","counter_get_for_update","insert_ddl_lock_wait"};
+    for(size_t i=0;i<OperationsState::WriteStageCount;++i) {
+        const auto& stage=operations_.write_stages[i];
+        stages[stage_names[i]]={{"calls",stage.calls.load(std::memory_order_relaxed)},
+            {"total_ns",stage.nanoseconds.load(std::memory_order_relaxed)},
+            {"max_ns",stage.max_nanoseconds.load(std::memory_order_relaxed)}};
+    }
+    output["write_path"]["stage_scope"]="sampled overlapping wall times, not additive; counter includes lock/storage lookup, commit includes queue/WAL/memtable; savepoints excluded";
     if(const auto& stats=db_options_.statistics) {
         auto& path=output["write_path"];
         path["wal_syncs"]=stats->getTickerCount(rocksdb::WAL_FILE_SYNCED);
@@ -261,6 +272,15 @@ std::string DocEngine::HealthReport() const {
         {"corruption_latched",operations_.corruption},{"io_error_latched",operations_.io_error},{"quiescing",operations_.quiescing},
         {"scope","observed state; not a full integrity scan"}}).dump();
 }
+std::string DocEngine::DurabilityReport() const {
+    return nlohmann::json({{"profile",write_options_.sync ? "durable" : "buffered"},
+        {"wal_enabled",!write_options_.disableWAL},{"sync_on_ack",write_options_.sync},
+        {"manual_wal_flush",db_options_.manual_wal_flush},
+        {"ack_boundary","successful native write/transaction commit; transaction staging is not commit"},
+        {"failure_outcome","unknown on IO/commit failure; reconcile before retry"},
+        {"scope","document engine only; no replication or atomic document+graph transaction"},
+        {"storage_assumption","filesystem/device honors successful sync; process-crash tests do not prove power-loss durability"}}).dump();
+}
 std::string DocEngine::MemoryReport() {
     nlohmann::json output;
     const auto metrics=GetRocksMetrics();
@@ -281,13 +301,25 @@ std::string DocEngine::MemoryReport() {
     property("rocksdb.oldest-snapshot-time","oldest_snapshot_unix_seconds");
     {
         std::lock_guard lock(page_sessions_mutex_);
+        PrunePageSessionsLocked();
         const auto now=PageSessionNow();
-        for(auto it=page_sessions_.begin();it!=page_sessions_.end();) {
-            if(it->second->expires_at<=now && it->second.use_count()==1) it=page_sessions_.erase(it);
-            else ++it;
-        }
         output["page_sessions"]=page_sessions_.size();
-        output["page_session_capacity"]=128;
+        output["page_session_capacity"]=pagination::kMaxSnapshots;
+        const auto live=page_live_snapshots_->load();
+        output["page_live_snapshots"]=live;
+        output["page_retired_inflight_snapshots"]=live-page_sessions_.size();
+        std::size_t active=0;
+        double oldest_age=0;
+        for (const auto& [id,session] : page_sessions_) {
+            if (session.use_count()>1) ++active;
+            oldest_age=std::max(oldest_age,std::chrono::duration<double>(now-session->created_at).count());
+        }
+        output["page_active_sessions"]=active;
+        output["page_idle_sessions"]=page_sessions_.size()-active;
+        output["page_oldest_session_age_seconds"]=oldest_age;
+        output["page_idle_lease_seconds"]=pagination::kIdleLeaseSeconds;
+        output["page_absolute_lifetime_seconds"]=nullptr; // Renewable active scans have no absolute cutoff.
+        output["page_snapshot_bytes"]=nullptr; // RocksDB exposes no exact per-snapshot byte attribution.
     }
     output["scope"]="overlapping RocksDB estimates; cache includes index/filter blocks; excludes Python, allocator overhead and graph";
     return output.dump();
