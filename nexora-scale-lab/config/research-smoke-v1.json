@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "require_loaded_artifacts": true,
+  "seed": 2026,
+  "repetitions": 3,
+  "timeout_seconds": 60,
+  "drift_fraction": 0.10,
+  "max_cv": 0.10,
+  "commands": {
+    "A": ["/home/parham/NexoraDB/nexora-scale-lab/.venv/bin/python", "scripts/research_workload.py"],
+    "B": ["/home/parham/NexoraDB/nexora-scale-lab/.venv/bin/python", "scripts/research_workload.py"]
+  },
+  "binaries": {
+    "A": ["NexoraDB/src/nexoradb/native/nexoradb.cpython-310-x86_64-linux-gnu.so"],
+    "B": ["NexoraDB/src/nexoradb/native/nexoradb.cpython-310-x86_64-linux-gnu.so"]
+  },
+  "workload": {
+    "version": 2,
+    "scenario": "document-oltp",
+    "seed": 2026,
+    "records": 64,
+    "operations": 30,
+    "clients": 1,
+    "read_percent": 50,
+    "durability": "local-wal-sync",
+    "transport": "embedded"
+  }
+}
