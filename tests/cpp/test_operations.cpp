@@ -92,10 +92,16 @@ public:
         std::unique_ptr<rocksdb::WritableFile> owned; FailureEnv& env;
         File(std::unique_ptr<rocksdb::WritableFile> file,FailureEnv& value):WritableFileWrapper(file.get()),owned(std::move(file)),env(value) {}
         rocksdb::Status Append(const rocksdb::Slice& data) override {
-            return env.failure ? env.injected() : owned->Append(data);
+            return env.failure==1 || env.failure==2 ? env.injected() : owned->Append(data);
         }
         rocksdb::Status Append(const rocksdb::Slice& data,const rocksdb::DataVerificationInfo& info) override {
-            return env.failure ? env.injected() : owned->Append(data,info);
+            return env.failure==1 || env.failure==2 ? env.injected() : owned->Append(data,info);
+        }
+        rocksdb::Status Sync() override {
+            return env.failure==3 ? rocksdb::Status::IOError("injected WAL sync failure") : owned->Sync();
+        }
+        rocksdb::Status Fsync() override {
+            return env.failure==3 ? rocksdb::Status::IOError("injected WAL fsync failure") : owned->Fsync();
         }
     };
     rocksdb::Status NewWritableFile(const std::string& path,std::unique_ptr<rocksdb::WritableFile>* file,const rocksdb::EnvOptions& options) override {
@@ -143,6 +149,50 @@ TEST(Operations, DiskFullAndPermissionWalErrorsFailClosedWithoutPartialInsert) {
         env.failure=0;
         EXPECT_FALSE(engine.FindById("items","a").success);
     }
+}
+TEST(Operations, DurableSyncFailureNeverAcknowledgesCommitOrBatch) {
+    for(int mode : {0,1,2}) {
+        TestTempDir temp("wal_sync_failure"); FailureEnv env;
+        RocksSettings settings; settings.env_for_testing=&env;
+        DocEngine engine(temp.path().string(),{},settings); engine.PauseDocumentMigration();
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        env.failure=3;
+        if(mode==1) {
+            auto tx=engine.BeginTransaction(); ASSERT_TRUE(tx);
+            ASSERT_TRUE(engine.InsertOneTx(*tx,"items",R"({"_id":"tx"})").success);
+            const auto committed=engine.CommitTransaction(*tx);
+            EXPECT_FALSE(committed.success);
+            EXPECT_FALSE(tx->IsValid());
+        } else if(mode==2) {
+            const auto encoded=DocumentCodec::EncodeJson(R"({"_id":"bulk"})");
+            const auto bson=encoded.value.substr(DocumentCodec::kEnvelopeSize);
+            EXPECT_FALSE(engine.InsertManyBsonIngest("items",{bson}).success);
+        } else {
+            EXPECT_FALSE(engine.InsertMany("items",{R"({"_id":"a"})",R"({"_id":"b"})"}).success);
+        }
+        EXPECT_TRUE(Json::parse(engine.HealthReport())["io_error_latched"]);
+        EXPECT_FALSE(engine.PrepareShutdown().success);
+        // WAL append may already have succeeded: recovery outcome is unknown,
+        // so do not assert that failed writes can never appear after reopen.
+        env.failure=0;
+    }
+}
+TEST(Operations, StageTelemetryCountsCommitsNotTransactionSavepoints) {
+    TestTempDir temp("write_stage_metrics");DocEngine engine(temp.path().string());
+    ASSERT_TRUE(engine.CreateCollection("items").success);
+    const auto stages=[&] {return Json::parse(engine.OperationMetrics())["write_path"]["stages"];};
+    const auto initial=stages();
+    ASSERT_TRUE(engine.InsertMany("items",{R"({"_id":"a"})",R"({"_id":"b"})"}).success);
+    const auto batch=stages();
+    EXPECT_EQ(batch["commit"]["calls"].get<uint64_t>(),initial["commit"]["calls"].get<uint64_t>()+1);
+    EXPECT_EQ(batch["counter_get_for_update"]["calls"].get<uint64_t>(),initial["counter_get_for_update"]["calls"].get<uint64_t>()+1);
+    auto tx=engine.BeginTransaction();ASSERT_TRUE(tx);
+    ASSERT_TRUE(engine.InsertOneTx(*tx,"items",R"({"_id":"tx"})").success);
+    EXPECT_EQ(stages()["commit"]["calls"],batch["commit"]["calls"]);
+    ASSERT_TRUE(engine.CommitTransaction(*tx).success);
+    EXPECT_EQ(stages()["commit"]["calls"].get<uint64_t>(),batch["commit"]["calls"].get<uint64_t>()+1);
+    EXPECT_GT(stages()["commit"]["total_ns"].get<uint64_t>(),0U);
+    EXPECT_GT(stages()["insert_ddl_lock_wait"]["calls"].get<uint64_t>(),0U);
 }
 TEST(Operations, ExclusiveIngestWalFailureDoesNotPublishPartialBatch) {
     for(int failure:{1,2}) {

@@ -9,8 +9,36 @@
 #include <rocksdb/write_batch.h>
 #include <rocksdb/table.h>
 #include <bson/bson.h>
+#ifdef __linux__
+#include <sched.h>
+#endif
 using namespace nexora::core;
 using namespace nexora::query;
+
+TEST(RocksTuning, AutomaticWorkersRespectCurrentAffinity) {
+#ifdef __linux__
+    cpu_set_t previous;
+    ASSERT_EQ(sched_getaffinity(0,sizeof(previous),&previous),0);
+    struct Restore {
+        cpu_set_t value;
+        ~Restore() { sched_setaffinity(0,sizeof(value),&value); }
+    } restore{previous};
+    int selected=-1;
+    for(int i=0;i<CPU_SETSIZE;++i) if(CPU_ISSET(i,&previous)) {selected=i;break;}
+    ASSERT_GE(selected,0);
+    cpu_set_t single;
+    CPU_ZERO(&single); CPU_SET(selected,&single);
+    ASSERT_EQ(sched_setaffinity(0,sizeof(single),&single),0);
+    RocksSettings settings;
+    settings.disk=DiskClass::SSD;
+    auto resources=std::make_shared<RocksResources>(16*1024*1024);
+    EXPECT_EQ(MakeRocksOptions(settings,resources).max_background_jobs,1);
+    settings.cpu_threads=2; // Explicit native configuration remains authoritative.
+    EXPECT_EQ(MakeRocksOptions(settings,resources).max_background_jobs,2);
+#else
+    GTEST_SKIP()<<"Linux affinity-specific policy";
+#endif
+}
 
 TEST(RocksTuning, UnchangedIndexTuplesAvoidRewriteAndQueryControlsKeepConstraints) {
     TestTempDir temp("smart_update_index_tuning");
@@ -190,6 +218,8 @@ TEST(RocksTuning, BsonInsertPreservesValidationAtomicityDefaultsAndIndexes) {
 }
 
 TEST(RocksTuning, BudgetOptionsProfilesAndPrefixDomain) {
+    EXPECT_EQ(RocksSettings{}.durability,DocumentDurability::Durable);
+    EXPECT_THROW(MakeDocumentWriteOptions(static_cast<DocumentDurability>(999)),std::invalid_argument);
     {
         auto large=std::make_shared<RocksResources>(5120ULL*1024*1024,4096ULL*1024*1024);
         auto auto_options=MakeRocksOptions(RocksSettings{},large);
