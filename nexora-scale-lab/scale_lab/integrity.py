@@ -5,6 +5,7 @@ import random
 from dataclasses import dataclass
 
 from .dataset import canonical, record
+from .pagination import MAX_PAGE_RECORDS
 
 MODULUS = 1 << 256
 
@@ -58,7 +59,8 @@ def full_validate(adapter, config, expected_digest=None, writes=None, progress=N
         raise RuntimeError(f'Integrity count mismatch: {count} != {config.records}')
     if on_count is not None:
         on_count(config.records)
-    for value in adapter.iter_records(config.batch_size):
+    # Loading may use 10k atomic batches; validation pages are a separate contract.
+    for value in adapter.iter_records(min(config.batch_size, MAX_PAGE_RECORDS)):
         key = value.get('id')
         if not isinstance(key, str) or len(key) != 12 or not key.isascii() or not key.isdigit():
             raise RuntimeError('Integrity: malformed primary key')
