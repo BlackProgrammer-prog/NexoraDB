@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import hashlib
+import logging
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -92,10 +94,35 @@ def load_native_module(settings: AdminApiSettings) -> ModuleType:
 
 def create_doc_engine(settings: AdminApiSettings) -> Any:
     native = load_native_module(settings)
+    if not hasattr(native.DocEngine, 'durability_report'):
+        raise RuntimeError('Native durability reporting missing; rebuild current extension before opening storage')
     rocks = native.RocksSettings()
+    if type(settings.rocks_durability) is not str or settings.rocks_durability not in {'durable', 'buffered'}:
+        raise RuntimeError('NEXORADB_ROCKS_DURABILITY must be durable or buffered')
+    rocks.durability = (native.DocumentDurability.Durable if settings.rocks_durability == 'durable'
+                        else native.DocumentDurability.Buffered)
     rocks.memory_budget_bytes = settings.rocks_memory_mb * 1024**2
     rocks.block_cache_bytes = settings.rocks_cache_mb * 1024**2
+    if settings.rocks_auto_tune:
+        from .hardware import detect, recommend
+        observed = detect(settings.db_path)
+        effective = recommend(observed, settings.rocks_memory_mb, settings.rocks_cache_mb)
+        rocks.memory_budget_bytes = effective['memory_budget_bytes']
+        rocks.block_cache_bytes = effective['block_cache_bytes']
+        rocks.cpu_threads = effective['cpu_threads']
+        rocks.max_background_jobs = effective['max_background_jobs']
+        rocks.disk = {'ssd': native.DiskClass.SSD, 'rotational': native.DiskClass.Rotational,
+                      'unknown': native.DiskClass.Unknown}[effective['disk_class']]
+        logging.getLogger(__name__).info('Hardware policy observed=%s effective=%s', observed, effective)
     engine = native.DocEngine(str(settings.db_path), native.TransactionSettings(), rocks)
+    if not hasattr(engine, 'durability_report'):
+        raise RuntimeError('Native durability reporting missing; rebuild current extension')
+    report = json.loads(engine.durability_report())
+    if (report.get('profile') != settings.rocks_durability or report.get('wal_enabled') is not True
+            or report.get('sync_on_ack') != (settings.rocks_durability == 'durable')
+            or report.get('manual_wal_flush') is not False):
+        raise RuntimeError('Effective native durability does not match requested profile')
+    logging.getLogger(__name__).info('Effective document durability=%s', report)
     if hasattr(engine, "is_healthy") and not engine.is_healthy():
         raise RuntimeError(f"DocEngine failed to open: {settings.db_path}")
     return engine
