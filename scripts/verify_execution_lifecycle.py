@@ -78,6 +78,18 @@ def wait_until(predicate, timeout):
     raise AssertionError("subprocess readiness deadline exceeded")
 
 
+def check_server_running(child, directory):
+    code = child.poll()
+    if code is None:
+        return
+    log = directory / 'stderr.log'
+    try:
+        detail = log.read_text(errors='replace')[-8000:]
+    except OSError as error:
+        detail = f'Unable to read stderr: {error}'
+    raise AssertionError(f'server exited during startup (exit {code}); see {log}\n{detail}')
+
+
 def campaign(args):
     args.directory.mkdir(parents=True,exist_ok=False)
     with socket.socket() as listener:
@@ -88,7 +100,7 @@ def campaign(args):
         child = subprocess.Popen(command,cwd=ROOT,stdout=out,stderr=err)
         try:
             def ready():
-                if child.poll() is not None: raise AssertionError("server exited during startup")
+                check_server_running(child, args.directory)
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{port}/ready",timeout=.2) as response:
                         return response.status==200
