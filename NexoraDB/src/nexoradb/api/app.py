@@ -16,8 +16,9 @@ from nexoradb._version import __version__
 
 from .security import AppTokenClaims, require_app_token, require_scope
 from nexoradb_admin.admission import AdmissionMiddleware
+from nexoradb_admin.lifecycle import install_lifecycle
 from nexoradb_admin.idempotency import RequestJournal
-from nexoradb_admin.cursor import CursorBudget, stream_cursor
+from nexoradb_admin.cursor import CursorBudget, stream_cursor, open_document_stream
 from nexoradb_admin.query_runner import _load_nexoraql_package, _authorize_statements, authorize_collections, _raise_query_error
 import importlib
 import time
@@ -70,7 +71,7 @@ def create_api_router(
         def authorize():
             return authorize_cursor(app, statement.collection)
         def open_stream():
-            return authorize().iter_documents(statement.collection, semantic.build_condition(statement.where),
+            return open_document_stream(authorize(), statement.collection, semantic.build_condition(statement.where),
                                               page_size=batch_size, max_page_bytes=1024 * 1024)
         owner = app.app_id
         return await stream_cursor(open_stream, authorize, owner, cursor_budget, batch_size=batch_size,
@@ -93,7 +94,7 @@ def create_api_router(
         sentinel = object()
         started = time.monotonic()
         try:
-            stream = engine.iter_documents(collection, page_size=min(limit, 128),
+            stream = open_document_stream(engine, collection, page_size=min(limit, 128),
                                            max_page_bytes=1024 * 1024)
             for position in range(skip + limit):
                 if position % 128 == 0:
@@ -129,7 +130,7 @@ def create_api_router(
     ):
         def open_stream():
             engine = authorize_cursor(app, collection)
-            return engine.iter_documents(collection, page_size=page_size, max_page_bytes=1024 * 1024)
+            return open_document_stream(engine, collection, page_size=page_size, max_page_bytes=1024 * 1024)
         return await stream_cursor(open_stream, lambda: authorize_cursor(app, collection),
                                    app.app_id, cursor_budget, batch_size=page_size, limit=limit)
 
@@ -161,6 +162,8 @@ def create_api_router(
                 engine=engine_provider(), graph_manager=graph_manager_provider(),
                 payload=payload, granted_scopes=frozenset(app.scopes),
                 granted_collections=getattr(app, "collections", None),
+                controller=getattr(request.app.state, "execution_controller", None),
+                owner="app:"+app.app_id,
             )
         if idempotency_key is None:
             return execute()
@@ -243,8 +246,12 @@ def create_api_app(
     )
     app.state.settings = api_settings
     initialization_lock = RLock()
+    def release_resources():
+        state["graph_manager"] = None
+        state["engine"] = None
+    lifecycle = install_lifecycle(app, lambda: (state["engine"], state["graph_manager"]), release_resources)
     app.add_middleware(AdmissionMiddleware, max_inflight=api_settings.api_max_inflight,
-                       require_https=api_settings.environment.lower() == "production")
+                       require_https=api_settings.environment.lower() == "production", tracker=lifecycle.requests)
 
     def get_engine() -> Any:
         with initialization_lock:
