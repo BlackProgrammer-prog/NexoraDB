@@ -184,13 +184,18 @@ p=e.QueryPipeline(Engine(),memory_bytes=1024**2,max_record_bytes=256,spill_paren
 with p.sort(({'_id':str(i),'v':3000-i,'payload':'x'*32} for i in range(3000)), 'v') as rows:
  next(rows); print('READY',flush=True); signal.pause()
 '''
-    child = subprocess.Popen([sys.executable, '-c', worker, str(ROOT/'build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so'),
+    native_path = Path(getattr(native, '__native_module_path__', native.__file__)).resolve()
+    child = subprocess.Popen([sys.executable, '-c', worker, str(native_path),
         str(ROOT/'NexoraDB/src/nexoradb/execution.py'), str(tmp_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(child.stdout, selectors.EVENT_READ)
             assert selector.select(10), 'worker did not reach spill boundary'
-            assert child.stdout.readline().strip() == 'READY'
+            ready = child.stdout.readline().strip()
+            if ready != 'READY':
+                child.wait(timeout=5)
+                pytest.fail(f'spill worker exited before READY (exit={child.returncode}, '
+                            f'native={native_path}):\n{child.stderr.read()}')
         child.kill(); assert child.wait(timeout=5) == -signal.SIGKILL
     finally:
         if child.poll() is None: child.kill(); child.wait(timeout=5)
