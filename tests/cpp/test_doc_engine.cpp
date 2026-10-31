@@ -268,6 +268,29 @@ namespace {
         }
     }
 
+    TEST(DocumentMigration, BusyForegroundStillGrantsBoundedMaintenanceChunk) {
+        TestTempDir temp("migration_fairness");const auto path=temp.path()/"db";
+        {DocEngine engine(path.string());ASSERT_TRUE(engine.CreateCollection("items").success);}
+        {
+            rocksdb::Options options;rocksdb::DB* raw=nullptr;
+            ASSERT_TRUE(rocksdb::DB::Open(options,path.string(),&raw).ok());
+            std::unique_ptr<rocksdb::DB> db(raw);
+            ASSERT_TRUE(db->Delete(rocksdb::WriteOptions{},"meta:format:documents").ok());
+            ASSERT_TRUE(db->Put(rocksdb::WriteOptions{},"data:items:old",R"({"_id":"old","v":1})").ok());
+        }
+        DocEngine engine(path.string());
+        const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(8);
+        uint64_t grants=0;
+        do {
+            ASSERT_TRUE(engine.FindById("items","old").success);
+            grants=nlohmann::json::parse(engine.MemoryReport())["migration_foreground_grants_total"].get<uint64_t>();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while(!grants && std::chrono::steady_clock::now()<until);
+        EXPECT_GE(grants,1U);
+        engine.PauseDocumentMigration();
+        EXPECT_TRUE(engine.FindById("items","old").success);
+    }
+
     TEST(DocumentMigration, RejectsAFormatWrittenByANewerBinary) {
         TestTempDir temp("nexora_future_document_format");
         const auto database_path = temp.path() / "db";
@@ -788,6 +811,9 @@ namespace {
         ASSERT_TRUE(new_index_reference.success)
                 << new_index_reference.error_msg;
 
+        EXPECT_FALSE(engine.DeleteById("users", "u1").success);
+        EXPECT_TRUE(engine.FindById("users", "u1").success);
+        ASSERT_TRUE(engine.DeleteById("posts", "p_new").success);
         const auto delete_result =
                 engine.DeleteById("users", "u1");
         ASSERT_TRUE(delete_result.success)
@@ -950,6 +976,9 @@ namespace {
                 R"({"_id":"current","user_email":"shared@example.com"})"
         ).success);
 
+        EXPECT_FALSE(engine.DeleteMany("users",Condition::Leaf("group",Op::EQ,"g")).success);
+        EXPECT_EQ(engine.GetCollectionSize("users"),2);
+        ASSERT_TRUE(engine.DeleteById("posts","current").success);
         const auto deleted = engine.DeleteMany(
                 "users",
                 Condition::Leaf("group", Op::EQ, "g"));
@@ -1209,6 +1238,8 @@ namespace {
 
         auto delete_transaction = engine.BeginTransaction();
         ASSERT_NE(delete_transaction, nullptr);
+        EXPECT_FALSE(engine.DeleteByIdTx(*delete_transaction,"users","u1").success);
+        ASSERT_TRUE(engine.DeleteByIdTx(*delete_transaction,"posts","p1").success);
         ASSERT_TRUE(engine.DeleteByIdTx(
                 *delete_transaction,
                 "users",
@@ -1218,6 +1249,7 @@ namespace {
         // Rolling back the outer transaction must restore document, index and
         // counter together.
         EXPECT_TRUE(engine.FindById("users", "u1").success);
+        EXPECT_TRUE(engine.FindById("posts", "p1").success);
         ASSERT_TRUE(engine.InsertOne(
                 "posts",
                 R"({"_id":"p2","user_email":"ali@example.com"})"
@@ -1490,7 +1522,7 @@ namespace {
             ASSERT_EQ(indexes.size(), 1U);
             stable_id = indexes.front().index_id;
             EXPECT_FALSE(stable_id.empty());
-            EXPECT_EQ(indexes.front().format_version, 2U);
+            EXPECT_EQ(indexes.front().format_version, 3U);
 
             EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"m1","tenant":"a"})").success);
             EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"m2","tenant":"a"})").success);
@@ -1661,9 +1693,8 @@ namespace {
                 Condition::Leaf("age", Op::GTE, "50", ValueType::Int64)});
         const auto explain = engine.ExplainPlan("items", condition);
         ASSERT_TRUE(explain.success) << explain.error_msg;
-        EXPECT_NE(explain.data.find("\"index\":\"idx_tenant_age\""),
-                  std::string::npos);
-        EXPECT_NE(explain.data.find("\"scan_type\":\"index_range\""),
+        // v2 numeric keys do not cover mixed int/double comparisons safely.
+        EXPECT_NE(explain.data.find("\"scan_type\":\"full_scan\""),
                   std::string::npos);
         EXPECT_EQ(engine.Count("items", condition).data, "25");
         EXPECT_EQ(engine.Exists("items", condition).data, "true");
