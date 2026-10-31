@@ -72,6 +72,7 @@ jobs:
           PYTHONPATH: build/debug
         run: |
           python3 -m pip install -r tests/performance-requirements.txt
+          python3 -m pytest -q tests/test_command_imports.py
           python3 tests/test_native_threading_contract.py
           python3 tests/test_admin_recovery.py
           python3 -m unittest discover -s tests -p 'test_benchmark_history.py'

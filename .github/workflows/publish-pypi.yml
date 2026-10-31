@@ -109,7 +109,7 @@ jobs:
           NEXORADB_TEST_NATIVE_PATH: ${{ github.workspace }}/build-wheel/nexoradb.cpython-310-x86_64-linux-gnu.so
         run: |
           python3 -m pip install -r tests/performance-requirements.txt
-          python3 -m pytest -q tests/test_resource_budget.py tests/test_bounded_execution.py tests/test_execution_lifecycle.py tests/test_memory_acceptance.py tests/test_release_version.py
+          python3 -m pytest -q tests/test_command_imports.py tests/test_resource_budget.py tests/test_bounded_execution.py tests/test_execution_lifecycle.py tests/test_memory_acceptance.py tests/test_release_version.py
           python3 scripts/verify_execution_lifecycle.py --directory build-wheel/release-signal --native build-wheel/nexoradb.cpython-310-x86_64-linux-gnu.so
 
       - name: Build wheel
