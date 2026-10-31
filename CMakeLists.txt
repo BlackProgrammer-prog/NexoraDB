@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(NexoraDB VERSION 0.4.1 LANGUAGES CXX)
+project(NexoraDB VERSION 0.5.0 LANGUAGES CXX)
 
 # Generate compile_commands.json where the selected generator supports it.
 if (CMAKE_GENERATOR MATCHES "Ninja")
@@ -288,6 +288,8 @@ if (NEXORA_BUILD_BENCHMARKS)
 endif ()
 
 if(NEXORA_BUILD_RESEARCH_PROBES)
+    add_executable(nexora_index_migrate scripts/index_migrate.cpp)
+    target_link_libraries(nexora_index_migrate PRIVATE nexora_core)
     add_executable(nexora_research_read_probe benchmarks/cpp/research_read_probe.cpp)
     target_link_libraries(nexora_research_read_probe PRIVATE nexora_core nlohmann_json::nlohmann_json Threads::Threads)
     target_compile_definitions(nexora_research_read_probe PRIVATE
