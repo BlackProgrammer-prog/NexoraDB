@@ -19,10 +19,12 @@ StaticGraph::StaticGraph(const LiveGraph& source,const std::vector<std::string>&
                          const std::vector<std::string>& et,std::string name,SnapshotOptions options)
     :name_(std::move(name)),options_(std::move(options)) {
     if (!options_.cancellation) options_.cancellation=std::make_shared<std::atomic<bool>>(false);
-    data_=std::make_unique<Data>(options_.max_build_bytes);
+    if(!options_.execution_budget) options_.execution_budget=nexora::core::ResourceBudget::processDefault();
+    data_=std::make_unique<Data>(options_.max_build_bytes,0,options_.execution_budget);
     buildFromLiveGraph(source,nt,et);
 }
 void StaticGraph::checkCancelled() const {
+    if(options_.execution_control) options_.execution_control->check();
     if (options_.deadline!=std::chrono::steady_clock::time_point{} && std::chrono::steady_clock::now()>=options_.deadline)
         throw std::runtime_error("snapshot/job timeout");
     if (options_.cancellation && options_.cancellation->load(std::memory_order_relaxed))
@@ -40,7 +42,8 @@ StaticGraph::StaticGraph(const StaticGraph& source,SnapshotOptions options)
     if (planned_peak_bytes_>SIZE_MAX/2 || (options_.max_build_bytes && planned_peak_bytes_*2>options_.max_build_bytes))
         throw std::length_error("snapshot cache/clone peak budget exceeded");
     planned_peak_bytes_*=2;
-    data_=std::make_unique<Data>(options_.max_build_bytes,source.data_->memory.currentBytes());
+    if(!options_.execution_budget) options_.execution_budget=source.options_.execution_budget;
+    data_=std::make_unique<Data>(options_.max_build_bytes,source.data_->memory.currentBytes(),options_.execution_budget);
     data_->nodes_.reserve(source.data_->nodes_.size());
     for (const auto& node:source.data_->nodes_) {
         checkCancelled(); data_->nodes_.emplace_back(node.type_id,node.ext_id,&data_->memory);
