@@ -13,6 +13,10 @@ namespace {
 
 constexpr std::array<char, DocumentCodec::kEnvelopeSize> kBsonEnvelope{
         'N', 'X', 'D', '1', 1, 0, 0, 0};
+// BSON strings are length-prefixed and may contain U+0000. This does not
+// disable UTF-8 validation or permit NUL within BSON field-name cstrings.
+constexpr auto kDocumentValidationFlags=static_cast<bson_validate_flags_t>(
+    BSON_VALIDATE_UTF8 | BSON_VALIDATE_UTF8_ALLOW_NULL);
 
 class OwnedBson final {
 public:
@@ -126,7 +130,7 @@ DocumentCodec::Result DecodeBsonPayload(std::string_view payload) {
     bson_error_t validation_error{};
     if (!bson_validate_with_error(
                 &document,
-                static_cast<bson_validate_flags_t>(BSON_VALIDATE_UTF8),
+                kDocumentValidationFlags,
                 &validation_error)) {
         return {false, {}, "invalid BSON payload: " +
                            std::string(validation_error.message)};
@@ -207,6 +211,10 @@ DocumentCodec::Result DocumentCodec::EncodeJson(std::string_view json) {
         return {false, {}, "BSON document exceeds the 16 MiB limit"};
     }
 
+    bson_error_t validation_error{};
+    if (!bson_validate_with_error(document.get(),kDocumentValidationFlags,&validation_error))
+        return {false,{},"invalid BSON payload: "+std::string(validation_error.message)};
+
     std::string depth_error;
     if (!ValidateDepth(*document, 1, depth_error)) {
         return {false, {}, std::move(depth_error)};
@@ -247,7 +255,7 @@ DocumentCodec::Result DocumentCodec::EncodeBson(std::string_view payload,BsonIde
                           static_cast<uint32_t>(payload.size())))
         return {false, {}, "invalid BSON payload"};
     bson_error_t validation_error{};
-    if (!bson_validate_with_error(&document, BSON_VALIDATE_UTF8, &validation_error))
+    if (!bson_validate_with_error(&document, kDocumentValidationFlags, &validation_error))
         return {false, {}, "invalid BSON payload: " + std::string(validation_error.message)};
     std::string error;
     if (!ValidateDepth(document, 1, error,identity)) return {false, {}, std::move(error)};
