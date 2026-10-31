@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "NexoraDataBase"
-version = "0.4.1"
+version = "0.5.0"
 description = "Open-source document and graph database with NexoraQL, a C++20/RocksDB engine, and Python API"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
