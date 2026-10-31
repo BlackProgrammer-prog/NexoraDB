@@ -32,6 +32,7 @@
 #include "Graphwal.h"
 #include "EdgeStore.h"
 #include "GraphMemory.h"
+#include "core/ResourceBudget.h"
 
 #include <deque>
 #include <shared_mutex>
@@ -306,6 +307,7 @@ namespace nexora {
 
             GraphStats stats() const;
             GraphMemoryUsage memoryUsage() const;
+            void setExecutionBudget(std::shared_ptr<nexora::core::ResourceBudget> pool);
             // Conservative admission budget, not a process RSS/allocator limit.
             // Zero disables. Rejected admission precedes RAM/WAL/data mutation.
             void setMemoryBudget(size_t bytes);
@@ -340,6 +342,7 @@ namespace nexora {
             friend class BulkGraphBuilder;
             friend class StaticGraph;
             bool bulk_failed_=false;
+            std::shared_ptr<nexora::core::BudgetLease> execution_credit_;
             size_t memory_budget_=0,memory_charged_=0;
             GraphMemoryUsage memoryUsageUnlocked() const;
             void admitMemory(size_t nodes,size_t edges,size_t text_bytes);

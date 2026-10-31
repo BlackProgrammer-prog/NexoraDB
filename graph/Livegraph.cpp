@@ -308,19 +308,32 @@ namespace nexora {
             std::unique_lock lock(mutex_);
             const auto usage=memoryUsageUnlocked().total_bytes_estimate;
             if (bytes && bytes<usage) throw std::length_error("memory budget below current graph estimate");
-            memory_budget_=bytes; memory_charged_=bytes ? usage : 0;
+            const auto charged=execution_credit_ ? std::max(execution_credit_->bytes(),usage) : (bytes ? usage : 0);
+            if(bytes && bytes<charged) throw std::length_error("memory budget below retained graph admission credits");
+            if(execution_credit_) execution_credit_->resize(charged);
+            memory_budget_=bytes; memory_charged_=charged;
         }
         void LiveGraph::admitMemory(size_t nodes,size_t edges,size_t text) {
-            if (!memory_budget_) return;
+            if (!memory_budget_ && !execution_credit_) return;
             // High-water admission credits deliberately do not refund deletes or
             // duplicates: vector/hash capacities and fragmentation may persist.
-            size_t available=memory_budget_-memory_charged_;
+            const auto limit=memory_budget_ ? memory_budget_ : SIZE_MAX;
+            size_t available=limit-memory_charged_;
             auto charge=[&](size_t count,size_t unit) {
                 if (count>available/unit) throw std::length_error("graph memory admission budget exceeded");
                 available-=count*unit;
             };
             charge(nodes,1024); charge(edges,512); charge(text,4);
-            memory_charged_=memory_budget_-available;
+            const auto next=limit-available;
+            if(execution_credit_) execution_credit_->resize(std::max(execution_credit_->bytes(),next));
+            memory_charged_=next;
+        }
+        void LiveGraph::setExecutionBudget(std::shared_ptr<nexora::core::ResourceBudget> pool) {
+            std::unique_lock lock(mutex_);
+            if(execution_credit_) throw std::logic_error("graph execution budget already attached");
+            const auto estimate=memoryUsageUnlocked().total_bytes_estimate;
+            execution_credit_=std::make_shared<nexora::core::BudgetLease>(std::move(pool),nexora::core::ResourceBudget::Graph,estimate);
+            memory_charged_=std::max(memory_charged_,estimate);
         }
 
 // ══════════════════════════════════════════════════════════════
