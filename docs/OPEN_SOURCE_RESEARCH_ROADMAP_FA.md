@@ -75,139 +75,165 @@ commit پایه و تغییرات working tree:
 
 ## مرحلهٔ ۰ — پرسش پژوهشی و مبنای اندازه‌گیری
 
-- [ ] **RES-001 · P1 — انتخاب کاربردهای هدف**
-  - [ ] سه سناریوی document OLTP، query ترکیبی document+graph و اجرای کم‌حافظه را با داده و query مشخص تعریف کن.
-  - [ ] حجم داده، concurrency، نسبت read/write، محدودیت RAM و خروجی مورد انتظار را بنویس.
+وضعیت شروع و شواهد ۲۰۲۶-۱۰-۲۸: [پروندهٔ مرحلهٔ صفر](research/README.md).
+تیک‌های زیر فقط خروجی‌های واقعاً آماده را نشان می‌دهند؛ تسک والد تا پذیرش کامل باز می‌ماند.
+
+- [x] **RES-001 · P1 — انتخاب کاربردهای هدف**
+  - [x] سه سناریوی document OLTP، query ترکیبی document+graph و اجرای کم‌حافظه را با داده و query مشخص تعریف کن.
+  - [x] حجم داده، concurrency، نسبت read/write، محدودیت RAM و خروجی مورد انتظار را بنویس.
   - خروجی: مشخصات workloadهای هدف در سند versioned.
   - پذیرش: هر سناریو قابل اجرا و دارای مرجع صحت باشد؛ موارد خارج از محدوده روشن باشند.
+  - شواهد: [قرارداد v1](research/PHASE0_WORKLOADS_V1_FA.md) و [پذیرش ۲۰۲۶-۱۰-۲۸](research/STATUS_PHASE0_FA.md#پیگیری-و-پذیرش-فنی-۲۰۲۶-۱۰-۲۸)؛ هر سه سناریو با ۱/۱۰ worker هم‌زمان و oracle کامل اجرا شدند؛ W3 در cgroup مستقل. این تیک به معنی پاس حجم‌های بزرگ یا فرضیهٔ عملکرد نیست.
 
-- [ ] **RES-002 · P1 — ماتریس مقایسهٔ رقبا**
+- [x] **RES-002 · P1 — ماتریس مقایسهٔ رقبا**
   - وابسته به: RES-001.
-  - [ ] نسخه و edition محصولات MongoDB، PostgreSQL، SQL Server، Oracle و Neo4j را مشخص کن.
-  - [ ] مدل داده، durability، isolation، transport، ایندکس و منابع مقایسه را با مستند رسمی ثبت کن.
+  - [x] نسخه و edition محصولات MongoDB، PostgreSQL، SQL Server، Oracle و Neo4j را مشخص کن.
+  - [x] مدل داده، durability، isolation، transport، ایندکس و منابع مقایسه را با مستند رسمی ثبت کن.
   - خروجی: ماتریس قابلیت و شرایط قابل مقایسه؛ قابلیت فاقد معادل با N/A مشخص شود.
   - پذیرش: اختلاف تضمین یا deployment پنهان نماند؛ نتیجهٔ یک subset به کل محصول تعمیم داده نشود.
+  - شواهد: [ماتریس، نسخه‌های دقیق هدف و منابع رسمی](research/COMPARISON_MATRIX_V1_FA.md). تکمیل **سند طرح** است، نه نصب یا اجرای پنج محصول؛ runtime/digest و adapterهای ناموجود صریح‌اند و پیش‌شرط مقایسهٔ آتی باقی می‌مانند.
 
-- [ ] **RES-003 · P1 — فرضیه‌های قابل رد**
+- [x] **RES-003 · P1 — فرضیه‌های قابل رد**
   - وابسته به: RES-001/002.
-  - [ ] برای سرعت، latency، memory، امنیت و کاربرد، ادعاهای محدود و آزمون‌پذیر بنویس.
-  - [ ] معیار قبول/رد و baseline هر ادعا را قبل از آزمایش تعیین کن.
+  - [x] برای سرعت، latency، memory، امنیت و کاربرد، ادعاهای محدود و آزمون‌پذیر بنویس.
+  - [x] معیار قبول/رد و baseline هر ادعا را قبل از آزمایش تعیین کن.
   - خروجی: جدول فرضیه، متغیر مستقل، متغیرهای کنترل و معیار نتیجه.
   - پذیرش: «برتر در همه‌چیز» ادعای آزمایش نباشد؛ نتیجهٔ منفی هم قابل ثبت باشد.
+  - شواهد: [H1..H6 و قواعد قبول/رد/نامعین](research/HYPOTHESES_V1_FA.md)، ثبت immutable در `build/research-preregistered-20261028/registration.json`. baseline artifact ثابت است؛ دادهٔ کنترل فعلی noisy و برای inference نامجاز است. **هیچ فرضیه‌ای پذیرفته نشده است.**
 
 - [ ] **RES-004 · P1 — آزمایش A/B بازتولیدپذیر**
   - وابسته به: RES-003.
-  - [ ] ابزار موجود را برای ثبت سورس، binary، config، host، seed و ترتیب اجرا بررسی و تکمیل کن.
-  - [ ] تکرار مستقل، baseline ثابت، A/B/A در صورت drift و گزارش نوسان فراهم کن.
+  - [x] ابزار موجود را برای ثبت سورس، binary، config، host، seed و ترتیب اجرا بررسی و تکمیل کن.
+  - [x] تکرار مستقل، baseline ثابت، A/B/A در صورت drift و گزارش نوسان فراهم کن.
   - خروجی: دستورهای plan/run/analyze و نمونهٔ گزارش معتبر.
   - پذیرش: تغییر عملکرد از نوسان محیط تفکیک شود؛ تاریخچه بازنویسی نشود.
+  - وضعیت: ابزار، snapshot سورس/binary، انتخاب و تطبیق native واقعی، CI95 و history حفظ‌شده آماده‌اند؛ **پذیرش والد باز است** چون کنترل A/A آخر هنوز حدود ۲۳٫۶٪ drift داشت و کالیبراسیون ۲۰۰۰عملیاتی هم نامعین بود. threshold برای سبزکردن نتیجه عوض نشد؛ [شواهد و ادامه](research/STATUS_PHASE0_FA.md#پیگیری-و-پذیرش-فنی-۲۰۲۶-۱۰-۲۸).
+  - ادامهٔ آماده: [پروفایل پذیرش والدها و دستور اجرا](research/PARENT_ACCEPTANCE_FA.md)؛ warm-up، affinity و telemetry اضافه شدند و wiring کوتاه اجرا شد. آزمون طولانی عمداً اجرا نشده؛ تیک والد منوط به gates واقعی `acceptance.json` است.
 
 - [ ] **RES-005 · P1 — تفکیک هزینهٔ لایه‌ها**
   - وابسته به: RES-004.
-  - [ ] آزمایش مستقیم C++، binding پایتون و API شبکه را برای عملیات مشترک بساز.
-  - [ ] منابع مولد و موتور را با scope صحیح گزارش کن؛ native هم‌پردازش را دوباره‌شماری نکن.
+  - [x] آزمایش مستقیم C++، binding پایتون و API شبکه را برای عملیات مشترک بساز.
+  - [x] منابع مولد و موتور را با scope صحیح گزارش کن؛ native هم‌پردازش را دوباره‌شماری نکن.
   - خروجی: breakdown هزینه و محدودیت attribution.
   - پذیرش: هزینهٔ TCP، serialization و generator با هزینهٔ موتور اشتباه نشود.
+  - وضعیت: [سه لایهٔ واقعی با fixture و oracle یکسان](research/LAYER_ATTRIBUTION_V1_FA.md) پاس شده‌اند؛ گزارش sampled PSS/CPU و scopeها آماده است. **والد تا رفع وابستگی RES-004 و گزارش تکرارپذیر عددی باز می‌ماند**؛ تفاضل p99 به‌عنوان هزینهٔ خالص TCP معرفی نشده است.
+  - ادامهٔ آماده: همان پروفایل پذیرش، پنج تکرار مستقل سه‌لایه و کنترل CV را اجرا می‌کند؛ تست کوتاه و unit test به‌جای شاهد تکرارپذیری پذیرفته نشده‌اند.
 
 ## مرحلهٔ ۱ — قرارداد و صحت پایه
 
-- [ ] **COR-001 · P0 — یکسان‌سازی pagination و stream**
+- [x] **COR-001 · P0 — یکسان‌سازی pagination و stream**
   - محل شروع: `core/DocEngine.cpp`، `bindings/nexoradb_bind.cpp` و adapterهای lab.
-  - [ ] ناسازگاری سقف ۱۰۰۰ هسته و پذیرش ۴۰۹۶ در stream را در همهٔ ورودی‌ها رفع کن.
-  - [ ] سقف تعداد و بایت و رفتار سند بزرگ را در قرارداد مشترک ثبت کن.
+  - [x] ناسازگاری سقف ۱۰۰۰ هسته و پذیرش ۴۰۹۶ در stream را در همهٔ ورودی‌ها رفع کن.
+  - [x] سقف تعداد و بایت و رفتار سند بزرگ را در قرارداد مشترک ثبت کن.
   - خروجی: API و مستند همخوان؛ خطای زودهنگام برای درخواست نامعتبر.
   - پذیرش: مرزهای ۱۰۰۰/۱۰۰۱/۴۰۹۶، صفحهٔ خالی، سند بزرگ و چندصفحه بدون رکورد تکراری/گم‌شده تست شوند.
+  - شواهد ۲۰۲۶-۱۰-۲۸: [قرارداد، سازگاری و فرمان تست](cpp/PAGINATION_CONTRACT.md)؛ ۶۱ تست native، ۵ تست binding واقعی و ۳ تست مرزی lab پاس شدند. تعداد ۱..۱۰۰۰ و بایت ۲..۶۴ MiB در ورودی رد/قبول می‌شوند؛ سند بزرگ خطا می‌دهد نه افتادگی خاموش. COR-002 و مقیاس بزرگ همچنان بازند.
 
-- [ ] **COR-002 · P0 — snapshot برای اسکن طولانی**
+- [x] **COR-002 · P0 — snapshot برای اسکن طولانی**
   - وابسته به: COR-001.
-  - [ ] idle timeout، عمر مطلق و حق ادامهٔ اسکن فعال را تعریف کن؛ سقف پنج‌دقیقه‌ای فعلی را بررسی کن.
-  - [ ] TTL را با ساعت قابل تزریق تست کن؛ snapshot رهاشده و snapshot در حال مصرف را تفکیک کن.
+  - [x] idle timeout، عمر مطلق و حق ادامهٔ اسکن فعال را تعریف کن؛ سقف پنج‌دقیقه‌ای فعلی را بررسی کن.
+  - [x] TTL را با ساعت قابل تزریق تست کن؛ snapshot رهاشده و snapshot در حال مصرف را تفکیک کن.
   - خروجی: قرارداد lease/close/expiry برای native، export و validation.
   - پذیرش: اسکن طولانی صحیح باشد؛ expiration نتیجهٔ ناقص را موفق گزارش نکند؛ pinned memory محدود و قابل مشاهده بماند.
+  - شواهد ۲۰۲۶-۱۰-۲۸: [قرارداد lease/close/expiry و تست‌ها](cpp/SNAPSHOT_LEASE_CONTRACT.md)؛ ۶۴ تست native (۹ pagination)، ۶ binding، ۲۵ API/ACL/memory/threading و ۲۸ research پاس شدند؛ lab شامل ۵۳ موفق و ۷ skip اختیاری است. زمان با ساعت ثابت تزریقی پیش رفت، نه اجرای چندساعته. idle=۱۲۰s، native بدون cutoff مطلق و HTTP با deadline مستقل ۱۲۰s؛ ۱۲۸ snapshot زنده شامل retired/in-flight. سقف تعداد و صفحه bounded است؛ hard byte quota به‌ازای snapshot/RSS و retention دیسک ادعا نمی‌شود و محدودیت آن در قرارداد آمده است.
 
-- [ ] **COR-003 · P0 — دوام صریح در تمام ورودی‌ها**
+- [x] **COR-003 · P0 — دوام صریح در تمام ورودی‌ها**
   - محل شروع: `core/RocksTuning.h` و `NexoraDB/src/nexoradb_admin/native.py`.
-  - [ ] انتخاب و effective setting مربوط به Buffered/Durable را در سرویس، CLI، native و benchmark بررسی کن.
-  - [ ] ACK و خطای commit را مستند و در crash واقعی بررسی کن.
+  - [x] انتخاب و effective setting مربوط به Buffered/Durable را در سرویس، CLI، native و benchmark بررسی کن.
+  - [x] ACK و خطای commit را مستند و در crash واقعی بررسی کن.
   - خروجی: تنظیمات معتبر و قرارداد دوام یکسان در لایه‌ها.
   - پذیرش: write تأییدشده مطابق تضمین اعلام‌شده پس از crash/reopen بازیابی شود.
+  - شواهد ۲۰۲۶-۱۰-۲۹: [قرارداد دوام، ACK، migration و محدودیت‌ها](cpp/DOCUMENT_DURABILITY_CONTRACT_FA.md)؛ پیش‌فرض native/service به Durable تغییر کرد، Buffered صریح باقی ماند، گزارش مؤثر در native/SYSTEM INFO/SHOW PERFORMANCE و metadata lab اضافه شد. ۱۰ SIGKILL/reopen واقعی در پنج مسیر با oracle کامل سند/ایندکس/count پاس شد؛ `build/cor003-crash-final-20261028/report.json`. خطای sync در batch/exclusive/commit ACK موفق نمی‌دهد و latch خطای commit صریح اصلاح شد. ۶۶ native و ۶۳ Python مرتبط موفق؛ هیچ power-loss، replication یا atomic document+graph از این تیک ادعا نمی‌شود.
 
-- [ ] **COR-004 · P0 — semantics نوع و مقایسه**
-  - [ ] equality/order برای int/float، حدود عدد، null/missing، رشته، array و مقدار نامعتبر تعریف کن.
-  - [ ] evaluator، index codec و unique constraint را با همان corpus تطبیق بده.
+- [x] **COR-004 · P0 — semantics نوع و مقایسه**
+  - [x] equality/order برای int/float، حدود عدد، null/missing، رشته، array و مقدار نامعتبر تعریف کن.
+  - [x] evaluator، index codec و unique constraint را با همان corpus تطبیق بده.
   - خروجی: جدول semantics و تست differential.
   - پذیرش: scan=index؛ تغییر encoding دارای version و migration معتبر باشد.
+  - پذیرش ۲۰۲۶-۱۰-۳۰: [قرارداد جاری و corpus](cpp/TYPE_COMPARISON_SEMANTICS_FA.md) و [مهاجرت کپی آفلاین v3](cpp/INDEX_V3_MIGRATION_FA.md). codec/unique برای int/double/±zero canonical شد؛ EQ عددی ایندکسی واقعی، golden و reader fence/manifest نسل ۳ اضافه شد. ۷۳ native موفق؛ سه XFAIL قبلی اکنون تست عادی موفق‌اند؛ insert/update race، delete/reuse، rollback batch و compound آزموده شدند. migration با binary واقعی قبلی، manifest نسل ۲ و بدون manifest، collision، SIGKILL، رد مقصد ناقص و حفظ source بررسی شد؛ ۱۲ crash/reopen دوام نیز موفق است. range عددی و prefix مرکب sparse ناامن همچنان full scan صحیح‌اند؛ این تیک ادعای range سریع، isolation عمومی، migration graph یا آزمون ۱۰۰M نیست. هیچ DB کاربر migrate نشده است.
 
-- [ ] **COR-005 · P0 — isolation و constraints هم‌زمان**
+- [x] **COR-005 · P0 — isolation و constraints هم‌زمان**
   - وابسته به: COR-003/004.
-  - [ ] سطح isolation واقعی و رفتار snapshot/read-your-writes را مستند کن.
-  - [ ] lost update، write skew، phantom، unique race و child-insert/parent-delete را با interleaving کنترل‌شده بررسی کن.
+  - [x] سطح isolation واقعی و رفتار snapshot/read-your-writes را مستند کن.
+  - [x] lost update، write skew، phantom، unique race و child-insert/parent-delete را با interleaving کنترل‌شده بررسی کن.
   - خروجی: history checker و قرارداد conflict/deadlock/retry.
   - پذیرش: historyها با سطح اعلام‌شده سازگار باشند؛ invariant داده نقض نشود.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۰: [قرارداد isolation و محدودیت‌ها](cpp/ISOLATION_CONSTRAINTS_FA.md)، `scripts/transaction_history.py` و ۱۸ تست isolation/constraint. سطح واقعی Read Committed با RYW است، نه SI/Serializable؛ lost application update و write skew مجاز توسط oracle تشخیص داده می‌شوند، نه اینکه پنهان/رفع‌شده ادعا شوند. locking point read با `for_update=True` و کدهای conflict/deadlock/timeout اضافه شد. FK در store اولیهٔ معتبر با guard تراکنشی، revalidation و reverse RESTRICT محافظت می‌شود؛ دو ترتیب child/parent برای _id و non-id، reopen، BSON fallback، bulk rollback و DDL آزموده شدند. قفل FK فعلاً store-wide و reverse scan گران است؛ predicate transaction، invariant دلخواه چندسندی و audit orphan تاریخی از این تیک نتیجه نمی‌شوند. ۷۳ native، ۱۲۹ Python مرتبط و ۱۲ crash/reopen موفق؛ بدون تست سنگین یا تغییر DB کاربر.
 
-- [ ] **COR-006 · P0 — مدل مرجع مستقل عملیات**
+- [x] **COR-006 · P0 — مدل مرجع مستقل عملیات**
   - وابسته به: COR-004/005.
-  - [ ] مدل سادهٔ مستقل برای insert/update/delete/query و تراکنش subset منتخب بساز.
-  - [ ] propertyهای bulk=single، scan=index، replay=original و codec roundtrip را تولید و بررسی کن.
+  - [x] مدل سادهٔ مستقل برای insert/update/delete/query و تراکنش subset منتخب بساز.
+  - [x] propertyهای bulk=single، scan=index، replay=original و codec roundtrip را تولید و بررسی کن.
   - خروجی: corpus با seed و کوچک‌سازی failure.
   - پذیرش: هر failure قابل بازتولید و به regression دائمی تبدیل شود.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۰: [قرارداد مدل و اجرای seed/replay](cpp/REFERENCE_MODEL_FA.md)؛ مدل مستقل standard-library با Fraction، runner سه مسیر scan/index/transactional-single و corpus versioned ساخته شد. insert/set/delete/scalar EQ، bulk اتمیک، commit/rollback و codec roundtrip در subset مشخص بررسی شدند؛ bulk=single یعنی singleهای داخل یک transaction، نه چند commit مستقل. ۱۲ seed × ۸۰ operation سطح بالا، هر corpus دو بار روی store تازه اجرا و موفق شد. artifactهای corpus/report با hash مدل/runner/native حفظ می‌شوند؛ original/minimized و replay همان failure با fault تستی تأیید شد، fixture دائمی و loader بدون skip آماده است. ۱۲ تست مدل موفق؛ نبود failure واقعی در corpus محدود، اثبات نبود باگ عمومی نیست. graph، query عمومی، range و هم‌زمانی arbitrary خارج از subset هستند.
 
-- [ ] **COR-007 · P0 — خطای دیسک و crash**
+- [x] **COR-007 · P0 — خطای دیسک و crash**
   - وابسته به: COR-003/005/006.
-  - [ ] تست‌های موجود ENOSPC، EACCES، corruption و crash را به مسیرهای پوشش‌نداده گسترش بده.
-  - [ ] مرزهای document/index/counter/WAL/ACK را fault-inject کن.
+  - [x] تست‌های موجود ENOSPC، EACCES، corruption و crash را به مسیرهای پوشش‌نداده گسترش بده.
+  - [x] مرزهای document/index/counter/WAL/ACK را fault-inject کن.
   - خروجی: ماتریس failure و نتیجهٔ recovery.
   - پذیرش: partial commit، پاسخ موفق کاذب یا skip خاموش دادهٔ خراب رخ ندهد.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۰: [ماتریس failure/recovery، اصلاحات و شواهد](cpp/FAILURE_RECOVERY_MATRIX_FA.md). تزریق WAL و staging در ۹ مسیر document گسترش یافت؛ ۱۳۲ native بدون skip، ۴۱ Python مرتبط و ۸۲ case فرایندی شامل ۷۰ مرز crash، ۹ WAL ناقص و ۳ خرابی فیزیکی موفق شدند. ۱۲ crash ورودی‌های native/service/queued نیز روی binary نهایی پاس شد. skip ارجاع dangling ایندکس، COUNT صفر کاذب، counter منفی/underflow و latch نشدن خطای commit گروهی اصلاح شدند؛ integrity، counter را با اسناد همان snapshot تطبیق می‌دهد. campaign در CTest/CI با report و log حفظ می‌شود. این تیک پذیرش bounded موتور document است؛ قطع برق، تمام مسیرهای compaction/manifest، corruption پروفایل Buffered و atomic document+graph از آن نتیجه نمی‌شوند؛ هیچ DB کاربر تغییر نکرد.
 
 ## مرحلهٔ ۲ — حافظه و کنترل منابع
 
-- [ ] **MEM-001 · P1 — گزارش مالکیت حافظه**
-  - [ ] counters موجود cache، memtable، graph، query، snapshot، Python و allocator را بررسی و تکمیل کن.
-  - [ ] مقادیر هم‌پوشان، تخمینی و غیرقابل اندازه‌گیری را صریح مشخص کن.
+- [x] **MEM-001 · P1 — گزارش مالکیت حافظه**
+  - [x] counters موجود cache، memtable، graph، query، snapshot، Python و allocator را بررسی و تکمیل کن.
+  - [x] مقادیر هم‌پوشان، تخمینی و غیرقابل اندازه‌گیری را صریح مشخص کن.
   - خروجی: schema telemetry و گزارش تفکیکی بدون جمع نادرست.
   - پذیرش: RSS/PSS و شمارنده‌های داخلی قابل تطبیق و شکاف attribution مستند باشد.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۰: [قرارداد مالکیت و accounting](cpp/MEMORY_OWNERSHIP_FA.md) و [schema نسخهٔ ۱](telemetry/memory-v1.schema.json). native document schema ۲، GraphManager report، PMR process-wide snapshot بدون admission baseline و collector پایتون اضافه شدند. shared cache/WBM با شناسهٔ lifetime dedup می‌شوند؛ aliasها، pinned subset، reservation، peak و Python/allocator دوباره جمع نمی‌شوند. query/transaction/metadata bytes ابزارگذاری‌نشده null هستند و gap صریح است؛ total داخلیِ process عمداً null است. در ۲۲۹۲ sample، RSS partition تطبیق داشت و RSS/PSS کنار componentها ثبت شد. ۷ Python، ۵۱ native مرتبط و ۲۵ lab/native-protocol موفق؛ integration مشترک MongoDB/PostgreSQL اجرا نشد. این تیک attribution کامل، budget enforce‌شده یا پذیرش ۱۰M/۱۰۰M نیست.
 
-- [ ] **MEM-002 · P1 — حافظهٔ زنده و allocator retention**
+- [x] **MEM-002 · P1 — حافظهٔ زنده و allocator retention**
   - وابسته به: MEM-001.
-  - [ ] چرخهٔ تکراری load/query/close/destroy را اندازه بگیر؛ fragmentation و cache retention را بررسی کن.
-  - [ ] trim را صرفاً در آزمایش تشخیصی با قبل/بعد ثبت کن؛ سیاست runtime را بر اساس نتیجه انتخاب کن.
+  - [x] چرخهٔ تکراری load/query/close/destroy را اندازه بگیر؛ fragmentation و cache retention را بررسی کن.
+  - [x] trim را صرفاً در آزمایش تشخیصی با قبل/بعد ثبت کن؛ سیاست runtime را بر اساس نتیجه انتخاب کن.
   - خروجی: گزارش رشد، سقف و علت‌های محتمل با سطح اطمینان.
   - پذیرش: رشد زنده از حافظهٔ نگه‌داشته‌شده تفکیک شود؛ ادعای leak با شاهد باشد.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۰: [روش، اعداد، سطح اطمینان و سیاست runtime](cpp/MEMORY_RETENTION_FA.md). دو workload memtable و SST/cache گرم، هرکدام سه جفت process control/trim × بیست چرخهٔ ۱۲k سند، با حذف چهار warm-up بررسی شدند؛ مجموع ۲۴۰ چرخه. sample و endpoint روی دیسک stream شدند تا خود مشاهده‌گر arena را pin نکند. PMR در همهٔ destroyها صفر شد؛ سکوهای انتهایی RSS بدون trim حدود ۹۴ و ۱۰۱MiB بودند. trim تشخیصی در SST میانهٔ حدود ۵۵MiB را با هزینهٔ حدود ۲ms آزاد کرد؛ fragmentation دقیق یا leak عمومی اثبات نشد. sampler/protocol دیگر trim خودکار ندارند؛ diagnostic opt-in حفظ شد. سقف گزارش‌شده فقط مشاهدهٔ محدود است، نه bound بلندمدت/MEM-007؛ هیچ DB کاربر دست‌کاری نشد.
 
-- [ ] **MEM-003 · P1 — reservation مشترک منابع**
+- [x] **MEM-003 · P1 — reservation مشترک منابع**
   - وابسته به: MEM-001/002.
-  - [ ] تخصیص‌های بزرگ query، graph، buffer و snapshot را به بودجهٔ مشترک متصل کن.
-  - [ ] حاشیهٔ allocator، Python و charged page cache را در sizing لحاظ کن.
+  - [x] تخصیص‌های بزرگ query، graph، buffer و snapshot را به بودجهٔ مشترک متصل کن.
+  - [x] حاشیهٔ allocator، Python و charged page cache را در sizing لحاظ کن.
   - خروجی: admission/release و گزارش مصرف مؤلفه‌ها.
   - پذیرش: عبور از ظرفیت با backpressure یا خطای روشن مدیریت شود؛ budget cache معادل hard RSS معرفی نشود.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۱: [قرارداد admission، sizing و مالکیت](cpp/RESOURCE_ADMISSION_SPILL_FA.md). مخزن مشترک با component report، RAII، رد صریح و انتظار محدود به query/result، staging تراکنش، buffer، graph، PMR snapshot و workspace job متصل شد. sizing پس از تنظیم مؤثر Rocks، حاشیه‌های allocator/Python/page cache/safety را کم می‌کند. اعتبار با actual allocation یا RSS جمع نمی‌شود؛ pinned Rocks versions، کپی caller و malloc دلخواه plugin gap مستند دارند. fairness عمومی و hard process cap ادعا نشده است.
 
-- [ ] **MEM-004 · P1 — buffer محدود و spill**
+- [x] **MEM-004 · P1 — buffer محدود و spill**
   - وابسته به: MEM-003 و قرارداد اجرای QUERY-001.
-  - [ ] اجرای scan/sort/aggregate را به batch و quota متصل کن.
-  - [ ] spill با مسیر خصوصی، سهمیهٔ دیسک و cleanup پس از failure بساز.
+  - [x] اجرای scan/sort/aggregate را به batch و quota متصل کن.
+  - [x] spill با مسیر خصوصی، سهمیهٔ دیسک و cleanup پس از failure بساز.
   - خروجی: عملیات بزرگ با مصرف حافظهٔ محدود.
   - پذیرش: دادهٔ موقت نشت نکند؛ قطع عملیات و پرشدن دیسک پاسخ صحیح بدهند.
+  - پذیرش محدود backend در ۲۰۲۶-۱۰-۳۱: [قرارداد اجرایی و failure/recovery](cpp/RESOURCE_ADMISSION_SPILL_FA.md). API صفحه‌ای scan و external sort/COUNT/SUM با buffer و fan-in محدود، سهمیهٔ دیسک مشترک، CRC/count validation، cleanup خطا/لغو و reaper صریح پس از SIGKILL اضافه شد. SELECT/COUNT موجود quota دارند؛ grammar مربوط به ORDER BY/GROUP BY و قرارداد کامل QUERY-001/002/003 هنوز باز است. کمپین ۱۰k/۱۰۰k با quota برابر ۱MiB، ترتیب/checksum صحیح و release/cleanup کامل گذشت؛ traced peak پایتون حدود ۷۹/۹۴KiB بود، نه RSS کل process. این تیک پذیرش ۱۰M/۱۰۰M یا spill برای join نیست.
 
-- [ ] **MEM-005 · P1 — admission و fairness**
+- [x] **MEM-005 · P1 — admission و fairness**
   - وابسته به: MEM-003.
-  - [ ] صف، concurrency و هزینهٔ query/app را محدود کن؛ maintenance سهم مشخص داشته باشد.
+  - [x] صف، concurrency و هزینهٔ query/app را محدود کن؛ maintenance سهم مشخص داشته باشد.
   - خروجی: overload policy و wait metrics.
   - پذیرش: query سنگین موجب starvation نامحدود query کوچک یا maintenance نشود.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۱: [overload policy، سهم کوچک/maintenance و wait metrics](cpp/ADMISSION_SHUTDOWN_FA.md). مسیر query هر app سقف owner/queue/cost دارد؛ کار کوچک و maintenance سهم مستقل slot/cost/queue دارند. سبقت درون دسته و اولویت native job محدود شد؛ monitoring سهم مستقل دارد و migration زیر بار پیوسته فرصت chunk محدود می‌گیرد. انتظار محدود با خطای صریح است؛ هزینه تخمین policy است، نه CPU/RSS. native embedding، چند process و workerهای همهٔ مسیرها هنوز پذیرش عمومی CON-005 را ندارند.
 
-- [ ] **MEM-006 · P1 — shutdown و cancellation**
+- [x] **MEM-006 · P1 — shutdown و cancellation**
   - وابسته به: COR-002/003/007؛ برای اجرای عمومی به CON-005 متصل شود.
-  - [ ] ترتیب stop-admission، drain، توقف worker، release snapshot، flush و close را یکسان کن.
-  - [ ] safe point لغو را برای عملیات طولانی تعریف کن؛ outcome نوشتن صریح باشد.
+  - [x] ترتیب stop-admission، drain، توقف worker، release snapshot، flush و close را یکسان کن.
+  - [x] safe point لغو را برای عملیات طولانی تعریف کن؛ outcome نوشتن صریح باشد.
   - خروجی: قرارداد signal/deadline و ابزار تشخیص مرحلهٔ shutdown.
   - پذیرش: تست تحت بار و خطا؛ هیچ thread kill ناامن یا موفقیت کاذب نباشد؛ مداخلهٔ cleanup ثبت شود.
+  - پذیرش محدود ۲۰۲۶-۱۰-۳۱: [قرارداد signal/deadline، outcome و مراحل shutdown](cpp/ADMISSION_SHUTDOWN_FA.md). lifespan مشترک و hook زودهنگام SIGTERM/SIGINT در entrypoint عادی سرویس، token قابل انتقال به native scan/staging/snapshot/job، rollback پیش از commit و حفظ prefix commit‌شده اضافه شد. cancellation task worker را abandon نمی‌کند؛ drain timeout یا خطای durability منابع را نگه می‌دارد و failed ثبت می‌کند. نشت snapshot در exception matcher با RAII رفع شد. probe واقعی SIGTERM با cursor و تراکنش باز، release و reopen صحیح گذشت؛ ۱۳۳ document/recovery، ۸۴ graph و ۱۱۴ Python موفق، یک skip binary قدیمی. preemption commit/I/O/plugin، hook زودهنگام حالت reload و پذیرش همهٔ embeddingها ادعا نشده؛ ادامهٔ عمومی در CON-005 است.
 
 - [ ] **MEM-007 · P1 — پذیرش حافظه در ۱۰M و ۱۰۰M**
   - وابسته به: RES-004، COR-001/002 و MEM-001/002/006.
-  - [ ] پروفایل موجود ۱۰M را با دو تکرار و integrity کامل بررسی کن؛ اجرا نیازمند دستور کاربر است.
-  - [ ] روند memory/high/max/OOM/swap، شمار snapshot و زمان close را ارزیابی کن.
-  - [ ] پس از تأیید، برنامهٔ جداگانهٔ ۱۰۰M تهیه کن.
+  - [x] پروفایل موجود ۱۰M را با دو تکرار و integrity کامل بررسی کن؛ اجرا نیازمند دستور کاربر است.
+  - [x] روند memory/high/max/OOM/swap، شمار snapshot و زمان close را ارزیابی کن.
+  - [x] پس از تأیید، برنامهٔ جداگانهٔ ۱۰۰M تهیه کن.
   - خروجی: گزارش قبول/رد با علت و محدودهٔ اندازهٔ تأییدشده.
   - پذیرش: completed به‌تنهایی قبول نیست؛ رشد نامحدود، throttling یا OOM بدون توضیح باقی نماند؛ قبولی ۱۰M معادل ۱۰۰M نباشد.
+  - پذیرش فنی محدود ۲۰۲۶-۱۰-۳۱: [گزارش قبول ۱۰M، علت و محدوده](cpp/MEMORY_ACCEPTANCE_10M_FA.md)؛ اجرای کاربر `mem007_user_20261031` با دو load مستقل ۱۰M، ۲۴ سلول و ۵۰ validation کامل پاس شد. hashهای source/config/binary تطبیق داشتند؛ تمام رخدادهای high/max/OOM، swap و full memory PSI صفر بودند؛ peak sampled charged حدود ۵٫۶۱/۵٫۶۲GiB، PSS حدود ۳٫۲۳/۳٫۱۳GiB و close حدود ۱٫۰۶/۱٫۵۵s بود. روند پایانی bounded_observed و snapshot/اعتبار پس از prepare صفر شد؛ retention allocator و relief فقط-cleanup صریح ثبت شدند. [برنامهٔ مستقل ۱۰۰M](cpp/MEMORY_100M_PLAN_FA.md) آماده است و اجرا نشده. **کارهای اجرایی این بند انجام شده‌اند؛ والد به‌علت وابستگی باز RES-004 باز می‌ماند. این قبولی ۱۰M به‌تنهایی مجوز اعلام آماده‌بودن 0.5.0 نیست.**
+
+  - تصمیم محدودهٔ انتشار، ۲۰۲۶-۱۰-۳۱: کاربر اجرای ۱۰۰M را فعلاً کنار گذاشت و آماده‌سازی 0.5.0 را بر مبنای قبولی ۱۰M خواست. [candidate آزمایشی محدود 0.5.0](releases/v0.5.0.md) محلی ساخته و نصب تمیز شد؛ RES-004/005 و پذیرش ۱۰۰M همچنان باز هستند و پاس‌شده معرفی نمی‌شوند. آماده‌سازی این بسته گیت تحقیقاتی والد را نمی‌بندد؛ انتشار عمومی انجام نشده است.
 
 ## مرحلهٔ ۳ — خواندن و planner
 
@@ -297,6 +323,7 @@ commit پایه و تغییرات working tree:
   - [ ] قرارداد executor، تعداد worker، صف، deadline و shutdown را تعریف کن.
   - خروجی: مدیریت concurrent query و cancel token قابل انتقال به native.
   - پذیرش: oversubscription، starvation و لغو درخواست رفتار قابل پیش‌بینی داشته باشند.
+  - زیرساخت محدود ۲۰۲۶-۱۰-۳۱ در [MEM-005/006](cpp/ADMISSION_SHUTDOWN_FA.md): صف و سهم app/query، deadline و native cancel token برای سرویس و scheduler موجود آماده است؛ audit تعداد workerهای همهٔ entrypointها، embedding/plugin و پذیرش عمومی همچنان باز است.
 
 - [ ] **CON-006 · P1 — آزمایش مقیاس‌پذیری**
   - وابسته به: CON-001..005 و RES-004.
@@ -311,13 +338,15 @@ commit پایه و تغییرات working tree:
   - [ ] validation، metadata، lookup، index، lock، WAL و sync را جدا اندازه بگیر.
   - خروجی: پروفایل single/bulk/concurrent و هزینهٔ ابزار.
   - پذیرش: ACK wait با CPU generation یا compaction به‌اشتباه یکی نشود.
+  - پیشرفت ۲۰۲۶-۱۰-۲۹: [telemetry و تشخیص Durable](cpp/DURABLE_GROUP_COMMIT_FA.md)؛ زمان commit/counter lookup/DDL wait و ۲۴ cell کوتاه ثبت شد. تفکیک کامل validation/index/compaction و هزینهٔ ابزار هنوز کامل نیست؛ والد باز می‌ماند.
 
 - [ ] **WRITE-002 · P1 — group commit تراکنشی**
   - وابسته به: WRITE-001، COR-003/005/007 و CON-001.
-  - [ ] ابتدا grouping موجود RocksDB را زیر چند نویسنده بررسی کن.
+  - [x] ابتدا grouping موجود RocksDB را زیر چند نویسنده بررسی کن.
   - [ ] فقط در صورت نیاز batching بالاتر با ترتیب commit روشن پیاده کن.
   - خروجی: بهبود مسیر عادی writer، مستقل از exclusive ingestion.
   - پذیرش: ACK مطابق durability؛ crash پس از ACK، atomicity سند/index/counter و p99 تست شوند.
+  - شواهد جزئی ۲۰۲۶-۱۰-۲۹: [grouping واقعی و helper اختیاری](cpp/DURABLE_GROUP_COMMIT_FA.md)؛ در ۱۰ writer با collectionهای مستقل حدود ۵ commit/sync و در collection مشترک حدود ۱ مشاهده شد. صف bounded درج native و ۱۲ crash/reopen پاس شدند؛ شمارندهٔ مشترک حذف نشد. مسیر عمومی transaction، وابستگی‌ها، sweep تأخیر و آزمون پایدار بلند هنوز کامل نیستند؛ والد و زیرتسک batching عمومی باز می‌مانند.
 
 - [ ] **WRITE-003 · P1 — کاهش کار تکراری mutation**
   - وابسته به: WRITE-001 و COR-004..007.

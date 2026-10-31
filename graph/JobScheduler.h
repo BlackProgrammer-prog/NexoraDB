@@ -15,8 +15,15 @@ struct SchedulerOptions {
     size_t workers=2;
     size_t queue_capacity=32;
     size_t max_reserved_bytes=512*1024*1024;
+    size_t max_priority_bypass=8;
+    size_t max_priority_wait_ms=1000;
 };
-struct SchedulerStats { size_t workers=0,queued=0,running=0,reserved_bytes=0; bool stopping=false; };
+struct SchedulerStats {
+    size_t workers=0,queued=0,running=0,reserved_bytes=0; bool stopping=false;
+    size_t admission_waiters=0,admitted_total=0,rejected_total=0,waited_total=0,
+           cancelled_total=0,timed_out_total=0,fairness_grants_total=0;
+    double admission_wait_ms_sum=0,queue_ms_sum=0,queue_ms_max=0,oldest_queue_ms=0;
+};
 class JobScheduler {
     using Clock=std::chrono::steady_clock;
     struct Task {
@@ -37,6 +44,9 @@ class JobScheduler {
     std::vector<std::shared_ptr<std::atomic<bool>>> running_;
     size_t reserved_=0;
     uint64_t next_sequence_=0;
+    size_t priority_bypasses_=0,waiters_=0;
+    std::atomic<size_t> admitted_{0},rejected_{0},waited_{0},cancelled_{0},timed_out_{0},fairness_grants_{0};
+    double admission_wait_ms_sum_=0,queue_ms_sum_=0,queue_ms_max_=0;
     bool stopping_=false;
     void work(size_t slot);
 public:

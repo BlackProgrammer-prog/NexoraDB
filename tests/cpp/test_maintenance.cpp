@@ -49,6 +49,8 @@ TEST(Maintenance, DryRunUpgradeFenceAndRollbackCheckpoint) {
         ASSERT_TRUE(db.InsertOne("items",R"({"_id":"a","v":1})").success);
     }
     rawPut(source,"data:items:legacy",R"({"_id":"legacy","v":2})");
+    // This fixture represents a valid legacy store, including its persisted count.
+    rawPut(source,"seq:items","2");
     const auto inspected=DocEngine::InspectStore(source.string()); ASSERT_TRUE(inspected.success)<<inspected.error_msg;
     EXPECT_EQ(nlohmann::json::parse(inspected.data)["legacy_documents"],1);
     {

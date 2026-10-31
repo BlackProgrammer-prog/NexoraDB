@@ -9,6 +9,17 @@ from scale_lab import memory_diagnostics as diagnostics
 
 
 class MemoryDiagnosticsTests(unittest.TestCase):
+    def test_combined_sampler_is_observation_only(self):
+        import os
+        from scale_lab.resources import Sampler
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(diagnostics, 'reclaim_allocator', side_effect=AssertionError('hidden trim')), \
+                patch.object(memory, 'host_memory', return_value={}), \
+                patch.object(memory, 'group_snapshot', return_value={}):
+            with Sampler(Path(directory) / 'sample.jsonl', [os.getpid()], interval=60, combined=True) as sampler:
+                pass
+            self.assertGreaterEqual(sampler.samples, 2)
+
     def test_trim_threshold_and_cooldown(self):
         from unittest.mock import Mock
         free = {'glibc': {'arena_bytes': 2*1024**3, 'free_arena_bytes': 1024**3}}

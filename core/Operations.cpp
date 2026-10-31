@@ -9,6 +9,14 @@
 namespace nexora::core {
 namespace {
 const char* names[]={"query","point_read","insert","batch_insert","update","delete"};
+template<class Rows> size_t inputCredits(const Rows& rows) {
+    size_t bytes=4096;
+    for(const auto& row:rows) {
+        if(row.size()>(SIZE_MAX-bytes)/8) throw ResourceExhausted("input reservation overflow");
+        bytes+=row.size()*8;
+    }
+    return bytes;
+}
 }
 void DocEngine::RecordOperation(OperationsState::Kind kind,uint64_t us,const DBResult& result,const nlohmann::json& plan) const noexcept {
     try {
@@ -31,20 +39,25 @@ void DocEngine::RecordOperation(OperationsState::Kind kind,uint64_t us,const DBR
     } catch(...) {} // Telemetry cannot turn a successful transaction into a failure.
 }
 DBResult DocEngine::InsertOne(const std::string& collection,const std::string& doc) {
-    return Observe(OperationsState::Insert,[&]{return InsertOneImpl(collection,doc);});
+    return Observe(OperationsState::Insert,[&]{
+        BudgetLease input(ExecutionBudget(),ResourceBudget::Buffer,inputCredits(std::array<std::string_view,1>{doc}));
+        return InsertOneImpl(collection,doc);});
 }
 DBResult DocEngine::InsertMany(const std::string& collection,const std::vector<std::string>& docs) {
     std::vector<std::string_view> views(docs.begin(),docs.end());
-    return Observe(OperationsState::BatchInsert,[&]{return InsertManyImpl(collection,views);});
+    return Observe(OperationsState::BatchInsert,[&]{
+        BudgetLease input(ExecutionBudget(),ResourceBudget::Buffer,inputCredits(views));return InsertManyImpl(collection,views);});
 }
 DBResult DocEngine::InsertManyBson(const std::string& collection,const std::vector<std::string>& docs) {
     return InsertManyBsonViews(collection,std::vector<std::string_view>(docs.begin(),docs.end()));
 }
 DBResult DocEngine::InsertManyBsonViews(const std::string& collection,const std::vector<std::string_view>& docs) {
-    return Observe(OperationsState::BatchInsert,[&]{return InsertManyImpl(collection,docs,true);});
+    return Observe(OperationsState::BatchInsert,[&]{
+        BudgetLease input(ExecutionBudget(),ResourceBudget::Buffer,inputCredits(docs));return InsertManyImpl(collection,docs,true);});
 }
 DBResult DocEngine::InsertManyBsonIngest(const std::string& collection,const std::vector<std::string_view>& docs) {
     return Observe(OperationsState::BatchInsert,[&]() -> DBResult {
+        BudgetLease input(ExecutionBudget(),ResourceBudget::Buffer,inputCredits(docs));
         const auto RocksFailure=[](const std::string& operation,const rocksdb::Status& status) {
             return DBResult::Err("[RocksDB] "+operation+": "+status.ToString(),
                 status.IsCorruption()?"corruption":status.IsIOError()?"io_error":"operation_failed");
@@ -56,7 +69,8 @@ DBResult DocEngine::InsertManyBsonIngest(const std::string& collection,const std
             if(doc.size()>64*1024*1024-bytes) return DBResult::Err("Ingestion batch exceeds 64MiB");
             bytes+=doc.size();
         }
-        std::unique_lock ddl(index_ddl_mutex_);
+        std::unique_lock ddl(index_ddl_mutex_,std::defer_lock);
+        {WriteStageTimer timer(operations_,OperationsState::DdlWaitStage);ddl.lock();}
         if(IsReservedCollectionName(collection)) return DBResult::Err("reserved collection name");
         MutationMetadata metadata;
         auto status=LoadMutationMetadata(collection,metadata);
@@ -67,7 +81,7 @@ DBResult DocEngine::InsertManyBsonIngest(const std::string& collection,const std
             if(result.success) result.data=std::to_string(docs.size());
             return result;
         };
-        if(metadata.schema.strict || !metadata.schema.fields.empty() || !metadata.foreign_keys.empty()) return fallback();
+        if(has_foreign_keys_ || metadata.schema.strict || !metadata.schema.fields.empty() || !metadata.foreign_keys.empty()) return fallback();
         for(const auto& index:metadata.indexes) {
             if(index.type==IndexType::Unique || index.state!=IndexState::Ready ||
                index.format_version!=indexv2::kFormatVersion || index.index_id.empty()) return fallback();
@@ -169,8 +183,10 @@ DBResult DocEngine::InsertManyBsonIngest(const std::string& collection,const std
         status=InjectMutationFaultIfRequested(MutationFaultPoint::AfterCounter);
         if(!status.ok()) return RocksFailure("Ingest counter fault",status);
         rocksdb::TransactionDBWriteOptimizations exclusive;
+        CheckExecution(); // Write below is an indivisible outcome; do not cancel after it.
         exclusive.skip_concurrency_control=true;
-        status=txn_db_->Write(write_options_,exclusive,&batch);
+        {WriteStageTimer timer(operations_,OperationsState::CommitStage);
+         status=txn_db_->Write(write_options_,exclusive,&batch);}
         if(!status.ok()) return RocksFailure("Ingest atomic commit",status);
         return DBResult::Ok(std::to_string(ids.size()));
     });
@@ -185,17 +201,26 @@ DBResult DocEngine::DeleteById(const std::string& collection,const std::string& 
     return Observe(OperationsState::Delete,[&]{return DeleteByIdImpl(collection,id);});
 }
 DocEngine::QueryExecution DocEngine::ExecuteQuery(const std::string& collection,const query::Condition& condition,
-        uint32_t limit,uint32_t skip,bool force,const rocksdb::Snapshot* epoch,bool locked) {
+        uint32_t limit,uint32_t skip,bool force,const rocksdb::Snapshot* epoch,bool locked,bool count_only) {
+    struct ActiveQuery {
+        std::atomic<uint64_t>& count;
+        explicit ActiveQuery(std::atomic<uint64_t>& value):count(value) { ++count; }
+        ~ActiveQuery() { --count; }
+    } active(active_query_executions_);
     const auto started=std::chrono::steady_clock::now();
     const auto elapsed=[&]{return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();};
     try {
-        auto execution=ExecuteQueryImpl(collection,condition,limit,skip,force,epoch,locked);
+        CheckExecution();
+        auto execution=ExecuteQueryImpl(collection,condition,limit,skip,force,epoch,locked,count_only);
         const auto us=elapsed(); nlohmann::json plan;
         const auto threshold=operations_.slow_us.load();
         try { if(threshold && uint64_t(us)>=threshold) plan={{"scan_type",execution.scan_type},{"index",execution.index_name.substr(0,128)},
             {"scanned_index_entries",execution.scanned_index_entries},{"scanned_documents",execution.scanned_documents},
             {"matched_documents",execution.matched_documents}}; } catch(...) {}
         RecordOperation(OperationsState::Query,us,execution.result,plan); return execution;
+    } catch(const ResourceExhausted& error) {
+        QueryExecution failed;failed.result=DBResult::Err(error.what(),"resource_exhausted");
+        RecordOperation(OperationsState::Query,elapsed(),failed.result);return failed;
     } catch(...) { RecordOperation(OperationsState::Query,elapsed(),DBResult::Err("exception")); throw; }
 }
 void DocEngine::ConfigureSlowQueries(uint64_t threshold,size_t capacity) {
@@ -223,6 +248,15 @@ std::string DocEngine::OperationMetrics() const {
         {"unordered_write",db_options_.unordered_write},{"pipelined_write",db_options_.enable_pipelined_write},
         {"write_buffer_bytes",db_options_.write_buffer_size},{"max_background_jobs",db_options_.max_background_jobs},
         {"statistics_available",bool(db_options_.statistics)}};
+    auto& stages=output["write_path"]["stages"];
+    const char* stage_names[]={"commit","counter_get_for_update","insert_ddl_lock_wait"};
+    for(size_t i=0;i<OperationsState::WriteStageCount;++i) {
+        const auto& stage=operations_.write_stages[i];
+        stages[stage_names[i]]={{"calls",stage.calls.load(std::memory_order_relaxed)},
+            {"total_ns",stage.nanoseconds.load(std::memory_order_relaxed)},
+            {"max_ns",stage.max_nanoseconds.load(std::memory_order_relaxed)}};
+    }
+    output["write_path"]["stage_scope"]="sampled overlapping wall times, not additive; counter includes lock/storage lookup, commit includes queue/WAL/memtable; savepoints excluded";
     if(const auto& stats=db_options_.statistics) {
         auto& path=output["write_path"];
         path["wal_syncs"]=stats->getTickerCount(rocksdb::WAL_FILE_SYNCED);
@@ -261,8 +295,21 @@ std::string DocEngine::HealthReport() const {
         {"corruption_latched",operations_.corruption},{"io_error_latched",operations_.io_error},{"quiescing",operations_.quiescing},
         {"scope","observed state; not a full integrity scan"}}).dump();
 }
+std::string DocEngine::DurabilityReport() const {
+    return nlohmann::json({{"profile",write_options_.sync ? "durable" : "buffered"},
+        {"wal_enabled",!write_options_.disableWAL},{"sync_on_ack",write_options_.sync},
+        {"manual_wal_flush",db_options_.manual_wal_flush},
+        {"ack_boundary","successful native write/transaction commit; transaction staging is not commit"},
+        {"failure_outcome","unknown on IO/commit failure; reconcile before retry"},
+        {"scope","document engine only; no replication or atomic document+graph transaction"},
+        {"storage_assumption","filesystem/device honors successful sync; process-crash tests do not prove power-loss durability"}}).dump();
+}
 std::string DocEngine::MemoryReport() {
     nlohmann::json output;
+    output["schema_version"]=2;
+    output["execution_budget"]=nlohmann::json::parse(ExecutionBudget()->report());
+    output["rocks_resource_id"]=rocks_resources_->telemetry_id;
+    output["rocks_resource_scope"]="process-local lifetime ID; deduplicate shared cache/WBM across engines";
     const auto metrics=GetRocksMetrics();
     output["cache_capacity_bytes"]=metrics.cache_capacity;
     output["cache_usage_bytes"]=metrics.cache_usage;
@@ -277,19 +324,52 @@ std::string DocEngine::MemoryReport() {
     property("rocksdb.estimate-table-readers-mem","table_readers_estimate_bytes");
     property("rocksdb.cur-size-all-mem-tables","all_memtables_bytes");
     property("rocksdb.size-all-mem-tables","retained_memtables_bytes");
+    property("rocksdb.cur-size-active-mem-table","active_memtables_bytes");
     property("rocksdb.num-snapshots","rocksdb_snapshots");
     property("rocksdb.oldest-snapshot-time","oldest_snapshot_unix_seconds");
+    output["active_query_executions"]=active_query_executions_.load();
+    output["query_buffer_bytes"]=nullptr;
+    output["transaction_buffer_bytes"]=nullptr;
+    output["metadata_cache_bytes"]=nullptr;
+    {std::lock_guard lock(metadata_cache_mutex_);output["metadata_cache_collections"]=metadata_cache_.size();}
     {
         std::lock_guard lock(page_sessions_mutex_);
+        PrunePageSessionsLocked();
         const auto now=PageSessionNow();
-        for(auto it=page_sessions_.begin();it!=page_sessions_.end();) {
-            if(it->second->expires_at<=now && it->second.use_count()==1) it=page_sessions_.erase(it);
-            else ++it;
-        }
         output["page_sessions"]=page_sessions_.size();
-        output["page_session_capacity"]=128;
+        output["page_session_capacity"]=pagination::kMaxSnapshots;
+        const auto live=page_live_snapshots_->load();
+        output["page_live_snapshots"]=live;
+        output["page_retired_inflight_snapshots"]=live-page_sessions_.size();
+        std::size_t active=0;
+        double oldest_age=0;
+        for (const auto& [id,session] : page_sessions_) {
+            if (session.use_count()>1) ++active;
+            oldest_age=std::max(oldest_age,std::chrono::duration<double>(now-session->created_at).count());
+        }
+        output["page_active_sessions"]=active;
+        output["page_idle_sessions"]=page_sessions_.size()-active;
+        output["page_oldest_session_age_seconds"]=oldest_age;
+        output["page_idle_lease_seconds"]=pagination::kIdleLeaseSeconds;
+        output["page_absolute_lifetime_seconds"]=nullptr; // Renewable active scans have no absolute cutoff.
+        output["page_snapshot_bytes"]=nullptr; // RocksDB exposes no exact per-snapshot byte attribution.
     }
+    output["migration_foreground_grants_total"]=migration_foreground_grants_.load();
     output["scope"]="overlapping RocksDB estimates; cache includes index/filter blocks; excludes Python, allocator overhead and graph";
+    output["accounting"]={
+        {"total_bytes",nullptr},
+        {"cache_pinned_bytes","subset of cache_usage_bytes; includes index/filter blocks"},
+        {"memtable_usage_bytes","shared WBM requested bytes; overlaps per-DB memtable properties"},
+        {"memtable_cache_charging",false},
+        {"active_memtables_bytes","subset of all_memtables_bytes"},
+        {"all_memtables_bytes","active plus unflushed immutable memtables"},
+        {"retained_memtables_bytes","includes flushed memtables pinned by iterators/snapshots; overlaps all_memtables_bytes"},
+        {"table_readers_estimate_bytes","estimate; cache-resident index/filter blocks are excluded; not RSS"},
+        {"budgets","capacity/admission limits, not current allocation or RSS"},
+        {"query_buffer_bytes","unmeasured: transient strings/BSON/MultiGet and caller-owned results; active count covers ExecuteQuery only"},
+        {"page_snapshot_bytes","unmeasured per snapshot; snapshots retain existing RocksDB versions/memtables"},
+        {"sampling","sequential non-atomic counters; memory_report may expire idle page sessions; not an allocation census"}
+    };
     return output.dump();
 }
 DBResult DocEngine::PrepareShutdown() {

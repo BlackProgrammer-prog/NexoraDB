@@ -50,6 +50,10 @@ namespace nexora {
  * @brief خروجی استاندارد تمام الگوریتم‌ها
  */
             struct AlgoResult {
+                std::shared_ptr<nexora::core::BudgetLease> memory_lease;
+                AlgoResult()=default;
+                AlgoResult(bool ok,std::string error,std::string json,double elapsed=0)
+                    :success(ok),error_msg(std::move(error)),result_json(std::move(json)),elapsed_ms(elapsed) {}
                 bool        success    = false;
                 std::string error_msg;
                 std::string result_json;    ///< JSON قابل ارسال به Python

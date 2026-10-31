@@ -19,6 +19,17 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Optional
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
+def _bounded_pipeline_type():
+    # The parser is also loaded under a standalone package alias by admin tooling.
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('_nexora_bounded_execution', Path(__file__).resolve().parents[1] / 'execution.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module.QueryPipeline
 
 from . import ast_nodes as N
 from .errors import (
@@ -420,8 +431,22 @@ class Executor:
         results = []
         try:
             for stmt in statements:
+                check = getattr(self, "execution_check", None)
+                if check is not None: check()
                 result = self.execute(stmt)
                 results.append(result)
+                receipts = getattr(self, "completed_statements", None)
+                if receipts is not None:
+                    if type(stmt).__name__ in {"CommitTx", "RollbackTx"} and result.get("success"):
+                        for receipt in receipts:
+                            if receipt.get("outcome") == "staged":
+                                receipt["outcome"] = "committed" if type(stmt).__name__ == "CommitTx" else "rolled_back"
+                    receipts.append({"statement": len(receipts)+1, "type": type(stmt).__name__,
+                                     "success": result.get("success"),
+                                     "error_code": result.get("error_code"),
+                                     "outcome": "staged" if self._tx is not None else "completed"})
+                if result.get("error_code") == "execution_cancelled":
+                    raise InterruptedError(result.get("error") or "execution cancelled before commit")
                 if result.get("success") is False:
                     self.abort_transaction()
                     break
@@ -437,6 +462,21 @@ class Executor:
             result = self.engine.rollback_transaction(tx)
             if not result.success:
                 raise NexoraQLExecutionError(result.error_msg or "Rollback failed")
+            for receipt in getattr(self, "completed_statements", []):
+                if receipt.get("outcome") == "staged": receipt["outcome"] = "rolled_back"
+
+    def close_execution(self) -> None:
+        try:
+            self.abort_transaction()
+        finally:
+            self._snapshots.clear()
+            for job in self._jobs.values():
+                cancel = getattr(job, "cancel", None)
+                if cancel is not None: cancel()
+            for job in self._jobs.values():
+                result = getattr(job, "result", None)
+                if result is not None: result()  # Cooperative join, never abandon native work.
+            self._jobs.clear()
 
     def execute(self, stmt) -> dict:
         try:
@@ -698,7 +738,7 @@ class Executor:
                 if getattr(r, "error_code", "") == "not_found":
                     return {"success": True, "count": 0, "documents": []}
                 return self._res(r)
-            docs = [] if s.skip else self._project([json.loads(r.data)], s.projection)
+            docs = self._decode_response_records([r.data] if not s.skip else [], s.projection)
             return {"success": True, "count": len(docs), "documents": docs}
         # ── LOOKUP JOIN ──
         if s.joins:
@@ -714,9 +754,7 @@ class Executor:
                 s.limit + s.skip if s.limit else 0)
             if not jr["success"]:
                 return {"success": False, "error": jr["error_msg"]}
-            docs = [json.loads(rec) for rec in jr["records"]]
-            docs = docs[s.skip:]
-            docs = self._project(docs, s.projection)
+            docs = self._decode_response_records(jr["records"], s.projection, s.skip)
             return {"success": True, "count": len(docs), "documents": docs}
 
         # ── مسیر O(1): WHERE _id = 'x' ──
@@ -727,17 +765,33 @@ class Executor:
                 if getattr(r, "error_code", "") == "not_found":
                     return {"success": True, "count": 0, "documents": []}
                 return self._res(r)
-            docs = [] if s.skip else self._project([json.loads(r.data)], s.projection)
+            docs = self._decode_response_records([r.data] if not s.skip else [], s.projection)
             return {"success": True, "count": len(docs), "documents": docs}
 
         # ── FindMany عادی ──
         cond = build_condition(s.where)
+        if hasattr(self.engine, 'execution_budget') and hasattr(self.engine, 'iter_documents'):
+            try:
+                docs = _bounded_pipeline_type()(self.engine).materialize(s.collection, cond, limit=s.limit, skip=s.skip)
+                if s.projection is not None:
+                    docs = docs.projected(self._project(docs, s.projection))
+                return {"success": True, "count": len(docs), "documents": docs}
+            except InterruptedError:
+                raise
+            except (MemoryError, OSError, ValueError, RuntimeError) as error:
+                return {"success": False, "error": str(error), "error_code": getattr(error, 'code', 'resource_exhausted' if isinstance(error, MemoryError) else 'query_failed')}
         r = self.engine.find_many(s.collection, cond, s.limit, s.skip)
         if not r.success:
             return {"success": False, "error": r.error_msg}
         docs = json.loads(r.data) if r.data and r.data.strip() else []
         docs = self._project(docs, s.projection)
         return {"success": True, "count": len(docs), "documents": docs}
+
+    def _decode_response_records(self, records, projection, skip=0):
+        if hasattr(self.engine, 'execution_budget'):
+            docs = _bounded_pipeline_type()(self.engine).materialize_records(records, skip=skip)
+            return docs if projection is None else docs.projected(self._project(docs, projection))
+        return self._project([json.loads(raw) for raw in records[skip:]], projection)
 
     @staticmethod
     def _project(docs: list[dict], projection: Optional[list[str]]) -> list[dict]:
@@ -1257,6 +1311,8 @@ class Executor:
         return {"success": True,
                 "version": getattr(nx, "__version__", "?"),
                 "graph_enabled": getattr(nx, "GRAPH_ENABLED", False),
+                "document_durability": (json.loads(self.engine.durability_report())
+                                        if hasattr(self.engine, 'durability_report') else None),
                 "collections": self.engine.list_collections(),
                 "graphs": (self.gm.list_graphs() if self.gm else []),
                 "algorithms": sorted(ALGO_SPECS.keys())}

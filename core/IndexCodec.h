@@ -10,7 +10,7 @@
 
 namespace nexora::core::indexv2 {
 
-constexpr std::uint32_t kFormatVersion = 2;
+constexpr std::uint32_t kFormatVersion = 3;
 
 std::optional<std::string> EncodeTuple(
         const std::string& document,

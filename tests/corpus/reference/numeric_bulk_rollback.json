@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "seed": 505006,
+  "note": "Curated contract regression, not a claim of a newly discovered engine failure.",
+  "operations": [
+    {"op":"insert","document":{"_id":"precise","v":9007199254740993}},
+    {"op":"insert","document":{"_id":"rounded","v":9007199254740992.0}},
+    {"op":"query","value":9007199254740992.0},
+    {"op":"tx","commit":false,"actions":[
+      {"op":"set","id":"precise","value":9007199254740992.0},
+      {"op":"delete","id":"rounded"}
+    ]},
+    {"op":"bulk","documents":[{"_id":"temporary","v":true},{"_id":"precise","v":0}]},
+    {"op":"insert","document":{"_id":"unicode","v":"فارسی\u0000✓","nested":[1,false,null]}},
+    {"op":"query","value":"فارسی\u0000✓"},
+    {"op":"query","value":true}
+  ]
+}

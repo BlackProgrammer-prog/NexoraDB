@@ -113,3 +113,6 @@ rules.ninja
 .cache/
 .vs/
 *:Zone.Identifier
+
+# Local Graphy index and search cache
+/.graphy/

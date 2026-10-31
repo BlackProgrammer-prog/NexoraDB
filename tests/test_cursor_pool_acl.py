@@ -242,13 +242,37 @@ def test_driver_lazy_cursor_closes_transport_on_early_stop():
         assert body.closed
 
 
-def test_driver_incomplete_cursor_is_not_success():
+@pytest.mark.parametrize('body', [b'{"document":{}}\n',
+    b'{"document":{}}\n{"error":"Expired or invalid continuation token"}\n'])
+def test_driver_incomplete_cursor_is_not_success(body):
     with NexoraDBClient(url="http://localhost", token="test") as client:
         client._client.close()
-        client._client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b'{"document":{}}\n')))
-        with pytest.raises(NexoraDBError, match="before completion"):
+        client._client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body)))
+        with pytest.raises(NexoraDBError, match="before completion|incomplete result"):
             with client.cursor("SELECT * FROM items;") as rows:
                 list(rows)
+
+
+def test_snapshot_expiry_in_export_has_error_without_end_and_releases_budget():
+    async def check():
+        class ExpiringStream:
+            closed = False
+            calls = 0
+            def next_ndjson_batch(self, limit):
+                self.calls += 1
+                if self.calls == 1:
+                    return b'{"document":{"id":1}}\n', 1
+                raise RuntimeError('Expired or invalid continuation token')
+            def close(self): self.closed = True
+        stream, budget = ExpiringStream(), CursorBudget()
+        response = await stream_cursor(lambda: stream, lambda: None, 'expiry', budget, batch_size=1)
+        chunks = [chunk async for chunk in response.body_iterator]
+        records = [json.loads(chunk) for chunk in chunks]
+        assert records[0] == {'document': {'id': 1}}
+        assert 'error' in records[-1]
+        assert all('end' not in row for row in records)
+        assert stream.closed and budget.owners == {}
+    asyncio.run(check())
 
 
 def test_pool_acquisition_timeout_before_transport():

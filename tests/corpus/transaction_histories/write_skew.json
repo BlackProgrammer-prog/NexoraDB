@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "initial": {"a": 1, "b": 1},
+  "events": [
+    {"tx":"A","op":"begin"},
+    {"tx":"B","op":"begin"},
+    {"tx":"A","op":"read","key":"a","value":1},
+    {"tx":"A","op":"read","key":"b","value":1},
+    {"tx":"B","op":"read","key":"a","value":1},
+    {"tx":"B","op":"read","key":"b","value":1},
+    {"tx":"A","op":"write","key":"a","value":0},
+    {"tx":"A","op":"commit"},
+    {"tx":"B","op":"write","key":"b","value":0},
+    {"tx":"B","op":"commit"}
+  ],
+  "expected": {"read_committed": true, "strict_serializable": false},
+  "note": "Allowed Read Committed anomaly; not an assertion of serializable isolation."
+}

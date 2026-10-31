@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "selected_on": "2026-10-28",
+  "purpose": "Preregistered comparison targets, NOT an inventory of running services",
+  "publication_eligible": false,
+  "products": {
+    "mongodb": {"version": "8.0.34", "edition": "Community", "deployment": "standalone WiredTiger", "transport": "TCP MongoDB wire protocol", "durability": "w=1,j=true", "read_contract": "local; single-document operations", "installed_binary_observed": "8.0.34", "artifact_digest": null},
+    "postgresql": {"version": "17.11", "edition": "PostgreSQL community", "deployment": "single server, JSONB document profile", "transport": "TCP PostgreSQL protocol", "durability": "fsync=on,synchronous_commit=on,full_page_writes=on", "read_contract": "READ COMMITTED", "installed_binary_observed": "14.24 (not the selected target)", "artifact_digest": null},
+    "sqlserver": {"version": "16.0.4305.5", "edition": "SQL Server 2022 Developer", "deployment": "single server; CU27+GDR October 2026; development/test only", "transport": "TCP TDS", "durability": "DELAYED_DURABILITY=DISABLED", "read_contract": "READ COMMITTED,RCSI=OFF", "installed_binary_observed": null, "artifact_digest": null},
+    "oracle": {"version": "21.3", "edition": "Oracle Database 21c XE", "deployment": "single instance; isolated legacy research baseline, not a security baseline", "transport": "TCP Oracle Net", "durability": "COMMIT WRITE WAIT IMMEDIATE", "read_contract": "READ COMMITTED", "installed_binary_observed": null, "artifact_digest": "f8357b432de33478549a76557e8c5220ec243710ed86115c65b0c2bc00a848db", "artifact_name": "oracle-database-xe-21c-1.0-1.ol8.x86_64.rpm", "edition_limits": {"cpu_cores": 2, "ram_gib": 2, "user_data_gb": 12}},
+    "neo4j": {"version": "5.26.32", "edition": "Community", "deployment": "single server; Cypher 5", "transport": "TCP Bolt", "durability": "normal synchronous transaction commit; effective runtime verification required", "read_contract": "READ COMMITTED target; verify runtime/version semantics before comparison", "installed_binary_observed": null, "artifact_digest": null, "W1_document_model": "N/A", "W3_document_model": "N/A"}
+  },
+  "admission_requirements_before_any_comparison": [
+    "Capture actual server build/edition, binary or image digest, and driver version",
+    "Reject actual version/config different from selected profile; never silently use local PostgreSQL 14 as PostgreSQL 17",
+    "Verify effective durability, isolation, indexes/collation, resource envelope, and result oracle",
+    "Record license/publication review where required; no implied authorization",
+    "No cross-product score until comparable adapters and runtime evidence exist"
+  ]
+}

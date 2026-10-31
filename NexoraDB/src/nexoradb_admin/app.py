@@ -20,6 +20,7 @@ from .api_bridge import (
 )
 from .config import AdminApiSettings
 from .admission import AdmissionMiddleware
+from .lifecycle import install_lifecycle
 from .document_store import (
     CreateCollectionRequest,
     DocumentRequest,
@@ -102,8 +103,12 @@ def create_app(
     )
     app.state.settings = app_settings
     initialization_lock = RLock()
+    def release_resources():
+        app.state.graph_manager = None
+        app.state.engine = None
+    lifecycle = install_lifecycle(app, lambda: (app.state.engine, app.state.graph_manager), release_resources)
     app.add_middleware(AdmissionMiddleware, max_inflight=app_settings.api_max_inflight,
-                       require_https=app_settings.environment.lower() == "production")
+                       require_https=app_settings.environment.lower() == "production", tracker=lifecycle.requests)
     app.state.engine = engine
     app.state.graph_manager = None
     app.state.native_module = None
@@ -418,7 +423,12 @@ def create_app(
             graph_manager=get_optional_graph_manager(),
             payload=payload,
             allow_performance_controls=access.get('role') == 'admin',
+            controller=lifecycle.controller, owner="admin:"+str(access.get("sub", "admin"))[:240],
         )
+
+    @app.get("/system/execution")
+    def execution_status(_: dict[str, Any] = Depends(current_token_payload)):
+        return lifecycle.report()
 
     @app.get("/graphs")
     def graphs(
@@ -613,7 +623,11 @@ def create_asgi_app(
         engine_provider=get_engine_for_monitoring,
     )
     fastapi_app.state.monitoring_server = monitoring_server
-    return monitoring_server.asgi_app(fastapi_app)
+    monitoring_server.lifecycle = fastapi_app.state.lifecycle
+    fastapi_app.state.lifecycle.background = monitoring_server
+    application = monitoring_server.asgi_app(fastapi_app)
+    application.nexora_lifecycle = fastapi_app.state.lifecycle
+    return application
 
 
 app = create_asgi_app()

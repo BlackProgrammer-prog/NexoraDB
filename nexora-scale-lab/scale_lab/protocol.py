@@ -48,7 +48,7 @@ def suite_sources():
     for name in ('README.md', 'requirements.txt'):
         files[name] = (LAB / name).read_bytes()
     # Keep the ingestion implementation beside binary hashes, not only the harness.
-    for folder in ('core', 'query', 'bindings'):
+    for folder in ('core', 'query', 'bindings', 'graph', 'NexoraDB/src', 'scripts'):
         for path in sorted((LAB.parent / folder).rglob('*')):
             if path.is_file() and path.suffix in {'.cpp', '.h', '.hpp', '.txt'}:
                 files['native-source/' + str(path.relative_to(LAB.parent))] = path.read_bytes()
@@ -142,6 +142,18 @@ def index_check(metadata):
 
 
 def run_job(config, job, job_dir):
+    if job['database'] != 'nexoradb':
+        return _run_job(config, job, job_dir)
+    monitor = Sampler(Path(job_dir)/'job-resources.jsonl', [os.getpid()],
+                      config.sample_interval_seconds, combined=True)
+    try:
+        with monitor:
+            return _run_job(config, job, job_dir, monitor)
+    finally:
+        atomic_json(Path(job_dir)/'job-resources-summary.json', monitor.summary())
+
+
+def _run_job(config, job, job_dir, monitor=None):
     job_dir = Path(job_dir)
     containment = None
     if config.contain_memory:
@@ -164,6 +176,7 @@ def run_job(config, job, job_dir):
         raise RuntimeError('Private store escaped protocol state root')
     atomic_json(store_dir / 'owner.json', {'job_dir': str(job_dir), 'namespace': namespace})
     adapter = adapter_for(job['database'], namespace, store_dir / 'db', config)
+    if monitor is not None: monitor.extra_callback = adapter.memory_snapshot
     state = {'job': job, 'namespace': namespace, 'private_store': str(store_dir), 'status': 'starting'}
     progress = WorkerProgress(job_dir, atomic_json)
 
@@ -173,11 +186,10 @@ def run_job(config, job, job_dir):
         progress.start(name, total, unit, cell=state.get('cell'),
                        workload=state.get('workload'), clients=state.get('clients'))
         if job['database'] == 'nexoradb' and hasattr(adapter, 'engine'):
-            from .memory_diagnostics import python_memory, reclaim_allocator
+            from .memory_diagnostics import python_memory
             from .memory_control import group_snapshot
-            reclaimed = reclaim_allocator(force=True)
             diagnostic = {'stage': name, 'utc': state['stage_started_utc'],
-                          'allocator_maintenance': reclaimed,
+                          'allocator_maintenance': {'attempted': False, 'reason': 'observation_only_MEM002'},
                           'process': python_memory(), 'cgroup': group_snapshot('worker')}
             try:
                 diagnostic['native'] = json.loads(adapter.engine.memory_report())
@@ -210,9 +222,8 @@ def run_job(config, job, job_dir):
         metadata = adapter.metadata()
         metadata['allocator_policy'] = {
             'scope': 'native engine and generator process' if job['database']=='nexoradb' else 'no server allocator intervention',
-            'native_trim': job['database']=='nexoradb',
-            'free_arena_threshold_bytes': 256*1024**2,
-            'minimum_free_fraction': 0.25, 'sample_trim_interval_seconds': 5,
+            'native_trim': False,
+            'maintenance': 'observation_only_MEM002; no explicit malloc_trim calls',
             'MALLOC_ARENA_MAX': os.environ.get('MALLOC_ARENA_MAX'),
             'MALLOC_TRIM_THRESHOLD_': os.environ.get('MALLOC_TRIM_THRESHOLD_')}
         metadata['worker_memory_containment'] = containment
@@ -230,6 +241,12 @@ def run_job(config, job, job_dir):
         metadata['resource_affinity'] = affinities
         if adapter.engine_name == 'nexoradb':
             metadata['native_binary_sha256'] = binary_digest(Path(metadata['native_binary']))
+            binary_copy = job_dir/'native-binary'/Path(metadata['native_binary']).name
+            binary_copy.parent.mkdir()
+            shutil.copyfile(metadata['native_binary'], binary_copy)
+            if binary_digest(binary_copy) != metadata['native_binary_sha256']:
+                raise RuntimeError('Native binary changed during evidence copy')
+            metadata['native_binary_artifact'] = str(binary_copy)
             if config.records == PRIMARY_RECORDS and metadata['native_build'].get('build_type') != 'Release':
                 raise RuntimeError('Primary comparisons require a Release native build, not Debug/sanitized artifacts')
         if adapter.engine_name == 'mongodb':
@@ -407,11 +424,22 @@ def run_job(config, job, job_dir):
                         'policy': 'temporary soft threshold = hard cap, restored on exit',
                         'enabled': config.contain_memory, 'before_close': group_snapshot('worker')})
                 adapter.disconnect()
+                if job['database'] == 'nexoradb':
+                    atomic_json(job_dir/'close.json', adapter.close_report)
+                    atomic_json(job_dir/'cleanup-memory.json', {
+                        'policy': 'temporary soft threshold = hard cap, restored on exit',
+                        'enabled': config.contain_memory, 'after_close': group_snapshot('worker'),
+                        'before_close': json.loads((job_dir/'cleanup-memory.json').read_text())['before_close']})
+            if job['database'] == 'nexoradb':
+                cleanup = json.loads((job_dir/'cleanup-memory.json').read_text())
+                cleanup['after_restore'] = group_snapshot('worker')
+                atomic_json(job_dir/'cleanup-memory.json', cleanup)
         except BaseException as error:
             success = False
             state['cleanup_error_type'] = type(error).__name__
             if job['database'] == 'nexoradb':
                 state['cleanup_error_message'] = str(error)[:4000]
+                if hasattr(adapter, 'close_report'): atomic_json(job_dir/'close.json', adapter.close_report)
             if 'failed_stage' not in state:
                 state.update(status='cleanup-failed', error_type=type(error).__name__)
             atomic_json(job_dir / 'checkpoint.json', state)

@@ -47,6 +47,7 @@
 #include <mutex>
 #include <memory>
 #include "SnapshotMemory.h"
+#include "../core/ExecutionControl.h"
 
 namespace nexora {
     namespace graph {
@@ -54,6 +55,8 @@ namespace nexora {
 // forward
         class LiveGraph;
         struct SnapshotOptions {
+            std::shared_ptr<nexora::core::ExecutionControl> execution_control;
+            std::shared_ptr<nexora::core::ResourceBudget> execution_budget;
             bool incoming=false;
             bool use_cache=false;
             size_t max_build_bytes=0; // preflight + enforced PMR requested-byte cap, not RSS
@@ -87,6 +90,7 @@ namespace nexora {
             size_t compressedBytes() const;
             size_t allocationPeakBytes() const { return data_->memory.peakBytes(); }
             size_t allocationCurrentBytes() const { return data_->memory.currentBytes(); }
+            size_t ownedAllocationBytes() const { return data_->memory.ownedRequestedBytes(); }
             std::unique_ptr<StaticGraph> clone(SnapshotOptions options={}) const;
             bool cacheHit() const noexcept { return cache_hit_; }
             DenseId originalId(DenseId id) const { return data_->original_ids_.at(id); }
@@ -283,7 +287,7 @@ namespace nexora {
                 std::pmr::vector<DenseId> original_ids_{&memory};
                 std::pmr::unordered_map<TypeId,std::pmr::string> node_type_names_{&memory},edge_type_names_{&memory};
                 std::pmr::unordered_map<std::pmr::string,DenseId,StringHash,StringEqual> ext_to_dense_{&memory};
-                explicit Data(size_t limit,size_t baseline=0):memory(limit,baseline) {}
+                explicit Data(size_t limit,size_t baseline=0,std::shared_ptr<nexora::core::ResourceBudget> pool={}):memory(limit,baseline,std::move(pool)) {}
             };
             std::unique_ptr<Data> data_;
             SnapshotOptions options_;

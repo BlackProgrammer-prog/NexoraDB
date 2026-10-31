@@ -26,10 +26,31 @@ def main() -> int:
     # A correct metadata version alone must not hide an obsolete bundled .so.
     with tempfile.TemporaryDirectory(prefix="nexora_wheel_smoke_") as directory:
         root = Path(directory)
-        engine = nexoradb.DocEngine(str(root / "documents"))
+        pool = nexoradb.ResourceBudget(32*1024**2)
+        settings = nexoradb.RocksSettings()
+        settings.execution_budget = pool
+        engine = nexoradb.DocEngine(str(root / "documents"), rocks_settings=settings)
         assert engine.create_collection("items").success
         assert engine.insert_one("items", '{"_id":"one","value":1}').success
         assert engine.find_by_id("items", "one").success
+        assert engine.insert_one("items", '{"_id":"two","value":2}').success
+        with pool.reserve('workspace',32*1024**2):
+            rejected=engine.insert_one("items",'{"_id":"rejected"}')
+            assert not rejected.success and rejected.error_code=='resource_exhausted'
+        assert not engine.find_by_id("items","rejected").success
+        scope=engine.execution_scope()
+        with scope:
+            scope.cancel()
+            cancelled=engine.insert_one("items",'{"_id":"cancelled"}')
+            assert not cancelled.success and cancelled.error_code=='execution_cancelled'
+        from nexoradb.execution import QueryPipeline, SpillDiskBudget
+        spill=root/'spill';spill.mkdir()
+        pipe=QueryPipeline(engine,memory_bytes=1024**2,max_record_bytes=256,
+                           disk_budget=SpillDiskBudget(1024**2),spill_parent=spill)
+        with pipe.scan('items') as rows:
+            with pipe.sort(rows,'value') as ordered:
+                assert [row['value'] for row in ordered]==[1,2]
+        assert not list(spill.iterdir()) and pipe.disk.report()['reserved_bytes']==0
         assert json.loads(engine.health_report())["ready"]
         assert "operations" in json.loads(engine.operation_metrics())
         assert engine.integrity_check().success
@@ -42,6 +63,7 @@ def main() -> int:
         manager.shutdown()
         assert engine.prepare_shutdown().success
         del manager, engine
+        assert json.loads(pool.report())['reserved_bytes']==0
     print(
         "Installed wheel verified:",
         package_version,

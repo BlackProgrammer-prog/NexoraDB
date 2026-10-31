@@ -118,7 +118,9 @@ def test_admission_releases_on_cancellation():
         entered = asyncio.Event()
         async def application(scope, receive, send):
             entered.set()
-            await asyncio.Event().wait()
+            # Cancellation must retain admission until downstream cleanup/work
+            # has actually completed, including a worker that cannot be killed.
+            await asyncio.sleep(.02)
         middleware = AdmissionMiddleware(application, 1)
         async def receive():
             return {"type": "http.request", "body": b""}

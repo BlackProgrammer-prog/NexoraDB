@@ -16,13 +16,39 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <set>
 #include <vector>
 
 namespace nexora::core {
     struct PageSessionTestAccess {
         static void Advance(DocEngine& engine,std::chrono::seconds amount) {
             std::lock_guard lock(engine.page_sessions_mutex_);
-            engine.page_clock_offset_for_testing_+=amount;
+            engine.page_now_for_testing_=engine.PageSessionNow()+amount;
+        }
+        static void Freeze(DocEngine& engine) {
+            Advance(engine,std::chrono::seconds(0));
+        }
+        static size_t RegisteredCount(DocEngine& engine) {
+            std::lock_guard lock(engine.page_sessions_mutex_);
+            return engine.page_sessions_.size();
+        }
+        static std::shared_ptr<void> Pin(DocEngine& engine,const std::string& token) {
+            std::lock_guard lock(engine.page_sessions_mutex_);
+            return engine.page_sessions_.at(token.substr(3,token.find('.',3)-3));
+        }
+        static std::unique_lock<std::mutex> Block(const std::shared_ptr<void>& pin) {
+            return std::unique_lock(std::static_pointer_cast<DocEngine::PageSession>(pin)->scan_mutex);
+        }
+        static bool WaitForCall(DocEngine& engine,const std::string& token) {
+            for(int i=0;i<1000;++i) {
+                {
+                    std::lock_guard lock(engine.page_sessions_mutex_);
+                    const auto& session=engine.page_sessions_.at(token.substr(3,token.find('.',3)-3));
+                    if(session.use_count()>=3) return true; // registry + test pin + call
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
         }
     };
 }
@@ -242,6 +268,29 @@ namespace {
         }
     }
 
+    TEST(DocumentMigration, BusyForegroundStillGrantsBoundedMaintenanceChunk) {
+        TestTempDir temp("migration_fairness");const auto path=temp.path()/"db";
+        {DocEngine engine(path.string());ASSERT_TRUE(engine.CreateCollection("items").success);}
+        {
+            rocksdb::Options options;rocksdb::DB* raw=nullptr;
+            ASSERT_TRUE(rocksdb::DB::Open(options,path.string(),&raw).ok());
+            std::unique_ptr<rocksdb::DB> db(raw);
+            ASSERT_TRUE(db->Delete(rocksdb::WriteOptions{},"meta:format:documents").ok());
+            ASSERT_TRUE(db->Put(rocksdb::WriteOptions{},"data:items:old",R"({"_id":"old","v":1})").ok());
+        }
+        DocEngine engine(path.string());
+        const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(8);
+        uint64_t grants=0;
+        do {
+            ASSERT_TRUE(engine.FindById("items","old").success);
+            grants=nlohmann::json::parse(engine.MemoryReport())["migration_foreground_grants_total"].get<uint64_t>();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while(!grants && std::chrono::steady_clock::now()<until);
+        EXPECT_GE(grants,1U);
+        engine.PauseDocumentMigration();
+        EXPECT_TRUE(engine.FindById("items","old").success);
+    }
+
     TEST(DocumentMigration, RejectsAFormatWrittenByANewerBinary) {
         TestTempDir temp("nexora_future_document_format");
         const auto database_path = temp.path() / "db";
@@ -386,6 +435,78 @@ namespace {
         EXPECT_TRUE(engine.GetIndexes("users").empty());
     }
 
+    TEST(DocEnginePagination, SharedRecordAndByteBoundaries) {
+        using namespace nexora::core::pagination;
+        TestTempDir temp("pagination_contract");
+        DocEngine engine(temp.path().string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        for (const auto limit : {0U, 1001U, 4096U}) {
+            const auto page = engine.FindPage("items", {}, limit);
+            EXPECT_FALSE(page.success);
+            EXPECT_TRUE(page.continuation_token.empty());
+        }
+        for (const auto bytes : {std::size_t{0}, std::size_t{1}, kMaxBytes + 1})
+            EXPECT_FALSE(engine.FindPage("items", {}, 1000, "", bytes).success);
+        for (const auto bytes : {kMinBytes, kDefaultBytes, kMaxBytes}) {
+            const auto page = engine.FindPage("items", {}, kMaxRecords, "", bytes);
+            ASSERT_TRUE(page.success) << page.error_msg;
+            EXPECT_EQ(page.data, "[]");
+            EXPECT_TRUE(page.continuation_token.empty());
+        }
+        std::vector<std::string> docs;
+        for (int i = 0; i < 2503; ++i)
+            docs.push_back(nlohmann::json({{"_id", std::to_string(i)}, {"value", i}}).dump());
+        ASSERT_TRUE(engine.InsertMany("items", docs).success);
+        for (const auto size : {1U, 17U, 1000U}) {
+            std::set<std::string> ids;
+            std::string token;
+            do {
+                const auto page = engine.FindPage("items", {}, size, token, 4096);
+                ASSERT_TRUE(page.success) << page.error_msg;
+                EXPECT_LE(page.data.size(), 4096U);
+                const auto rows = nlohmann::json::parse(page.data);
+                EXPECT_LE(rows.size(), size);
+                for (const auto& row : rows)
+                    EXPECT_TRUE(ids.insert(row.at("_id").get<std::string>()).second);
+                token = page.continuation_token;
+            } while (!token.empty());
+            EXPECT_EQ(ids.size(), docs.size());
+        }
+        auto first = engine.FindPage("items", {}, 1);
+        ASSERT_TRUE(first.success);
+        ASSERT_FALSE(first.continuation_token.empty());
+        EXPECT_FALSE(engine.FindPage("items", {}, 1001, first.continuation_token).success);
+        EXPECT_FALSE(engine.FindPage("items", {}, 1, first.continuation_token, 1).success);
+        // Invalid arguments do not advance or destroy an existing cursor.
+        auto next = engine.FindPage("items", {}, 1, first.continuation_token);
+        ASSERT_TRUE(next.success);
+        EXPECT_NE(next.data, first.data);
+        engine.ClosePage(next.continuation_token);
+    }
+
+    TEST(DocEnginePagination, ExactBytesAndOversizedDocumentNeverSilentlySkip) {
+        TestTempDir temp("pagination_bytes");
+        DocEngine engine(temp.path().string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertOne("items", R"({"_id":"a","nested":{"x":[1,2]},"text":"hello"})").success);
+        const auto reference = engine.FindPage("items", {}, 1);
+        ASSERT_TRUE(reference.success);
+        EXPECT_TRUE(engine.FindPage("items", {}, 1, "", reference.data.size()).success);
+        EXPECT_FALSE(engine.FindPage("items", {}, 1, "", reference.data.size() - 1).success);
+        ASSERT_TRUE(engine.InsertOne("items", nlohmann::json({{"_id", "b"}, {"text", std::string(256, 'x')}}).dump()).success);
+        auto first = engine.FindPage("items", {}, 1, "", 128);
+        ASSERT_TRUE(first.success);
+        ASSERT_FALSE(first.continuation_token.empty());
+        auto oversized = engine.FindPage("items", {}, 1, first.continuation_token, 128);
+        EXPECT_FALSE(oversized.success);
+        EXPECT_NE(oversized.error_msg.find("byte budget"), std::string::npos);
+        EXPECT_TRUE(oversized.continuation_token.empty());
+        EXPECT_FALSE(engine.FindPage("items", {}, 1, first.continuation_token, 1024).success);
+        auto restarted = engine.FindPage("items", {}, 1000, "", 1024);
+        ASSERT_TRUE(restarted.success);
+        EXPECT_EQ(nlohmann::json::parse(restarted.data).size(), 2U);
+    }
+
     TEST(DocEnginePagination, ConcurrentScanCloseAndIndependentCursors) {
         TestTempDir temp("nexora_cursor_close_race");
         DocEngine engine(temp.path().string());
@@ -449,6 +570,100 @@ namespace {
         nexora::core::PageSessionTestAccess::Advance(engine,std::chrono::seconds(121));
         EXPECT_FALSE(engine.FindPage("items",Condition{},1,idle.continuation_token).success);
         EXPECT_EQ(nlohmann::json::parse(engine.MemoryReport())["page_sessions"],0);
+    }
+
+    TEST(DocEnginePagination, IdleLeaseExactBoundaryAndBackgroundReaper) {
+        TestTempDir temp("exact_page_expiry");
+        DocEngine engine(temp.path().string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertMany("items",{R"({"_id":"a"})",R"({"_id":"b"})",R"({"_id":"c"})"}).success);
+        using Access=nexora::core::PageSessionTestAccess;
+        Access::Freeze(engine);
+        auto first=engine.FindPage("items",Condition{},1);
+        ASSERT_TRUE(first.success);
+        Access::Advance(engine,std::chrono::seconds(119));
+        auto second=engine.FindPage("items",Condition{},1,first.continuation_token);
+        ASSERT_TRUE(second.success);
+        Access::Advance(engine,std::chrono::seconds(120));
+        auto expired=engine.FindPage("items",Condition{},1,second.continuation_token);
+        EXPECT_FALSE(expired.success);
+        EXPECT_TRUE(expired.continuation_token.empty());
+        EXPECT_EQ(expired.data,"[]");
+        auto abandoned=engine.FindPage("items",Condition{},1);
+        ASSERT_TRUE(abandoned.success);
+        Access::Advance(engine,std::chrono::seconds(120));
+        // No FindPage/MemoryReport call: prove the independent reaper releases it.
+        for(int i=0;i<100 && Access::RegisteredCount(engine);++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        EXPECT_EQ(Access::RegisteredCount(engine),0);
+        EXPECT_EQ(nlohmann::json::parse(engine.MemoryReport())["page_live_snapshots"],0);
+    }
+
+    TEST(DocEnginePagination, SlowPageRenewsAfterCompletionAndCloseNeverResurrects) {
+        TestTempDir temp("slow_page_lease");
+        DocEngine engine(temp.path().string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertMany("items",{R"({"_id":"a"})",R"({"_id":"b"})",R"({"_id":"c"})"}).success);
+        using Access=nexora::core::PageSessionTestAccess;
+        for(bool close_during_scan : {false,true}) {
+            auto first=engine.FindPage("items",Condition{},1);
+            ASSERT_TRUE(first.success);
+            auto pin=Access::Pin(engine,first.continuation_token);
+            auto blocked=Access::Block(pin);
+            nexora::core::PageResult next;
+            std::thread reader([&] {next=engine.FindPage("items",Condition{},1,first.continuation_token);});
+            const bool borrowed=Access::WaitForCall(engine,first.continuation_token);
+            EXPECT_TRUE(borrowed);
+            Access::Advance(engine,std::chrono::seconds(121));
+            EXPECT_EQ(nlohmann::json::parse(engine.MemoryReport())["page_sessions"],1);
+            if(close_during_scan) engine.ClosePage(first.continuation_token);
+            blocked.unlock();
+            reader.join();
+            pin.reset();
+            if(close_during_scan) {
+                EXPECT_FALSE(next.success);
+                EXPECT_TRUE(next.continuation_token.empty());
+                EXPECT_EQ(nlohmann::json::parse(engine.MemoryReport())["page_live_snapshots"],0);
+            } else {
+                ASSERT_TRUE(next.success)<<next.error_msg;
+                ASSERT_FALSE(next.continuation_token.empty());
+                Access::Advance(engine,std::chrono::seconds(119));
+                auto last=engine.FindPage("items",Condition{},1,next.continuation_token);
+                ASSERT_TRUE(last.success)<<last.error_msg;
+                EXPECT_TRUE(last.continuation_token.empty());
+            }
+        }
+    }
+
+    TEST(DocEnginePagination, ClosedInflightSnapshotStillConsumesCapacity) {
+        TestTempDir temp("retired_snapshot_capacity");
+        DocEngine engine(temp.path().string());
+        ASSERT_TRUE(engine.CreateCollection("items").success);
+        ASSERT_TRUE(engine.InsertMany("items",{R"({"_id":"a"})",R"({"_id":"b"})"}).success);
+        std::vector<std::string> tokens;
+        for(size_t i=0;i<nexora::core::pagination::kMaxSnapshots;++i) {
+            auto page=engine.FindPage("items",Condition{},1);
+            ASSERT_TRUE(page.success);
+            tokens.push_back(page.continuation_token);
+        }
+        auto pin=nexora::core::PageSessionTestAccess::Pin(engine,tokens.back());
+        engine.ClosePage(tokens.back());
+        auto report=nlohmann::json::parse(engine.MemoryReport());
+        EXPECT_EQ(report["page_sessions"],127);
+        EXPECT_EQ(report["page_live_snapshots"],128);
+        EXPECT_EQ(report["page_retired_inflight_snapshots"],1);
+        EXPECT_FALSE(engine.FindPage("items",Condition{},1).success);
+        pin.reset();
+        auto accepted=engine.FindPage("items",Condition{},1);
+        ASSERT_TRUE(accepted.success);
+        engine.ClosePage(accepted.continuation_token);
+        for(const auto& token:tokens) engine.ClosePage(token);
+        report=nlohmann::json::parse(engine.MemoryReport());
+        EXPECT_EQ(report["page_live_snapshots"],0);
+        EXPECT_EQ(report["page_active_sessions"],0);
+        EXPECT_EQ(report["page_idle_lease_seconds"],120);
+        EXPECT_TRUE(report["page_absolute_lifetime_seconds"].is_null());
+        EXPECT_TRUE(report["page_snapshot_bytes"].is_null());
     }
 
     TEST(DocEnginePagination, BoundsRetainedSnapshotsAndReleasesCapacity) {
@@ -596,6 +811,9 @@ namespace {
         ASSERT_TRUE(new_index_reference.success)
                 << new_index_reference.error_msg;
 
+        EXPECT_FALSE(engine.DeleteById("users", "u1").success);
+        EXPECT_TRUE(engine.FindById("users", "u1").success);
+        ASSERT_TRUE(engine.DeleteById("posts", "p_new").success);
         const auto delete_result =
                 engine.DeleteById("users", "u1");
         ASSERT_TRUE(delete_result.success)
@@ -758,6 +976,9 @@ namespace {
                 R"({"_id":"current","user_email":"shared@example.com"})"
         ).success);
 
+        EXPECT_FALSE(engine.DeleteMany("users",Condition::Leaf("group",Op::EQ,"g")).success);
+        EXPECT_EQ(engine.GetCollectionSize("users"),2);
+        ASSERT_TRUE(engine.DeleteById("posts","current").success);
         const auto deleted = engine.DeleteMany(
                 "users",
                 Condition::Leaf("group", Op::EQ, "g"));
@@ -1017,6 +1238,8 @@ namespace {
 
         auto delete_transaction = engine.BeginTransaction();
         ASSERT_NE(delete_transaction, nullptr);
+        EXPECT_FALSE(engine.DeleteByIdTx(*delete_transaction,"users","u1").success);
+        ASSERT_TRUE(engine.DeleteByIdTx(*delete_transaction,"posts","p1").success);
         ASSERT_TRUE(engine.DeleteByIdTx(
                 *delete_transaction,
                 "users",
@@ -1026,6 +1249,7 @@ namespace {
         // Rolling back the outer transaction must restore document, index and
         // counter together.
         EXPECT_TRUE(engine.FindById("users", "u1").success);
+        EXPECT_TRUE(engine.FindById("posts", "p1").success);
         ASSERT_TRUE(engine.InsertOne(
                 "posts",
                 R"({"_id":"p2","user_email":"ali@example.com"})"
@@ -1298,7 +1522,7 @@ namespace {
             ASSERT_EQ(indexes.size(), 1U);
             stable_id = indexes.front().index_id;
             EXPECT_FALSE(stable_id.empty());
-            EXPECT_EQ(indexes.front().format_version, 2U);
+            EXPECT_EQ(indexes.front().format_version, 3U);
 
             EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"m1","tenant":"a"})").success);
             EXPECT_TRUE(engine.InsertOne("users", R"({"_id":"m2","tenant":"a"})").success);
@@ -1469,9 +1693,8 @@ namespace {
                 Condition::Leaf("age", Op::GTE, "50", ValueType::Int64)});
         const auto explain = engine.ExplainPlan("items", condition);
         ASSERT_TRUE(explain.success) << explain.error_msg;
-        EXPECT_NE(explain.data.find("\"index\":\"idx_tenant_age\""),
-                  std::string::npos);
-        EXPECT_NE(explain.data.find("\"scan_type\":\"index_range\""),
+        // v2 numeric keys do not cover mixed int/double comparisons safely.
+        EXPECT_NE(explain.data.find("\"scan_type\":\"full_scan\""),
                   std::string::npos);
         EXPECT_EQ(engine.Count("items", condition).data, "25");
         EXPECT_EQ(engine.Exists("items", condition).data, "true");

@@ -119,6 +119,7 @@ static bool json_bson_types(bson_iter_t& iterator,bool array=false) {
 // Lazy, page-bounded document output. Python owns this object; keep_alive on
 // the factory pins DocEngine. One consumer at a time, including close().
 class DocumentStream {
+    std::shared_ptr<nexora::core::ExecutionControl> execution_=nexora::core::current_execution_control;
     DocEngine* engine_;
     std::string collection_,token_;
     Condition condition_;
@@ -126,22 +127,26 @@ class DocumentStream {
     size_t max_bytes_,offset_=0;
     bool ended_=false;
     bool object_mode_=false, raw_mode_=false;
+    std::shared_ptr<BudgetLease> page_credit_;
     py::list page_;
     std::mutex mutex_;
 public:
     DocumentStream(DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes)
         :engine_(&engine),collection_(std::move(collection)),condition_(std::move(condition)),
          page_size_(page_size),max_bytes_(max_bytes) {
-        if (!page_size || page_size>4096 || max_bytes<2 || max_bytes>64*1024*1024)
-            throw std::invalid_argument("stream requires page_size 1..4096 and max_page_bytes 2..64MiB");
+        if (!page_size || page_size>nexora::core::pagination::kMaxRecords ||
+                max_bytes<nexora::core::pagination::kMinBytes || max_bytes>nexora::core::pagination::kMaxBytes)
+            throw std::invalid_argument("stream requires page_size 1..1000 and max_page_bytes 2..64MiB");
     }
     ~DocumentStream() { if (!token_.empty()) engine_->ClosePage(token_); }
     py::object next() {
+        nexora::core::ExecutionGuard execution(execution_);
         std::unique_lock lock(mutex_,std::try_to_lock);
         if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
         if (raw_mode_) throw std::runtime_error("cannot mix object and raw cursor modes");
         object_mode_=true;
         if (offset_>=py::len(page_)) {
+            page_=py::list();page_credit_.reset();
             if (ended_) throw py::stop_iteration();
             PageResult result;
             {
@@ -153,7 +158,11 @@ public:
                 throw std::runtime_error(result.error_msg);
             }
             token_=std::move(result.continuation_token); ended_=token_.empty();
-            try { page_=py::module_::import("json").attr("loads")(result.data).cast<py::list>(); }
+            try {
+                if(result.memory_lease) result.memory_lease->resize(max_bytes_*8);
+                page_=py::module_::import("json").attr("loads")(result.data).cast<py::list>();
+                page_credit_=result.memory_lease;
+            }
             catch (...) { engine_->ClosePage(token_); token_.clear(); ended_=true; throw; }
             offset_=0;
             if (!py::len(page_)) throw py::stop_iteration();
@@ -163,10 +172,12 @@ public:
     // Owned, bounded NDJSON output: avoid Python JSON decode/encode entirely.
     // This reduces copies; it is deliberately NOT a borrowed RocksDB buffer.
     py::tuple next_ndjson_batch(uint32_t requested) {
+        nexora::core::ExecutionGuard execution(execution_);
         std::unique_lock lock(mutex_,std::try_to_lock);
         if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
         if (object_mode_) throw std::runtime_error("cannot mix object and raw cursor modes");
-        if (!requested || requested>4096) throw std::invalid_argument("batch limit must be 1..4096");
+        if (!requested || requested>nexora::core::pagination::kMaxRecords)
+            throw std::invalid_argument("batch limit must be 1..1000");
         raw_mode_=true;
         if (ended_) return py::make_tuple(py::bytes(),0);
         PageResult result;
@@ -179,7 +190,7 @@ public:
                 // FindPage emits a JSON array of objects from the trusted
                 // codec. Split only top-level objects, respecting escapes,
                 // strings and nested arrays/objects (never delimiter replace).
-                output.reserve(result.data.size()+12*std::min(requested,page_size_));
+                output.reserve(result.data.size()+13*std::min(requested,page_size_));
                 size_t start=0;
                 int depth=0;
                 bool quoted=false, escaped=false;
@@ -214,7 +225,7 @@ public:
     void close() {
         std::unique_lock lock(mutex_,std::try_to_lock);
         if (!lock.owns_lock()) throw std::runtime_error("stream is already being consumed");
-        engine_->ClosePage(token_); token_.clear(); ended_=true; page_=py::list(); offset_=0;
+        engine_->ClosePage(token_); token_.clear(); ended_=true; page_=py::list();page_credit_.reset(); offset_=0;
     }
 };
 
@@ -280,6 +291,10 @@ static const char* wal_op_to_string(WalOpType op) {
 // ══════════════════════════════════════════════════════════════
 
 PYBIND11_MODULE(nexoradb, m) {
+    m.attr("PAGE_MAX_RECORDS") = py::int_(nexora::core::pagination::kMaxRecords);
+    m.attr("PAGE_MIN_BYTES") = py::int_(nexora::core::pagination::kMinBytes);
+    m.attr("PAGE_DEFAULT_BYTES") = py::int_(nexora::core::pagination::kDefaultBytes);
+    m.attr("PAGE_MAX_BYTES") = py::int_(nexora::core::pagination::kMaxBytes);
     m.def("decode_bson_json",[](py::bytes buffer) {
         const std::string_view bytes(PyBytes_AS_STRING(buffer.ptr()),PyBytes_GET_SIZE(buffer.ptr()));
         DocumentCodec::Result decoded;
@@ -756,6 +771,27 @@ PYBIND11_MODULE(nexoradb, m) {
         .value("Unknown",DiskClass::Unknown).value("Rotational",DiskClass::Rotational).value("SSD",DiskClass::SSD);
     py::enum_<HotCompression>(m,"HotCompression")
         .value("Lz4",HotCompression::Lz4).value("Snappy",HotCompression::Snappy);
+    py::register_exception<ResourceExhausted>(m,"ResourceExhausted",PyExc_MemoryError);
+    py::register_exception<OperationCancelled>(m,"OperationCancelled",PyExc_InterruptedError);
+    py::class_<ExecutionScope>(m,"ExecutionScope")
+        .def("cancel",&ExecutionScope::cancel)
+        .def("check",&ExecutionScope::check)
+        .def("__enter__",[](ExecutionScope& scope)->ExecutionScope& {scope.enter();return scope;},py::return_value_policy::reference_internal)
+        .def("__exit__",[](ExecutionScope& scope,py::object,py::object,py::object) {scope.close();});
+    py::class_<BudgetLease,std::shared_ptr<BudgetLease>>(m,"BudgetLease")
+        .def("close",&BudgetLease::close)
+        .def("resize",[](BudgetLease& lease,size_t bytes){lease.resize(bytes);},py::arg("bytes"))
+        .def_property_readonly("bytes",&BudgetLease::bytes)
+        .def("__enter__",[](std::shared_ptr<BudgetLease> value){return value;})
+        .def("__exit__",[](BudgetLease& value,py::object,py::object,py::object){value.close();});
+    py::class_<ResourceBudget,std::shared_ptr<ResourceBudget>>(m,"ResourceBudget")
+        .def(py::init<size_t>(),py::arg("capacity_bytes"))
+        .def("report",&ResourceBudget::report,py::call_guard<py::gil_scoped_release>())
+        .def("reserve",[](std::shared_ptr<ResourceBudget> pool,const std::string& component,size_t bytes,uint32_t wait_ms) {
+            for(int i=0;i<ResourceBudget::Count;++i) if(component==ResourceBudget::names[i])
+                return std::make_shared<BudgetLease>(std::move(pool),static_cast<ResourceBudget::Component>(i),bytes,wait_ms);
+            throw std::invalid_argument("unknown resource component");
+        },py::arg("component"),py::arg("bytes"),py::arg("wait_ms")=0,py::call_guard<py::gil_scoped_release>());
     py::class_<RocksResources,std::shared_ptr<RocksResources>>(m,"RocksResources")
         .def(py::init<size_t,size_t>(),py::arg("memory_budget_bytes")=256*1024*1024,py::arg("cache_bytes")=0)
         .def_readonly("budget_bytes",&RocksResources::budget_bytes)
@@ -763,6 +799,7 @@ PYBIND11_MODULE(nexoradb, m) {
         .def_readonly("memtable_bytes",&RocksResources::memtable_bytes);
     py::class_<RocksSettings>(m,"RocksSettings")
         .def(py::init<>())
+        .def_readwrite("execution_budget",&RocksSettings::execution_budget)
         .def_readwrite("memory_budget_bytes",&RocksSettings::memory_budget_bytes)
         .def_readwrite("block_cache_bytes",&RocksSettings::block_cache_bytes)
         .def_readwrite("write_buffer_bytes",&RocksSettings::write_buffer_bytes)
@@ -853,6 +890,11 @@ PYBIND11_MODULE(nexoradb, m) {
             .def_static("inspect_store",&DocEngine::InspectStore,py::call_guard<py::gil_scoped_release>())
             .def("pause_document_migration",&DocEngine::PauseDocumentMigration,py::call_guard<py::gil_scoped_release>())
             .def("operation_metrics",&DocEngine::OperationMetrics,py::call_guard<py::gil_scoped_release>())
+            .def("durability_report",&DocEngine::DurabilityReport,py::call_guard<py::gil_scoped_release>())
+            .def_static("migrate_index_format_copy",[](const std::string& source,const std::string& destination,bool dry_run) {
+                py::gil_scoped_release release;
+                return DocEngine::MigrateIndexFormatCopy(source,destination,dry_run);
+            },py::arg("source"),py::arg("destination")="",py::arg("dry_run")=true)
             .def("configure_query_tuning",&DocEngine::ConfigureQueryTuning,py::arg("read_cache_admission"),py::arg("smart_indexes"),py::call_guard<py::gil_scoped_release>())
             .def("query_tuning",&DocEngine::QueryTuning,py::call_guard<py::gil_scoped_release>())
             .def("drain_slow_queries",&DocEngine::DrainSlowQueries,py::call_guard<py::gil_scoped_release>())
@@ -860,6 +902,8 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("health_report",&DocEngine::HealthReport,py::call_guard<py::gil_scoped_release>())
             .def("prepare_shutdown",&DocEngine::PrepareShutdown,py::call_guard<py::gil_scoped_release>())
             .def("memory_report",&DocEngine::MemoryReport,py::call_guard<py::gil_scoped_release>())
+            .def("execution_budget",&DocEngine::ExecutionBudget)
+            .def("execution_scope",[](DocEngine&,uint64_t timeout_ms) {return std::make_unique<ExecutionScope>(timeout_ms);},py::arg("timeout_ms")=30000)
             .def("is_healthy", &DocEngine::IsHealthy,
                  "بررسی سلامت اتصال RocksDB")
 
@@ -1062,18 +1106,21 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("iter_documents",[](DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes) {
                 return std::make_unique<DocumentStream>(engine,std::move(collection),std::move(condition),page_size,max_bytes);
             },py::arg("collection"),py::arg("condition")=Condition{},py::arg("page_size")=128,
-               py::arg("max_page_bytes")=4*1024*1024,py::keep_alive<0,1>())
+               py::arg("max_page_bytes")=nexora::core::pagination::kDefaultBytes,py::keep_alive<0,1>())
             .def("find_page",
                  [](DocEngine& e, const std::string& collection,
                     Condition condition, std::uint32_t limit,
-                    const std::string& token) {
+                    const std::string& token, std::size_t max_bytes) {
                      py::gil_scoped_release release;
-                     return e.FindPage(collection, condition, limit, token);
+                     return e.FindPage(collection, condition, limit, token, max_bytes);
                  },
                  py::arg("collection"),
                  py::arg("condition") = Condition{},
                  py::arg("limit") = 100,
-                 py::arg("continuation_token") = "")
+                 py::arg("continuation_token") = "",
+                 py::arg("max_page_bytes") = nexora::core::pagination::kDefaultBytes)
+            .def("close_page", &DocEngine::ClosePage, py::arg("continuation_token"),
+                 py::call_guard<py::gil_scoped_release>())
 
             .def("explain_plan", &DocEngine::ExplainPlan,
                  py::arg("collection"), py::arg("condition"),
@@ -1352,13 +1399,14 @@ PYBIND11_MODULE(nexoradb, m) {
 
             .def("find_by_id_tx",
                  [](DocEngine& e, TxHandle* tx,
-                    const std::string& col, const std::string& id) -> DBResult {
+                    const std::string& col, const std::string& id,bool for_update) -> DBResult {
                      if (!tx) return DBResult::Err("null transaction");
                      py::gil_scoped_release release;
-                     return e.FindByIdTx(*tx, col, id);
+                     return e.FindByIdTx(*tx, col, id,for_update);
                  },
                  py::arg("tx"), py::arg("collection"), py::arg("doc_id"),
-                 "FindById داخل transaction");
+                 py::arg("for_update")=false,
+                 "Read committed; for_update locks the point key until transaction end");
 
     // ──────────────────────────────────────────────────────────
     // §8  TxHandle
@@ -1581,6 +1629,13 @@ PYBIND11_MODULE(nexoradb, m) {
 
     // ── StaticGraph ──
 
+    m.def("graph_snapshot_memory", [] {
+        py::dict result;
+        result["current_requested_bytes"]=SnapshotMemory::processCurrentBytes();
+        result["peak_requested_bytes"]=SnapshotMemory::processPeakBytes();
+        result["live_resources"]=SnapshotMemory::processResources();
+        return result;
+    });
     py::class_<SnapshotOptions>(m,"SnapshotOptions")
             .def(py::init([] { SnapshotOptions options; options.cancellation=std::make_shared<std::atomic<bool>>(false); return options; }))
             .def_readwrite("incoming",&SnapshotOptions::incoming)
@@ -1617,6 +1672,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("planned_peak_bytes",&StaticGraph::plannedPeakBytes)
             .def("allocation_peak_bytes",&StaticGraph::allocationPeakBytes)
             .def("allocation_current_bytes",&StaticGraph::allocationCurrentBytes)
+            .def("owned_allocation_bytes",&StaticGraph::ownedAllocationBytes)
             .def("original_id",&StaticGraph::originalId)
             .def("cache_hit",&StaticGraph::cacheHit)
             .def("has_node",        &StaticGraph::hasNode,       py::arg("dense_id"))
@@ -1663,13 +1719,26 @@ PYBIND11_MODULE(nexoradb, m) {
         .def(py::init<>())
         .def_readwrite("workers",&SchedulerOptions::workers)
         .def_readwrite("queue_capacity",&SchedulerOptions::queue_capacity)
-        .def_readwrite("max_reserved_bytes",&SchedulerOptions::max_reserved_bytes);
+        .def_readwrite("max_reserved_bytes",&SchedulerOptions::max_reserved_bytes)
+        .def_readwrite("max_priority_bypass",&SchedulerOptions::max_priority_bypass)
+        .def_readwrite("max_priority_wait_ms",&SchedulerOptions::max_priority_wait_ms);
     py::class_<SchedulerStats>(m,"SchedulerStats")
         .def_readonly("workers",&SchedulerStats::workers)
         .def_readonly("queued",&SchedulerStats::queued)
         .def_readonly("running",&SchedulerStats::running)
         .def_readonly("reserved_bytes",&SchedulerStats::reserved_bytes)
-        .def_readonly("stopping",&SchedulerStats::stopping);
+        .def_readonly("stopping",&SchedulerStats::stopping)
+        .def_readonly("admission_waiters",&SchedulerStats::admission_waiters)
+        .def_readonly("admitted_total",&SchedulerStats::admitted_total)
+        .def_readonly("rejected_total",&SchedulerStats::rejected_total)
+        .def_readonly("waited_total",&SchedulerStats::waited_total)
+        .def_readonly("cancelled_total",&SchedulerStats::cancelled_total)
+        .def_readonly("timed_out_total",&SchedulerStats::timed_out_total)
+        .def_readonly("fairness_grants_total",&SchedulerStats::fairness_grants_total)
+        .def_readonly("admission_wait_ms_sum",&SchedulerStats::admission_wait_ms_sum)
+        .def_readonly("queue_ms_sum",&SchedulerStats::queue_ms_sum)
+        .def_readonly("queue_ms_max",&SchedulerStats::queue_ms_max)
+        .def_readonly("oldest_queue_ms",&SchedulerStats::oldest_queue_ms);
     py::class_<WalOptions>(m, "WalOptions")
             .def(py::init<>())
             .def_readwrite("durability", &WalOptions::durability)
@@ -1724,6 +1793,7 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("recover_stored_graphs",&GraphManager::recoverStoredGraphs,py::call_guard<py::gil_scoped_release>())
             .def("prepare_shutdown",&GraphManager::prepareShutdown,py::call_guard<py::gil_scoped_release>())
             .def("scheduler_stats",&GraphManager::schedulerStats)
+            .def("memory_report",&GraphManager::memoryReport,py::call_guard<py::gil_scoped_release>())
             .def("set_memory_budget", [](GraphManager& gm,const std::string& name,size_t bytes) {
                 auto graph=gm.shareLiveGraph(name);
                 if (!graph) throw std::invalid_argument("graph not loaded");

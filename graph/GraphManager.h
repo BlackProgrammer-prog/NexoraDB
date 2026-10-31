@@ -223,6 +223,7 @@ namespace nexora {
             bool startup();
             bool recoverStoredGraphs(); // Never rebuild from source implicitly.
             bool prepareShutdown(); // Quiesce caller mutations first; joins jobs, checkpoints WAL/data.
+            std::string memoryReport() const; // Estimates and process-wide PMR counters; no combined total.
 
             /**
              * @brief در shutdown دیتابیس فراخوانی می‌شود

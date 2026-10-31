@@ -38,11 +38,28 @@ void AppendEscapedString(std::string& out, std::string_view value) {
     out.push_back('\0');
 }
 
+void AppendInteger(std::string& out,std::int64_t value) {
+    out.push_back(static_cast<char>(query::ValueType::Int64));
+    AppendU64(out,static_cast<std::uint64_t>(value)^(std::uint64_t{1}<<63));
+}
+bool AppendNumber(std::string& out,double value) {
+    if(!std::isfinite(value)) return false;
+    // Canonicalize only EXACT integral doubles within int64. Never round an
+    // integer to double: 2^53+1 and 2^53 must retain distinct equality keys.
+    if(value>=-0x1p63 && value<0x1p63 && std::trunc(value)==value) {
+        AppendInteger(out,static_cast<std::int64_t>(value)); return true;
+    }
+    out.push_back(static_cast<char>(query::ValueType::Float64));
+    auto bits=std::bit_cast<std::uint64_t>(value);
+    bits=(bits&(std::uint64_t{1}<<63)) ? ~bits : bits^(std::uint64_t{1}<<63);
+    AppendU64(out,bits);return true;
+}
+
 bool AppendValue(std::string& out, const query::FieldValue& value) {
     if (!value.found || value.type == query::ValueType::Null) return false;
-    query::ValueType type = value.type;
-    if (value.raw.empty()) type = query::ValueType::String;
-    out.push_back(static_cast<char>(type));
+    const query::ValueType type = value.type;
+    if(type!=query::ValueType::Int64 && type!=query::ValueType::Float64)
+        out.push_back(static_cast<char>(type));
     switch (type) {
         case query::ValueType::Int64: {
                 std::int64_t signed_value = 0;
@@ -51,8 +68,7 @@ bool AppendValue(std::string& out, const query::FieldValue& value) {
                         signed_value);
                 if (parsed.ec != std::errc{} ||
                     parsed.ptr != value.raw.data() + value.raw.size()) return false;
-                AppendU64(out, static_cast<std::uint64_t>(signed_value) ^
-                               (std::uint64_t{1} << 63));
+                AppendInteger(out,signed_value);
                 break;
             }
         case query::ValueType::Float64: {
@@ -63,19 +79,19 @@ bool AppendValue(std::string& out, const query::FieldValue& value) {
                 if (parsed.ec != std::errc{} ||
                     parsed.ptr != value.raw.data() + value.raw.size() ||
                     !std::isfinite(floating)) return false;
-                std::uint64_t bits = std::bit_cast<std::uint64_t>(floating);
-                bits = (bits & (std::uint64_t{1} << 63))
-                        ? ~bits : bits ^ (std::uint64_t{1} << 63);
-                AppendU64(out, bits);
+                if(!AppendNumber(out,floating)) return false;
                 break;
             }
         case query::ValueType::Bool:
+                if (value.raw!="true" && value.raw!="false" && value.raw!="1" && value.raw!="0") return false;
                 out.push_back(value.raw == "true" || value.raw == "1" ? 1 : 0);
                 break;
         case query::ValueType::String:
                 AppendEscapedString(out, value.raw);
                 break;
         case query::ValueType::Null:
+                return false;
+        default:
                 return false;
     }
     return true;
@@ -89,19 +105,10 @@ bool AppendDocumentValue(std::string& out,
             AppendEscapedString(out, value.string_value);
             return true;
         case query::DocumentValueType::Int64:
-            out.push_back(static_cast<char>(query::ValueType::Int64));
-            AppendU64(out, static_cast<std::uint64_t>(value.int_value) ^
-                           (std::uint64_t{1} << 63));
+            AppendInteger(out,value.int_value);
             return true;
         case query::DocumentValueType::Float64: {
-            if (!std::isfinite(value.double_value)) return false;
-            out.push_back(static_cast<char>(query::ValueType::Float64));
-            std::uint64_t bits = std::bit_cast<std::uint64_t>(
-                    value.double_value);
-            bits = (bits & (std::uint64_t{1} << 63))
-                    ? ~bits : bits ^ (std::uint64_t{1} << 63);
-            AppendU64(out, bits);
-            return true;
+            return AppendNumber(out,value.double_value);
         }
         case query::DocumentValueType::Bool:
             out.push_back(static_cast<char>(query::ValueType::Bool));
@@ -184,7 +191,7 @@ std::string IndexPrefix(const std::string& collection,
 }
 
 std::string CollectionPrefix(const std::string& collection) {
-    std::string key = "idx2";
+    std::string key = "idx3";
     AppendLengthPrefixed(key, collection);
     return key;
 }

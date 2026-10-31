@@ -6,8 +6,6 @@ import sys
 import threading
 import time
 
-from nexoradb.cli.main import main as cli_main
-
 from .dashboard import run_dashboard
 from .server import run_server
 from .service import show_logs, start_service, stop_service
@@ -81,6 +79,10 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "cli":
+        # Import the terminal UI only when explicitly launching it. Server-only
+        # environments and --help do not need Textual or its dependencies.
+        from nexoradb.cli.main import main as cli_main
+
         sys.argv = ["nexoradb-cli", "--url", args.url]
         cli_main()
         return

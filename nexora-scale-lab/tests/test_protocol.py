@@ -245,6 +245,9 @@ class RealProtocolTests(unittest.TestCase):
             self.assertGreaterEqual(diagnostics[-1]['producer_wait_seconds'],0)
             self.assertIn('pending_compaction_bytes',diagnostics[-1]['engine_metrics'])
             self.assertIn('stall_micros',diagnostics[-1]['engine_metrics'])
+            stages = [json.loads(line) for line in (destination/'stage-memory.jsonl').read_text().splitlines()]
+            self.assertTrue(stages)
+            self.assertTrue(all(not sample['allocator_maintenance']['attempted'] for sample in stages))
 
     def test_shutdown_error_preserves_original_load_failure(self):
         from unittest.mock import patch

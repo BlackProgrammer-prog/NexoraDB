@@ -34,6 +34,8 @@ add_executable(nexora_doc_tests
         test_rocks_tuning.cpp
         test_maintenance.cpp
         test_operations.cpp
+        test_type_semantics.cpp
+        test_failure_recovery.cpp
 )
 if (NEXORA_BUILD_PYTHON)
     pybind11_add_module(nexora_conversion_probe python_conversion_probe.cpp)
@@ -53,6 +55,19 @@ target_include_directories(nexora_doc_tests
         ${PROJECT_SOURCE_DIR}
 )
 add_executable(nexora_rocks_layout_probe rocks_layout_probe.cpp)
+add_executable(nexora_recovery_crash_probe recovery_crash_probe.cpp)
+target_link_libraries(nexora_recovery_crash_probe PRIVATE nexora_core)
+target_include_directories(nexora_recovery_crash_probe PRIVATE ${PROJECT_SOURCE_DIR})
+add_dependencies(nexora_doc_tests nexora_recovery_crash_probe)
+# Separate processes keep SIGKILL injection out of the threaded GoogleTest host.
+if (UNIX AND NOT NEXORA_ENABLE_TSAN)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME cpp.FailureRecoveryCrashMatrix
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/verify_failure_recovery.py
+            --probe $<TARGET_FILE:nexora_recovery_crash_probe>
+            --directory ${CMAKE_CURRENT_BINARY_DIR}/cor007-recovery)
+    set_tests_properties(cpp.FailureRecoveryCrashMatrix PROPERTIES TIMEOUT 180)
+endif ()
 target_link_libraries(nexora_rocks_layout_probe PRIVATE nexora_core)
 add_executable(nexora_rocks_workload_probe rocks_workload_probe.cpp)
 target_link_libraries(nexora_rocks_workload_probe PRIVATE nexora_core Threads::Threads)

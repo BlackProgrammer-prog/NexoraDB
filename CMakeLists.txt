@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(NexoraDB VERSION 0.4.1 LANGUAGES CXX)
+project(NexoraDB VERSION 0.5.0 LANGUAGES CXX)
 
 # Generate compile_commands.json where the selected generator supports it.
 if (CMAKE_GENERATOR MATCHES "Ninja")
@@ -27,6 +27,7 @@ option(NEXORA_ENABLE_UBSAN  "Enable UndefinedSanitizer"  OFF)
 option(NEXORA_ENABLE_TSAN   "Enable ThreadSanitizer"     OFF)
 option(NEXORA_ENABLE_LTO    "Enable LTO in optimized builds" OFF)
 option(NEXORA_BUILD_BENCHMARKS "Build native C++ benchmarks" OFF)
+option(NEXORA_BUILD_RESEARCH_PROBES "Build bounded research layer probes" OFF)
 option(NEXORA_BUILD_FUZZERS "Build libFuzzer document/query harnesses" OFF)
 
 if(NEXORA_BUILD_FUZZERS)
@@ -285,6 +286,15 @@ endif ()
 if (NEXORA_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks/cpp)
 endif ()
+
+if(NEXORA_BUILD_RESEARCH_PROBES)
+    add_executable(nexora_index_migrate scripts/index_migrate.cpp)
+    target_link_libraries(nexora_index_migrate PRIVATE nexora_core)
+    add_executable(nexora_research_read_probe benchmarks/cpp/research_read_probe.cpp)
+    target_link_libraries(nexora_research_read_probe PRIVATE nexora_core nlohmann_json::nlohmann_json Threads::Threads)
+    target_compile_definitions(nexora_research_read_probe PRIVATE
+            NEXORA_PROBE_VERSION="${PROJECT_VERSION}" NEXORA_PROBE_BUILD="$<CONFIG>")
+endif()
 
 if (NEXORA_BUILD_FUZZERS)
     add_subdirectory(tests/fuzz)

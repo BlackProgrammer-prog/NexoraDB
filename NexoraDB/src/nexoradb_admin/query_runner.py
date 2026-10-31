@@ -9,6 +9,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, NoReturn
 from threading import RLock
+from contextlib import nullcontext
+from .execution_control import (ExecutionController, Cancellation, current_execution,
+                                ExecutionStopped, Overloaded)
 
 from fastapi import HTTPException, status
 from pydantic import BaseModel, Field
@@ -17,6 +20,7 @@ _PARSER_PACKAGE_ALIAS = "_nexoradb_admin_nexoraql"
 _MAX_QUERY_LENGTH = 200_000
 _MAX_STATEMENTS = 256
 _PARSER_LOCK = RLock()
+_DEFAULT_EXECUTIONS = ExecutionController()
 
 # An application execution scope is not permission to execute arbitrary DDL.
 # Unknown statement types are denied until their access requirements are defined.
@@ -136,7 +140,48 @@ def _load_nexoraql_package_locked() -> ModuleType:
     return module
 
 
-def execute_query(
+def execute_query(*, engine, graph_manager, payload, granted_scopes=None,
+                  granted_collections=None, allow_performance_controls=True,
+                  controller=None, owner="direct", cancellation=None):
+    controller = controller or _DEFAULT_EXECUTIONS
+    token = cancellation or current_execution.get() or Cancellation()
+    nexoraql = _load_nexoraql_package()
+    try:
+        statements = nexoraql.parse(_normalize_query(payload.query), payload.parameters)
+    except Exception as exc:
+        _raise_query_error(exc, nexoraql)
+    # Server-derived policy units. Unknown/large work is deliberately expensive;
+    # these are admission estimates, not a CPU-time or memory measurement.
+    cost = min(controller.policy.owner_cost, 1 + len(payload.query.encode()) // 16384)
+    semantic = sys.modules.get(getattr(nexoraql, "__name__", "") + ".semantic")
+    id_lookup = getattr(semantic, "_extract_id_eq", lambda _: None)
+    def large(statement):
+        name = type(statement).__name__
+        if name == "Select":
+            return bool(getattr(statement, "joins", None)) or id_lookup(getattr(statement, "where", None)) is None
+        if name == "Count": return getattr(statement, "where", None) is not None
+        return name in {"BuildGraph", "RefreshGraph", "RunJob", "RunLock", "CreateIndex", "AlterCollection", "Update", "Delete", "ExistsStmt"}
+    if any(large(statement) for statement in statements):
+        cost = min(controller.policy.owner_cost, max(cost, 16))
+    if controller.policy.small_slots and cost > controller.policy.small_cost:
+        cost = min(cost, controller.policy.owner_cost-controller.policy.small_cost)
+    try:
+        with controller.acquire(owner, cost, cancellation=token):
+            token.check()
+            return _execute_query(engine=engine, graph_manager=graph_manager, payload=payload,
+                                  granted_scopes=granted_scopes, granted_collections=granted_collections,
+                                  allow_performance_controls=allow_performance_controls,
+                                  execution_token=token, prepared=(nexoraql, statements))
+    except Overloaded as exc:
+        raise HTTPException(503, detail={"message": str(exc), "code": "overloaded", "outcome": "not_started"},
+                            headers={"Retry-After": "1"}) from exc
+    except (ExecutionStopped, InterruptedError) as exc:
+        raise HTTPException(408, detail={"message": str(exc), "code": "execution_cancelled",
+                            "completedStatements": token.completed,
+                            "outcome": "completed_prefix_preserved; active_transaction_rolled_back"}) from exc
+
+
+def _execute_query(
     *,
     engine: Any,
     graph_manager: Any | None,
@@ -144,14 +189,19 @@ def execute_query(
     granted_scopes: frozenset[str] | None = None,
     granted_collections: dict[str, list[str]] | None = None,
     allow_performance_controls: bool = True,
+    execution_token=None,
+    prepared=None,
 ) -> QueryExecuteResponse:
     query = _normalize_query(payload.query)
-    nexoraql = _load_nexoraql_package()
+    nexoraql = prepared[0] if prepared is not None else _load_nexoraql_package()
     executor = nexoraql.Executor(engine, graph_manager)
+    if execution_token is not None:
+        executor.execution_check = execution_token.check
+        executor.completed_statements = execution_token.completed
 
     started_at = time.perf_counter()
     try:
-        statements = nexoraql.parse(query, payload.parameters)
+        statements = prepared[1] if prepared is not None else nexoraql.parse(query, payload.parameters)
         if not allow_performance_controls and any(type(s).__name__ in
                 {'ShowPerformance', 'SetPerformance', 'ShowIndexAdvice'} for s in statements):
             raise HTTPException(403, 'Performance controls require an administrator')
@@ -164,11 +214,19 @@ def execute_query(
         # Preserve query semantics: LIMIT is a total-result limit, not a batch
         # size. The buffered response byte guard below must never silently
         # rewrite the user's SELECT or report a truncated result as complete.
-        statement_results = executor.execute_statements(statements)
+        scope_factory = getattr(type(engine), "execution_scope", None)
+        scope = (engine.execution_scope(max(1, min(300000, int((execution_token.deadline-time.monotonic())*1000))))) if scope_factory else nullcontext()
+        if scope_factory: execution_token.attach(scope)
+        try:
+            with scope:
+                statement_results = executor.execute_statements(statements)
+        finally:
+            execution_token.native = None
     except Exception as exc:
         _raise_query_error(exc, nexoraql)
     finally:
-        executor.abort_transaction()
+        close = getattr(executor, "close_execution", executor.abort_transaction)
+        close()
     execution_time_ms = max(0, round((time.perf_counter() - started_at) * 1000))
 
     rows = _rows_from_results(statement_results)

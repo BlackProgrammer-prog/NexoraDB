@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:nexoradb:telemetry:memory:1",
+  "title": "NexoraDB memory ownership telemetry (single process)",
+  "type": "object",
+  "required": ["schema_version", "pid", "started_monotonic_ns", "sample_seconds", "process", "allocator", "python", "documents", "graph_managers", "measurements", "reconciliation"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "pid": {"type": "integer", "minimum": 1},
+    "started_monotonic_ns": {"type": "integer", "minimum": 0},
+    "sample_seconds": {"type": "number", "minimum": 0},
+    "process": {
+      "type": "object", "required": ["rss_bytes", "pss_bytes", "errors", "rss_partition_delta_bytes"],
+      "properties": {"rss_bytes": {"type": ["integer", "null"], "minimum": 0}, "pss_bytes": {"type": ["integer", "null"], "minimum": 0}, "errors": {"type": "array"}}
+    },
+    "allocator": {"type": "object"},
+    "python": {"type": "object"},
+    "documents": {"type": "array"},
+    "graph_managers": {"type": "array"},
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "value", "owner", "unit", "measurement", "overlaps", "reason"],
+        "properties": {
+          "id": {"type": "string"}, "owner": {"type": "string"},
+          "value": {"type": ["number", "null"], "minimum": 0},
+          "unit": {"enum": ["bytes", "count"]},
+          "measurement": {"enum": ["counter", "estimate", "capacity", "reservation", "high_water", "unavailable"]},
+          "overlaps": {"type": "array", "items": {"type": "string"}},
+          "reason": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "reconciliation": {
+      "type": "object",
+      "required": ["process_total_internal_bytes", "selected_native_estimate_bytes", "contributions", "meaning", "missing_attribution", "sampling"],
+      "properties": {
+        "process_total_internal_bytes": {"type": "null"},
+        "selected_native_estimate_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "contributions": {"type": "object", "additionalProperties": {"type": ["integer", "null"], "minimum": 0}},
+        "rss_minus_selected_native_estimates_bytes": {"type": ["integer", "null"]},
+        "pss_minus_selected_native_estimates_bytes": {"type": ["integer", "null"]}
+      }
+    }
+  }
+}

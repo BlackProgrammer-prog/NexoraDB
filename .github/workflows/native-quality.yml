@@ -71,14 +71,31 @@ jobs:
         env:
           PYTHONPATH: build/debug
         run: |
+          python3 -m pip install -r tests/performance-requirements.txt
+          python3 -m pytest -q tests/test_command_imports.py
           python3 tests/test_native_threading_contract.py
           python3 tests/test_admin_recovery.py
           python3 -m unittest discover -s tests -p 'test_benchmark_history.py'
           python3 tests/test_operations_metrics.py
+          python3 -m pytest -q tests/test_memory_ownership.py tests/test_memory_reporting.py
+          python3 -m pytest -q tests/test_resource_budget.py tests/test_bounded_execution.py --junitxml=build/debug/mem003004-tests.xml
+          python3 -m pytest -q tests/test_execution_lifecycle.py tests/test_api_capacity_streaming.py tests/test_query_contracts.py --junitxml=build/debug/mem005006-tests.xml
+          python3 scripts/verify_execution_lifecycle.py --directory build/debug/mem005006-signal --native build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
+          python3 scripts/verify_bounded_execution.py --directory build/debug/mem003004-bounded --native build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
+          python3 scripts/verify_memory_lifecycle.py --directory build/debug/mem001002-smoke --native build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so --rows 200 --cycles 4 --warmup 1 --repetitions 1
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.preset }}-${{ github.run_id }}
-          path: build/${{ matrix.preset }}/Testing/Temporary/
+          path: |
+            build/${{ matrix.preset }}/Testing/Temporary/
+            build/${{ matrix.preset }}/tests/cpp/cor007-recovery/run-*/report.json
+            build/${{ matrix.preset }}/tests/cpp/cor007-recovery/run-*/*.stdout
+            build/${{ matrix.preset }}/tests/cpp/cor007-recovery/run-*/*.stderr
+            build/${{ matrix.preset }}/mem001002-smoke/
+            build/${{ matrix.preset }}/mem003004-tests.xml
+            build/${{ matrix.preset }}/mem003004-bounded/
+            build/${{ matrix.preset }}/mem005006-tests.xml
+            build/${{ matrix.preset }}/mem005006-signal/
           retention-days: 30

@@ -10,6 +10,8 @@ BulkGraphBuilder::BulkGraphBuilder(LiveGraph& graph,BulkOptions options)
     :graph_(graph),options_(options) {
     if (!options.max_records || options.max_buffer_bytes<1024)
         throw std::invalid_argument("invalid bulk ingestion limits");
+    if(graph_.execution_credit_) buffer_credit_=std::make_shared<nexora::core::BudgetLease>(
+        graph_.execution_credit_->pool(),nexora::core::ResourceBudget::Buffer,options.max_buffer_bytes);
 }
 void BulkGraphBuilder::admit(size_t bytes) {
     if (failed_) throw std::runtime_error("bulk builder failed; reopen graph before retry");

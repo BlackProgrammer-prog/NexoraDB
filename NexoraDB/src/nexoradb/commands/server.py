@@ -8,6 +8,23 @@ import uvicorn
 from .paths import python_project_dir
 
 
+class ControlledServer(uvicorn.Server):
+    """Signal requests cooperative cancellation before Uvicorn starts draining."""
+    def handle_exit(self, sig, frame):
+        application = getattr(self.config, "loaded_app", None)
+        seen = set()
+        while application is not None and id(application) not in seen:
+            seen.add(id(application))
+            lifecycle = getattr(application, "nexora_lifecycle", None)
+            if lifecycle is None:
+                lifecycle = getattr(getattr(application, "state", None), "lifecycle", None)
+            if lifecycle is not None:
+                lifecycle.stop_admission("signal:"+str(sig))
+                break
+            application = getattr(application, "app", None)
+        self.should_exit = True  # Repeated signals do not abandon native workers.
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run the NexoraDB admin API server")
     parser.add_argument("--host", default="127.0.0.1")
@@ -19,10 +36,8 @@ def main(argv: list[str] | None = None) -> None:
 
 def run_server(*, host: str = "127.0.0.1", port: int = 8000, reload: bool = False) -> None:
     os.chdir(python_project_dir())
-    uvicorn.run(
-        "nexoradb_admin.app:app",
-        host=host,
-        port=port,
-        reload=reload,
-        factory=False,
-    )
+    if reload:
+        uvicorn.run("nexoradb_admin.app:app", host=host, port=port, reload=True, factory=False)
+    else:
+        ControlledServer(uvicorn.Config("nexoradb_admin.app:app", host=host, port=port,
+                                       factory=False)).run()

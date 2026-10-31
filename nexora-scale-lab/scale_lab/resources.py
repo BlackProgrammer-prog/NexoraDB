@@ -59,8 +59,8 @@ def host_metadata(repo):
             'cpu': command(['lscpu', '--json']), 'memory': Path('/proc/meminfo').read_text(),
             'storage': command(['lsblk', '--json', '-o', 'NAME,TYPE,SIZE,ROTA,MODEL,MOUNTPOINTS']),
             'mounts': command(['findmnt', '--json', '--target', str(repo)]),
-            'commit': command(['git', 'rev-parse', 'HEAD']),
-            'worktree_status': command(['git', 'status', '--short']),
+            'commit': command(['git', '-c', 'safe.directory='+str(repo), 'rev-parse', 'HEAD']),
+            'worktree_status': command(['git', '-c', 'safe.directory='+str(repo), 'status', '--short']),
             'collected_utc': datetime.now(timezone.utc).isoformat()}
 
 
@@ -78,18 +78,20 @@ class Sampler:
         self.samples = 0
         self.deployment_peaks = {'rss_bytes': 0, 'pss_bytes': 0}
         self.progress_callback = None
+        self.extra_callback = None
 
     def sample(self):
         sample_cpu_start = time.thread_time()
         groups = {'server': tree(self.roots), 'generator': [os.getpid()]}
         data = {'monotonic_seconds': time.monotonic(), 'groups': {}}
-        from .memory_diagnostics import python_memory, reclaim_allocator
-        if self.combined:
-            data['allocator_maintenance'] = reclaim_allocator()
+        from .memory_diagnostics import python_memory
+        data['allocator_maintenance'] = {'attempted': False, 'reason': 'observation_only_MEM002'}
         data['generator_allocator'] = python_memory()
         from .memory_control import host_memory, group_snapshot
         data['host_memory'] = host_memory()
         data['memory_containment'] = {name: group_snapshot(name) for name in ('postgresql', 'worker')}
+        if self.extra_callback is not None:
+            data['native'] = self.extra_callback()
         for group, pids in groups.items():
             rows = []
             for pid in pids:

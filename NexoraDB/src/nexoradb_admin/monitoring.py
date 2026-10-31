@@ -132,6 +132,10 @@ class MonitoringSocketServer:
             cors_allowed_origins=list(settings.allowed_origins),
         )
         self._background_task_started = False
+        self._background_task = None
+        self._stopping = False
+        self._stop_event = None
+        self.lifecycle = None
         self._metrics_limiter = anyio.CapacityLimiter(1)
         self._configure_handlers()
 
@@ -146,11 +150,30 @@ class MonitoringSocketServer:
         await self.sio.emit("metrics", await self.collect_metrics(), to=sid)
 
     async def collect_metrics(self) -> dict[str, Any]:
-        requests_per_second, active_connections = await self.state.snapshot()
-        return await anyio.to_thread.run_sync(
-            self._collect_metrics_sync, requests_per_second, active_connections,
-            limiter=self._metrics_limiter,
-        )
+        if self._stopping: raise RuntimeError("monitoring stopping")
+        token = self.lifecycle.requests.enter() if self.lifecycle else None
+        permit = None
+        try:
+            if self.lifecycle:
+                permit = self.lifecycle.controller.acquire("system:monitoring", 1, lane="maintenance",
+                                                           cancellation=token, wait_seconds=0)
+            requests_per_second, active_connections = await self.state.snapshot()
+            return await anyio.to_thread.run_sync(
+                self._collect_metrics_sync, requests_per_second, active_connections,
+                limiter=self._metrics_limiter,
+            )
+        finally:
+            if permit is not None: permit.close()
+            if token is not None: self.lifecycle.requests.leave(token)
+
+    def stop_admission(self):
+        self._stopping = True
+        if self._stop_event is not None: self._stop_event.set()
+
+    async def shutdown(self):
+        self.stop_admission()
+        if self._background_task is not None: await self._background_task
+        await self.sio.shutdown()
 
     def _collect_metrics_sync(self, requests_per_second, active_connections) -> dict[str, Any]:
 
@@ -224,6 +247,7 @@ class MonitoringSocketServer:
     def _configure_handlers(self) -> None:
         @self.sio.event
         async def connect(sid: str, environ: dict[str, Any], auth: dict[str, Any] | None) -> bool:
+            if self._stopping: return False
             token = str((auth or {}).get("token") or "")
             try:
                 payload = decode_access_token(token, self.settings)
@@ -264,12 +288,17 @@ class MonitoringSocketServer:
             await self.emit_snapshot(sid)
 
     def _start_background_task(self) -> None:
-        if self._background_task_started:
+        if self._background_task_started or self._stopping:
             return
         self._background_task_started = True
-        self.sio.start_background_task(self._emit_metrics_loop)
+        self._stop_event = anyio.Event()
+        self._background_task = self.sio.start_background_task(self._emit_metrics_loop)
 
     async def _emit_metrics_loop(self) -> None:
-        while True:
-            await self.emit_snapshot()
-            await self.sio.sleep(METRICS_INTERVAL_SECONDS)
+        while not self._stopping:
+            try:
+                await self.emit_snapshot()
+            except Exception:
+                if self._stopping: return
+            with anyio.move_on_after(METRICS_INTERVAL_SECONDS):
+                await self._stop_event.wait()
