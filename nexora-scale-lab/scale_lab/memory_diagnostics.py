@@ -12,7 +12,7 @@ _last_trim = float('-inf')
 def reclaim_allocator(force=False):
     """Return unused glibc pages, never objects/cache or transaction state.
 
-    Explicit native deployment maintenance; timed costs remain in resource data.
+    Diagnostic experiment only (MEM-002); never called by sampler/protocol stages.
     Unsupported allocators are reported. Free arena bytes are not all reclaimable.
     """
     global _last_trim

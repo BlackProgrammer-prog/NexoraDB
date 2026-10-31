@@ -74,6 +74,11 @@ class NexoraAdapter(Adapter):
         if ingestion_mode not in {'transactional','exclusive-bulk'}:
             raise ValueError('Invalid native ingestion mode')
         self.ingestion_mode,self.wal_range_sync_mb=ingestion_mode,wal_range_sync_mb
+        self.observation_lock = threading.RLock()
+
+    def memory_snapshot(self):
+        with self.observation_lock:
+            return json.loads(self.engine.memory_report()) if hasattr(self, 'engine') else None
 
     def connect(self):
         import nexoradb as native
@@ -101,9 +106,27 @@ class NexoraAdapter(Adapter):
             raise RuntimeError('Benchmark requires effective durable WAL ACKs')
 
     def disconnect(self):
-        if hasattr(self, 'engine'):
-            native_result(self.engine.prepare_shutdown())
-            del self.engine
+        import time
+        from .memory_diagnostics import python_memory
+        with self.observation_lock:
+            if not hasattr(self, 'engine'): return
+            started = time.monotonic()
+            self.close_report = {'status': 'preparing', 'before_native': self.memory_snapshot(),
+                                 'before_process': python_memory()}
+            try:
+                native_result(self.engine.prepare_shutdown())
+                self.close_report['prepare_seconds'] = time.monotonic()-started
+                self.close_report['after_prepare_native'] = self.memory_snapshot()
+                destroyed = time.monotonic()
+                del self.engine
+                self.close_report['destroy_seconds'] = time.monotonic()-destroyed
+                self.close_report['status'] = 'closed'
+            except BaseException as error:
+                self.close_report.update(status='failed',error_type=type(error).__name__,error=str(error)[:4000])
+                raise
+            finally:
+                self.close_report['total_seconds'] = time.monotonic()-started
+                self.close_report['after_process'] = python_memory()
 
     def prepare_schema(self):
         if self.engine.collection_exists(self.namespace):
@@ -193,6 +216,7 @@ class NexoraAdapter(Adapter):
         import os
         return {'deployment': 'embedded', 'durability': 'RocksDB WAL sync=true',
                 'effective_durability': json.loads(self.engine.durability_report()),
+                'storage_format': json.loads(native_result(self.engine.format_versions())),
                 'native_build': self.native.build_info(),
                 'native_binary': str(Path(self.native.__file__).resolve()),
                 'resource_roots': [os.getpid()], 'resource_attribution': 'engine_and_generator_combined',
