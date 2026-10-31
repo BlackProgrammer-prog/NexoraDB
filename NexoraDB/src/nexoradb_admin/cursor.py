@@ -6,6 +6,21 @@ from threading import Lock
 import anyio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
+from .execution_control import current_execution
+
+
+def open_document_stream(engine, collection, *args, **kwargs):
+    token = current_execution.get()
+    factory = getattr(engine, "execution_scope", None)
+    if token is None or factory is None:
+        return engine.iter_documents(collection, *args, **kwargs)
+    token.check()
+    scope = factory(max(1, min(300000, int((token.deadline-time.monotonic())*1000))))
+    token.attach(scope)
+    with scope:
+        # Native stream retains the control and installs it for each batch,
+        # even if a subsequent batch runs on a different worker thread.
+        return engine.iter_documents(collection, *args, **kwargs)
 
 
 class CursorBudget:
@@ -39,9 +54,11 @@ async def stream_cursor(open_stream, authorize, owner, budget, *, batch_size=128
     to_skip = skip
     sentinel = object()
     raw_batch = None
+    execution = current_execution.get()
 
     def take():
         nonlocal remaining, to_skip
+        if execution is not None: execution.check()
         authorize()  # Expiry, revocation, resource permission on every batch.
         if time.monotonic() - started > max_seconds:
             raise RuntimeError("cursor deadline exceeded")
@@ -53,6 +70,7 @@ async def stream_cursor(open_stream, authorize, owner, budget, *, batch_size=128
                 remaining -= count
             return chunk
         while to_skip:
+            if execution is not None: execution.check()
             if next(stream, sentinel) is sentinel:
                 return ""
             to_skip -= 1
