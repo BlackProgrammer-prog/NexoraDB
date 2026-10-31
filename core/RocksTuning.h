@@ -5,6 +5,8 @@
 #include <rocksdb/statistics.h>
 #include <rocksdb/write_buffer_manager.h>
 #include <memory>
+#include <atomic>
+#include "ResourceBudget.h"
 
 namespace nexora::core {
 enum class DocumentDurability { Buffered, Durable };
@@ -12,6 +14,8 @@ enum class DiskClass { Unknown, Rotational, SSD };
 enum class HotCompression { Lz4, Snappy };
 // Can be shared across engines/CFs. These are cache + memtable budgets, not RSS.
 struct RocksResources {
+    inline static std::atomic<uint64_t> next_telemetry_id{0};
+    const uint64_t telemetry_id=next_telemetry_id.fetch_add(1,std::memory_order_relaxed)+1;
     const size_t budget_bytes,cache_bytes,memtable_bytes;
     std::shared_ptr<rocksdb::Cache> cache;
     std::shared_ptr<rocksdb::WriteBufferManager> write_buffers;
@@ -38,6 +42,7 @@ struct RocksSettings {
     rocksdb::Env* env_for_testing=nullptr; // Non-owning fault-injection hook; must outlive engine.
     DocumentDurability durability=DocumentDurability::Durable;
     std::shared_ptr<RocksResources> shared_resources;
+    std::shared_ptr<ResourceBudget> execution_budget=ResourceBudget::processDefault();
 };
 // A stable transform for existing textual keyspaces + length-prefixed idx2.
 std::shared_ptr<const rocksdb::SliceTransform> MakeKeyspacePrefixExtractor();

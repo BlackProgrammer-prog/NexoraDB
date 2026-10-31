@@ -25,7 +25,7 @@ namespace {
 class KeyspacePrefix final:public rocksdb::SliceTransform {
     static size_t prefixSize(const rocksdb::Slice& key) {
         const std::string_view text(key.data(),key.size());
-        if (text.starts_with("idx2")) {
+        if (text.starts_with("idx2") || text.starts_with("idx3")) {
             size_t offset=4;
             for (int field=0;field<2;++field) {
                 if (offset>key.size() || key.size()-offset<4) return 0;
