@@ -9,8 +9,20 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from threading import Lock
 
 from .config import AdminApiSettings
+
+_EXECUTION_POOLS = {}
+_EXECUTION_POOL_LOCK = Lock()
+
+
+def _execution_pool(native, capacity):
+    with _EXECUTION_POOL_LOCK:
+        key = (native.ResourceBudget, capacity)
+        if key not in _EXECUTION_POOLS:
+            _EXECUTION_POOLS[key] = native.ResourceBudget(capacity)
+        return _EXECUTION_POOLS[key]
 
 
 def _candidate_native_paths(settings: AdminApiSettings) -> list[Path]:
@@ -114,6 +126,23 @@ def create_doc_engine(settings: AdminApiSettings) -> Any:
         rocks.disk = {'ssd': native.DiskClass.SSD, 'rotational': native.DiskClass.Rotational,
                       'unknown': native.DiskClass.Unknown}[effective['disk_class']]
         logging.getLogger(__name__).info('Hardware policy observed=%s effective=%s', observed, effective)
+    if settings.execution_memory_mb or settings.resource_process_mb:
+        if not hasattr(native, 'ResourceBudget'):
+            raise RuntimeError('Shared resource admission missing; rebuild native module')
+        requested = settings.execution_memory_mb * 1024**2
+        if settings.resource_process_mb:
+            spec = importlib.util.spec_from_file_location('_nexora_resource_sizing', Path(__file__).resolve().parent.parent / 'nexoradb/execution.py')
+            sizing = importlib.util.module_from_spec(spec); spec.loader.exec_module(sizing)
+            plan = sizing.size_execution_budget(process_bytes=settings.resource_process_mb * 1024**2,
+                rocks_bytes=rocks.memory_budget_bytes, allocator_bytes=settings.resource_allocator_margin_mb * 1024**2,
+                python_bytes=settings.resource_python_margin_mb * 1024**2,
+                page_cache_bytes=settings.resource_page_cache_margin_mb * 1024**2,
+                safety_bytes=settings.resource_safety_margin_mb * 1024**2)
+            if requested and requested > plan['execution_bytes']:
+                raise RuntimeError('execution reservation capacity exceeds configured process-envelope headroom')
+            requested = requested or plan['execution_bytes']
+            logging.getLogger(__name__).info('Resource admission sizing=%s', plan)
+        rocks.execution_budget = _execution_pool(native, requested)
     engine = native.DocEngine(str(settings.db_path), native.TransactionSettings(), rocks)
     if not hasattr(engine, 'durability_report'):
         raise RuntimeError('Native durability reporting missing; rebuild current extension')
