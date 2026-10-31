@@ -21,7 +21,7 @@
 
 </div>
 
-Release 0.4.1: [changes and upgrade precautions](docs/releases/v0.4.1.md).
+Release 0.5.0: [changes and upgrade precautions](docs/releases/v0.5.0.md).
 Wheel target: **Linux x86_64, CPython 3.10**; see the release notes for platform details.
 
 > **Experimental / Alpha.** NexoraDB is an open-source research project focused on
@@ -62,7 +62,7 @@ pip install NexoraDataBase
 To select this source version explicitly once its wheel is published:
 
 ~~~bash
-pip install NexoraDataBase==0.4.1
+pip install NexoraDataBase==0.5.0
 ~~~
 
 The distribution is named **NexoraDataBase**; the import is **nexoradb**:

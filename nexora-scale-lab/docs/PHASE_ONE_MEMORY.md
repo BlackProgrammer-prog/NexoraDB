@@ -1,5 +1,20 @@
 # Memory and shutdown changes
 
+## Current acceptance — 2026-10-31
+
+The fresh user-run `mem007_user_20261031` passed limited **10M document** memory
+acceptance: two independent loads, all 24 workload cells and all full integrity
+checks, zero high/max/OOM/swap/full-PSI deltas, and close in 1.06/1.55 seconds.
+See the [audited scope, allocator retention and cleanup intervention](../../docs/cpp/MEMORY_ACCEPTANCE_10M_FA.md)
+and [separate, unexecuted 100M plan](../../docs/cpp/MEMORY_100M_PLAN_FA.md).
+RES-004 remains an independent open release prerequisite.
+
+The October 23 trim policy described below is historical. Current samplers and
+protocol stages observe allocator state without explicit malloc_trim calls;
+the current run records startup glibc arena/trim environment settings separately.
+Neither the historical completed 100M run nor this accepted 10M run certifies
+current 100M capacity or the final 0.5.0 package.
+
 The historical 100M run activated memory.high in all twelve workload cells.
 Its close stalled under reclaim pressure; temporary 6-to-8GiB soft-limit relief
 allowed completion. This is evidence of pressure, not proof of a single leak.
@@ -51,6 +66,12 @@ limits. Shutdown still cannot promise a hard wall-clock bound under disk failure
 or exhausted hard-cap memory; do not force-kill a flushing engine automatically.
 
 ## Verification and remaining acceptance
+
+MEM-001/002 supersede the one-shot probe below with a versioned ownership schema
+and repeated, paired lifecycle workers: see `docs/cpp/MEMORY_OWNERSHIP_FA.md` and
+`docs/cpp/MEMORY_RETENTION_FA.md` at repository root. Resource sampling and protocol
+stages now observe allocator state without calling `malloc_trim`; trim is an
+explicit diagnostic arm only. Historical manifests/results are not rewritten.
 
 Run `scripts/benchmark_memory_lifecycle.py` with the lab venv from repository root
 for a bounded 50k lifecycle probe: open, load, retain 32 snapshots, prepare close,
