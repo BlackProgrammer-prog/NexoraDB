@@ -92,3 +92,41 @@ TEST(JobScheduler, ManagerOwnsAlgorithmTimeoutAndBudgets) {
     small.max_build_bytes=SIZE_MAX;
     EXPECT_FALSE(manager.submitJob("jobs",std::make_shared<Job>(),{},small).result().success);
 }
+
+TEST(JobScheduler, PriorityFloodHasBoundedBypassAndWaitTelemetry) {
+    SchedulerOptions options{1,32,64}; options.max_priority_bypass=2;options.max_priority_wait_ms=60000;
+    JobScheduler pool(options);std::promise<void> entered,release;
+    auto signal=release.get_future().share();std::vector<int> order;
+    auto active=pool.submit([&]{entered.set_value();signal.wait();return ok();},token(),0,1,0ms);
+    entered.get_future().wait();
+    auto low=pool.submit([&]{order.push_back(-1);return ok();},token(),-100,1,0ms);
+    std::vector<std::future<algorithms::AlgoResult>> high;
+    for(int i=0;i<20;++i) high.push_back(pool.submit([&,i]{order.push_back(i);return ok();},token(),100,1,0ms));
+    release.set_value();EXPECT_TRUE(active.get().success);EXPECT_TRUE(low.get().success);
+    for(auto& future:high) EXPECT_TRUE(future.get().success);
+    ASSERT_EQ(order.size(),21U);EXPECT_EQ(order[2],-1);
+    const auto stats=pool.stats();EXPECT_GE(stats.fairness_grants_total,1U);
+    EXPECT_EQ(stats.admitted_total,22U);EXPECT_GT(stats.queue_ms_sum,0);EXPECT_EQ(stats.queued,0U);
+}
+
+TEST(JobScheduler, RequestControlReachesSnapshotWorkerAndReleasesCaptures) {
+    TestTempDir temp("controlled_job");nexora::core::DocEngine engine((temp.path()/"db").string());
+    GraphManager manager(&engine,temp.path()/"graphs");GraphDefinition def;def.name="g";
+    ASSERT_TRUE(manager.createGraph(def));
+    class Job final:public algorithms::JobAlgorithm {
+    public:
+        std::promise<void> entered;
+        std::string name() const override {return "controlled";}
+        algorithms::AlgoResult run(const StaticGraph& snapshot,const std::vector<ExtId>&) override {
+            entered.set_value();for(;;) {snapshot.checkCancelled();std::this_thread::yield();}
+        }
+    };
+    nexora::core::ExecutionScope scope(10000);scope.enter();
+    auto algorithm=std::make_shared<Job>();auto entered=algorithm->entered.get_future();
+    auto job=manager.submitJob("g",algorithm,{});entered.wait();scope.cancel();scope.close();
+    const auto result=job.result();EXPECT_FALSE(result.success);
+    EXPECT_NE(result.error_msg.find("execution_cancelled"),std::string::npos);
+    EXPECT_EQ(manager.schedulerStats().cancelled_total,1U);
+    EXPECT_EQ(manager.schedulerStats().reserved_bytes,0U);
+    EXPECT_TRUE(manager.prepareShutdown());
+}

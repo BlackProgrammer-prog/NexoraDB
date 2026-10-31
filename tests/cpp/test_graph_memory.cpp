@@ -1,9 +1,29 @@
 #include "TestTempDir.h"
 #include "graph/BulkGraphBuilder.h"
+#include "graph/SnapshotMemory.h"
 #include <gtest/gtest.h>
 #include <random>
 
 using namespace nexora::graph;
+
+TEST(GraphMemory, ProcessSnapshotRequestsExcludeAdmissionBaselineAndFailedAllocations) {
+    const auto bytes=SnapshotMemory::processCurrentBytes(),resources=SnapshotMemory::processResources();
+    {
+        SnapshotMemory resource(100,64);
+        EXPECT_EQ(SnapshotMemory::processResources(),resources+1);
+        auto* allocation=resource.allocate(32,alignof(std::max_align_t));
+        EXPECT_EQ(resource.currentBytes(),96U);
+        EXPECT_EQ(resource.ownedRequestedBytes(),32U);
+        EXPECT_EQ(SnapshotMemory::processCurrentBytes(),bytes+32);
+        EXPECT_THROW(static_cast<void>(resource.allocate(16,alignof(std::max_align_t))),std::length_error);
+        EXPECT_EQ(SnapshotMemory::processCurrentBytes(),bytes+32);
+        resource.deallocate(allocation,32,alignof(std::max_align_t));
+        EXPECT_EQ(SnapshotMemory::processCurrentBytes(),bytes);
+    }
+    EXPECT_EQ(SnapshotMemory::processResources(),resources);
+    EXPECT_THROW((SnapshotMemory(16,32)),std::length_error);
+    EXPECT_EQ(SnapshotMemory::processResources(),resources);
+}
 
 TEST(GraphMemory, DenseEdgeSlotsSparseFallbackAndTombstoneIteration) {
     EdgeStore store;
