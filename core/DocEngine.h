@@ -43,6 +43,7 @@
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
 #include "RocksTuning.h"
+#include "ExecutionControl.h"
 #include "PaginationLimits.h"
 #include "Operations.h"
 
@@ -97,6 +98,11 @@ namespace nexora {
  *       log_error(result.error_msg)
  */
         struct DBResult {
+            // Declared first: credits outlive every owned string during destruction.
+            std::shared_ptr<BudgetLease> memory_lease;
+            DBResult()=default;
+            DBResult(bool ok,std::string payload,std::string message,std::string code)
+                :success(ok),data(std::move(payload)),error_msg(std::move(message)),error_code(std::move(code)) {}
             bool        success   = false;
             std::string data      = "";  ///< JSON یا scalar متنی در API عمومی
             std::string error_msg = "";
@@ -112,6 +118,7 @@ namespace nexora {
         };
 
         struct PageResult {
+            std::shared_ptr<BudgetLease> memory_lease;
             bool success = false;
             std::string data = "[]";
             std::string continuation_token;
@@ -229,7 +236,7 @@ namespace nexora {
             std::vector<std::string> fields;
             IndexType                type = IndexType::SingleField;
             std::string              index_id;
-            std::uint32_t            format_version = 2;
+            std::uint32_t            format_version = 3;
             IndexState               state = IndexState::Ready;
             std::string              build_cursor;
             std::string              last_error;
@@ -300,8 +307,9 @@ namespace nexora {
  */
         class TxHandle {
         public:
-            TxHandle(rocksdb::Transaction* tx, std::shared_mutex& ddl_mutex)
-                    : ddl_guard_(ddl_mutex), tx_(tx) {}
+            TxHandle(rocksdb::Transaction* tx, std::shared_mutex& ddl_mutex,
+                     std::shared_ptr<ResourceBudget> pool=ResourceBudget::processDefault())
+                    : pool_(std::move(pool)),ddl_guard_(ddl_mutex), tx_(tx) {}
             ~TxHandle() = default;
 
             // non-copyable, movable
@@ -314,10 +322,24 @@ namespace nexora {
             bool                  IsValid() const noexcept { return tx_ != nullptr; }
             void Reset() noexcept {
                 tx_.reset();
+                credit_.reset();
                 if (ddl_guard_.owns_lock()) ddl_guard_.unlock();
+            }
+            DBResult Admit(size_t payload) {
+                CheckExecution();
+                if(payload>(SIZE_MAX-4096)/16) return DBResult::Err("transaction reservation overflow","resource_exhausted");
+                const auto charge=payload*16+4096;
+                try {
+                    if(!credit_) credit_=std::make_shared<BudgetLease>(pool_,ResourceBudget::Buffer);
+                    if(charge>SIZE_MAX-credit_->bytes()) throw ResourceExhausted("transaction reservation overflow");
+                    credit_->resize(credit_->bytes()+charge);
+                    return DBResult::Ok();
+                } catch(const ResourceExhausted& error) {return DBResult::Err(error.what(),"resource_exhausted");}
             }
 
         private:
+            std::shared_ptr<ResourceBudget> pool_;
+            std::shared_ptr<BudgetLease> credit_;
             std::shared_lock<std::shared_mutex> ddl_guard_;
             std::unique_ptr<rocksdb::Transaction> tx_;
         };
@@ -335,6 +357,7 @@ namespace nexora {
  * @field error_msg پیام خطا در صورت شکست
  */
         struct JoinResult {
+            std::shared_ptr<BudgetLease> memory_lease;
             bool                     success   = false;
             std::vector<std::string> records;  ///< هر عنصر یک سند BSON merge شده است
             std::string              error_msg;
@@ -410,6 +433,8 @@ namespace nexora {
             DBResult FormatVersions() const;
             DBResult UpgradeFormatManifest();
             static DBResult InspectStore(const std::string& path);
+            static DBResult MigrateIndexFormatCopy(const std::string& source,const std::string& destination,
+                bool dry_run=true,const std::function<void(uint64_t)>& progress={});
             void PauseDocumentMigration(); // Offline maintenance; no active caller transaction.
             std::string OperationMetrics() const;
             void ConfigureQueryTuning(bool read_cache_admission, bool smart_indexes) noexcept;
@@ -419,11 +444,14 @@ namespace nexora {
             std::string HealthReport() const;
             DBResult PrepareShutdown(); // Caller must first stop accepting requests.
             std::string MemoryReport(); // Estimates overlap; not a total RSS accounting.
+            std::shared_ptr<ResourceBudget> ExecutionBudget() const { return rocks_settings_.execution_budget ? rocks_settings_.execution_budget : ResourceBudget::processDefault(); }
             std::string DurabilityReport() const; // Effective document settings, not a graph/replication guarantee.
 
-            /** Test-only one-shot fault injection for atomicity tests. */
+            /** Test-only one-shot fault injection. Configure with mutations idle;
+             * optional callback runs at the boundary before returning the error. */
             void SetMutationFaultPointForTesting(
-                    MutationFaultPoint point) noexcept;
+                    MutationFaultPoint point,
+                    void (*on_fault)() noexcept = nullptr) noexcept;
             void PauseIndexBuildAfterChunksForTesting(
                     std::uint32_t chunks) noexcept;
 
@@ -843,7 +871,10 @@ namespace nexora {
              * @brief یک Transaction جدید شروع می‌کند
              * @return unique_ptr به TxHandle (در صورت خطا nullptr)
              *
-             * @details ACID کامل از طریق rocksdb::TransactionDB.
+             * @details Atomic document/index/counter writes via TransactionDB.
+             * Default reads are Read Committed with read-your-writes, NOT
+             * snapshot isolation or general Serializable. See
+             * docs/cpp/ISOLATION_CONSTRAINTS_FA.md; for_update locks point keys.
              *
              * @example
              *   auto tx = engine.BeginTransaction();
@@ -892,7 +923,7 @@ namespace nexora {
             /** @brief FindById درون یک Transaction (با دید به uncommitted تغییرات) */
             DBResult FindByIdTx(TxHandle&          tx_handle,
                                 const std::string& collection_name,
-                                const std::string& doc_id);
+                                const std::string& doc_id, bool for_update = false);
 
             // ──────────────────────────────────────────────────────────
             // 6.13  توابع کمکی
@@ -1021,11 +1052,12 @@ namespace nexora {
             std::string db_path_;
             mutable OperationsState operations_;
             std::atomic<uint8_t> query_tuning_{3}; // Read admission + query index selection. Never disables index maintenance.
+            std::atomic<uint64_t> migration_foreground_grants_{0};
             RocksSettings rocks_settings_;
             std::shared_ptr<RocksResources> rocks_resources_;
             mutable std::atomic<uint64_t> multiget_calls_{0},multiget_keys_{0};
 
-            /// RocksDB TransactionDB (برای ACID کامل)
+            /// RocksDB TransactionDB; isolation/durability are explicitly scoped.
             std::unique_ptr<rocksdb::TransactionDB,
                     std::function<void(rocksdb::TransactionDB*)>> txn_db_;
 
@@ -1037,12 +1069,15 @@ namespace nexora {
             mutable std::shared_mutex index_ddl_mutex_;
             std::atomic<MutationFaultPoint> mutation_fault_point_{
                     MutationFaultPoint::None};
+            std::atomic<void (*)() noexcept> mutation_fault_callback_{nullptr};
             std::atomic<std::uint32_t> pause_index_build_chunks_{0};
             mutable std::atomic<std::int64_t> last_user_activity_ns_{0};
             std::mutex document_migration_mutex_;
             std::jthread document_migration_worker_;
 
             struct PageSession {
+                // Metadata admission only; pinned RocksDB versions are included in sizing headroom.
+                std::shared_ptr<BudgetLease> memory_credit;
                 std::shared_ptr<const rocksdb::Snapshot> snapshot;
                 std::mutex scan_mutex;
                 std::string collection;
@@ -1051,6 +1086,7 @@ namespace nexora {
                 std::chrono::steady_clock::time_point created_at;
             };
             std::mutex page_sessions_mutex_;
+            std::atomic<uint64_t> active_query_executions_{0};
             std::unordered_map<std::string, std::shared_ptr<PageSession>> page_sessions_;
             std::jthread page_reaper_worker_;
             // Includes snapshots retired by ClosePage but still held by a call.
@@ -1113,6 +1149,8 @@ namespace nexora {
             };
 
             class MutationBuilder;
+            JoinResult LookupJoinImpl(const std::string&,const std::string&,const std::string&,const std::string&,
+                                      const nexora::query::Condition&,uint32_t);
             DBResult InsertOneImpl(const std::string&,const std::string&);
             DBResult InsertManyImpl(const std::string&,const std::vector<std::string_view>&, bool bson_input = false);
             DBResult FindByIdImpl(const std::string&,const std::string&);
@@ -1122,7 +1160,9 @@ namespace nexora {
             template<class Fn> DBResult Observe(OperationsState::Kind kind,Fn fn) {
                 const auto started=std::chrono::steady_clock::now();
                 const auto elapsed=[&] { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count(); };
-                try { auto result=fn(); RecordOperation(kind,elapsed(),result); return result; }
+                try { CheckExecution();auto result=fn(); RecordOperation(kind,elapsed(),result); return result; }
+                catch(const OperationCancelled& error) { auto result=DBResult::Err(error.what(),"execution_cancelled");RecordOperation(kind,elapsed(),result);return result; }
+                catch(const ResourceExhausted& error) { auto result=DBResult::Err(error.what(),"resource_exhausted");RecordOperation(kind,elapsed(),result);return result; }
                 catch(...) { RecordOperation(kind,elapsed(),DBResult::Err("exception")); throw; }
             }
 
@@ -1140,9 +1180,9 @@ namespace nexora {
                     const nexora::query::Condition& condition,
                     std::uint32_t limit,
                     std::uint32_t skip,
-                    bool force_full_scan,const rocksdb::Snapshot* shared_epoch=nullptr,bool ddl_already_locked=false);
+                    bool force_full_scan,const rocksdb::Snapshot* shared_epoch=nullptr,bool ddl_already_locked=false,bool count_only=false);
             QueryExecution ExecuteQueryImpl(const std::string&,const nexora::query::Condition&,std::uint32_t,
-                std::uint32_t,bool,const rocksdb::Snapshot*,bool);
+                std::uint32_t,bool,const rocksdb::Snapshot*,bool,bool);
 
             rocksdb::Status InjectMutationFaultIfRequested(
                     MutationFaultPoint point) noexcept;
@@ -1186,6 +1226,16 @@ namespace nexora {
                     rocksdb::Transaction* transaction = nullptr
                     ) const;
 
+            // Conservative latch remains true after the last FK is dropped
+            // until reopen. Atomic because internal auth mutations also read it.
+            std::atomic<bool> has_foreign_keys_{false};
+            rocksdb::Status LockConstraintGuard(rocksdb::Transaction* transaction) const;
+            rocksdb::Status CheckIncomingReferences(const std::string& collection,
+                    const std::string& id, const std::string& old_document,
+                    const std::string* replacement, rocksdb::Transaction* transaction) const;
+            rocksdb::Status CheckForeignKeyDdl(const std::string& collection,
+                    const std::string* field = nullptr) const;
+
             static bool IsReservedCollectionName(const std::string& name);
 
             bool EnsureInternalCollections();
@@ -1226,6 +1276,7 @@ namespace nexora {
 
             static std::string GenerateDocId();
             void ValidateFormatManifest() const;
+            rocksdb::Status EnsureIndexFormatFence(); // Caller holds exclusive DDL lock.
         };
 
     } // namespace core
