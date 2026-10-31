@@ -40,6 +40,47 @@ namespace nexora {
             shutdown();
         }
 
+        std::string GraphManager::memoryReport() const {
+            using Json=nlohmann::json;
+            Json graphs=Json::array();
+            std::vector<std::shared_ptr<GraphHandle>> handles;
+            {std::lock_guard lock(registry_mutex_);for(const auto& [name,handle]:graphs_) handles.push_back(handle);}
+            for(const auto& handle:handles) {
+                std::shared_lock operation(handle->rw_mutex);
+                Json row={{"name",handle->definition.name},{"loaded",bool(handle->live_graph)}};
+                if(handle->live_graph) {
+                    const auto m=handle->live_graph->memoryUsage();
+                    row["live"]={{"object_bytes",m.object_bytes},{"node_records_bytes",m.node_records_bytes},
+                        {"adjacency_headers_bytes",m.adjacency_headers_bytes},{"adjacency_payload_bytes",m.adjacency_payload_bytes},
+                        {"edge_store_bytes",m.edge_store_bytes},{"reverse_identity_bytes",m.reverse_identity_bytes},
+                        {"forward_identity_bytes_estimate",m.forward_identity_bytes_estimate},
+                        {"type_registry_bytes_estimate",m.type_registry_bytes_estimate},{"free_ids_bytes_estimate",m.free_ids_bytes_estimate},
+                        {"wal_bytes_estimate",m.wal_bytes_estimate},{"storage_bytes_estimate",m.storage_bytes_estimate},
+                        {"total_bytes_estimate",m.total_bytes_estimate},{"budget_bytes",m.budget_bytes},
+                        {"admission_charged_bytes",m.admission_charged_bytes}};
+                }
+                {std::lock_guard cache(handle->cache_mutex);
+                 row["cached_snapshot_owned_requested_bytes"]=handle->snapshot_cache ? handle->snapshot_cache->ownedAllocationBytes() : 0;}
+                graphs.push_back(std::move(row));
+            }
+            const auto scheduler=schedulerStats();
+            return Json{{"schema_version",1},{"graphs",graphs},
+                {"scheduler",{{"queued",scheduler.queued},{"running",scheduler.running},{"reserved_bytes",scheduler.reserved_bytes},
+                    {"admission_waiters",scheduler.admission_waiters},{"admitted_total",scheduler.admitted_total},
+                    {"rejected_total",scheduler.rejected_total},{"waited_total",scheduler.waited_total},
+                    {"fairness_grants_total",scheduler.fairness_grants_total},{"cancelled_total",scheduler.cancelled_total},
+                    {"timed_out_total",scheduler.timed_out_total},{"admission_wait_ms_sum",scheduler.admission_wait_ms_sum},
+                    {"queue_ms_sum",scheduler.queue_ms_sum},{"queue_ms_max",scheduler.queue_ms_max},
+                    {"oldest_queue_ms",scheduler.oldest_queue_ms}}},
+                {"snapshot_pmr_process",{{"current_requested_bytes",SnapshotMemory::processCurrentBytes()},
+                    {"peak_requested_bytes",SnapshotMemory::processPeakBytes()},{"live_resources",SnapshotMemory::processResources()}}},
+                {"accounting",{{"total_bytes",nullptr},{"live","capacity estimates include WAL/storage; exclude allocator overhead, manager/ID-store maps and snapshot allocations"},
+                    {"cached_snapshot_owned_requested_bytes","subset of process-wide snapshot PMR; admission baselines excluded"},
+                    {"snapshot_pmr_process","all managers, cached snapshots, external snapshots and build scratch; exact successful PMR requested bytes, not resident bytes"},
+                    {"scheduler_reserved_bytes","admission reservation; overlaps snapshot/scratch, not actual allocation"},
+                    {"query_scratch_bytes",nullptr},{"sampling","sequential locks, not a process-atomic census; graph traversal can be expensive"}}}}.dump();
+        }
+
         void GraphManager::shutdown() {
             scheduler_->shutdown(); // No registry lock while workers finish.
             std::lock_guard<std::mutex> lock(registry_mutex_);
@@ -54,6 +95,7 @@ namespace nexora {
             {std::lock_guard lock(registry_mutex_); for(const auto& item:graphs_) handles.push_back(item.second);}
             for(const auto& handle:handles) {
                 std::unique_lock lock(handle->rw_mutex);
+                {std::lock_guard cache(handle->cache_mutex);handle->snapshot_cache.reset();}
                 if(handle->live_graph && !handle->live_graph->checkpointWAL()) return false;
                 if(handle->storage && !handle->storage->durableSync()) return false;
             }
@@ -342,6 +384,7 @@ namespace nexora {
             // rebuilt/rendered explicitly and then queried read-only.
             h->live_graph = std::make_unique<LiveGraph>(
                     h->storage.get(), h->wal.get(), def.name);
+            if(doc_engine_) h->live_graph->setExecutionBudget(doc_engine_->ExecutionBudget());
 
             return h;
         }
@@ -602,9 +645,11 @@ namespace nexora {
 
             std::unique_lock operation_lock(handle->rw_mutex);
 
-            if (!handle->live_graph)
+            if (!handle->live_graph) {
                 handle->live_graph = std::make_unique<LiveGraph>(
                         handle->storage.get(), handle->wal.get(), graph_name);
+                if(doc_engine_) handle->live_graph->setExecutionBudget(doc_engine_->ExecutionBudget());
+            }
 
             // clear + set dirty
             handle->built = false;
@@ -751,6 +796,8 @@ namespace nexora {
                 const std::vector<std::string>& node_types,
                 const std::vector<std::string>& edge_types,SnapshotOptions options) const
         {
+            if(!options.execution_budget && doc_engine_) options.execution_budget=doc_engine_->ExecutionBudget();
+            if(!options.execution_control) options.execution_control=nexora::core::current_execution_control;
             const auto owner=findHandle(graph_name);
             if (!owner || !owner->live_graph) return nullptr;
 
@@ -818,6 +865,7 @@ namespace nexora {
                 const std::vector<ExtId>& params,SnapshotOptions options) const
         {
             if (!options.cancellation) options.cancellation=std::make_shared<std::atomic<bool>>(false);
+            if(!options.execution_control) options.execution_control=nexora::core::current_execution_control;
             const auto cancellation=options.cancellation;
             if (!algo) return JobHandle(readyAlgoFuture({false,"null job algorithm","",0}),cancellation);
             if (!options.max_build_bytes) options.max_build_bytes=64*1024*1024;
@@ -826,11 +874,18 @@ namespace nexora {
             if (options.timeout_ms) options.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(options.timeout_ms);
             const auto reservation=options.max_build_bytes+options.workspace_reservation_bytes;
             auto future=scheduler_->submit([this,graph_name,algo=std::move(algo),params,options]() mutable {
+                nexora::core::BudgetLease workspace(doc_engine_ ? doc_engine_->ExecutionBudget() : nexora::core::ResourceBudget::processDefault(),
+                    nexora::core::ResourceBudget::Workspace,options.workspace_reservation_bytes);
+                auto result_credit=std::make_shared<nexora::core::BudgetLease>(
+                    doc_engine_ ? doc_engine_->ExecutionBudget() : nexora::core::ResourceBudget::processDefault(),
+                    nexora::core::ResourceBudget::Query,options.max_result_bytes ? options.max_result_bytes : 16*1024*1024);
                 auto snapshot=createSnapshot(graph_name,{},{},options);
                 if (!snapshot) return algorithms::AlgoResult{false,"graph not found for job","",0};
                 auto result=algo->run(*snapshot,params); snapshot->checkCancelled();
                 if (options.max_result_bytes && result.result_json.size()>options.max_result_bytes)
                     return algorithms::AlgoResult{false,"job result byte budget exceeded","",0};
+                result_credit->resize(result.result_json.capacity());
+                result.memory_lease=std::move(result_credit);
                 return result;
             },cancellation,options.job_priority,reservation,std::chrono::milliseconds(options.enqueue_timeout_ms),options.deadline);
             return JobHandle(std::move(future),cancellation);

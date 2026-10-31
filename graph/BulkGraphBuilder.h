@@ -13,6 +13,7 @@ struct BulkStats {
 // Synchronous producer backpressure. No implicit commit from the destructor.
 // A batch is redoable, not an all-or-nothing transaction.
 class BulkGraphBuilder {
+    std::shared_ptr<nexora::core::BudgetLease> buffer_credit_;
 public:
     explicit BulkGraphBuilder(LiveGraph&,BulkOptions={});
     BulkGraphBuilder(const BulkGraphBuilder&)=delete;
