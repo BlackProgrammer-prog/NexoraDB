@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { AuthField } from '../../features/auth/components/AuthField'
 import { AuthLayout } from '../../features/auth/components/AuthLayout'
 import { AuthPanel } from '../../features/auth/components/AuthPanel'
-import { useAuth } from '../../features/auth/context/AuthContext'
+import { useAuth } from '../../features/auth/context/useAuth'
 import { authApi } from '../../features/auth/services/authApi'
 import { Button } from '../../shared/components/ui/Button'
 
@@ -23,8 +23,10 @@ export function LoginPage() {
   const [isCheckingSetup, setIsCheckingSetup] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const redirectTo =
-    (location.state as LoginLocationState | null)?.from?.pathname ?? '/dashboard'
+  const candidate = (location.state as LoginLocationState | null)?.from?.pathname
+  const redirectTo = candidate && ['/dashboard', '/collections', '/documents', '/graphs', '/query', '/app-tokens'].includes(candidate)
+    ? candidate
+    : '/dashboard'
 
   useEffect(() => {
     let isActive = true

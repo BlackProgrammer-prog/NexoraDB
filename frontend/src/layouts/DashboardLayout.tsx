@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { useAuth } from '../features/auth/context/AuthContext'
+import { useAuth } from '../features/auth/context/useAuth'
 import { cn } from '../shared/utils/cn'
 import { formatDate } from '../shared/utils/formatDate'
 
@@ -31,7 +31,7 @@ export function DashboardLayout() {
         <aside className="border-b border-slate-200 bg-white lg:w-64 lg:border-b-0 lg:border-r">
           <div className="flex h-16 items-center border-b border-slate-200 px-6">
             <div>
-              <img src="/brand/nexoradb-logo.svg" alt="NexoraDB" width="170" height="50" className="h-10 w-auto" />
+              <img src={`${import.meta.env.BASE_URL}brand/nexoradb-logo.svg`} alt="NexoraDB" width="170" height="50" className="h-10 w-auto" />
               <p className="text-xs text-slate-500">Admin panel</p>
             </div>
           </div>
