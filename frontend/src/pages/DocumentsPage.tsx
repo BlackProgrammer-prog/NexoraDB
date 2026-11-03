@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { CollectionSidebar } from '../features/collections/components/CollectionSidebar'
 import { useCollections } from '../features/collections/hooks/useCollections'
 import { DeleteDocumentModal } from '../features/documents/components/DeleteDocumentModal'
@@ -26,7 +26,9 @@ export function DocumentsPage() {
   const [documentToEdit, setDocumentToEdit] = useState<DocumentRecord | null>(null)
   const [selectedCollectionName, setSelectedCollectionName] = useState('')
   const activeCollectionName = useMemo(
-    () => selectedCollectionName || collections?.[0]?.name || '',
+    () => collections?.some((item) => item.name === selectedCollectionName)
+      ? selectedCollectionName
+      : collections?.[0]?.name ?? '',
     [collections, selectedCollectionName],
   )
   const { data: documents, error, isLoading, refetch } = useDocuments(activeCollectionName)
@@ -34,12 +36,6 @@ export function DocumentsPage() {
     () => documents?.filter((document) => !deletedDocumentKeys.includes(getDocumentDeletionKey(document))),
     [deletedDocumentKeys, documents],
   )
-
-  useEffect(() => {
-    if (!selectedCollectionName && collections?.length) {
-      setSelectedCollectionName(collections[0].name)
-    }
-  }, [collections, selectedCollectionName])
 
   function openCreateDocument() {
     setDocumentToEdit(null)
@@ -94,6 +90,7 @@ export function DocumentsPage() {
       />
       <div className="grid gap-6 xl:grid-cols-[18rem_1fr]">
         <CollectionSidebar
+          collections={collections}
           onSelect={setSelectedCollectionName}
           selectedCollectionName={activeCollectionName}
         />
