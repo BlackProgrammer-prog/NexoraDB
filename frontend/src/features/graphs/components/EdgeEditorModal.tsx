@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '../../../shared/components/ui/Button'
 import { Input } from '../../../shared/components/ui/Input'
 import { Modal } from '../../../shared/components/ui/Modal'
@@ -18,31 +18,29 @@ interface EdgeEditorModalProps {
   }) => void
 }
 
-export function EdgeEditorModal({
+export function EdgeEditorModal(props: EdgeEditorModalProps) {
+  if (!props.isOpen) return null
+  const edge = props.edge
+  return <EdgeEditorModalForm key={edge?.id} {...props} />
+}
+
+function EdgeEditorModalForm({
   edge,
   isOpen,
   nodes,
   onClose,
   onSave,
 }: EdgeEditorModalProps) {
-  const [data, setData] = useState('{}')
+  const [data, setData] = useState(() => edge ? stringifyJson(edge.data) : '{}')
   const [jsonError, setJsonError] = useState('')
-  const [label, setLabel] = useState('')
-  const [source, setSource] = useState('')
-  const [target, setTarget] = useState('')
-
-  useEffect(() => {
-    setLabel(edge?.label ?? '')
-    setSource(edge?.source ?? nodes[0]?.id ?? '')
-    setTarget(edge?.target ?? nodes[1]?.id ?? nodes[0]?.id ?? '')
-    setData(edge ? stringifyJson(edge.data) : '{}')
-    setJsonError('')
-  }, [edge, isOpen, nodes])
+  const [label, setLabel] = useState(() => edge?.label ?? '')
+  const [source, setSource] = useState(() => edge?.source ?? nodes[0]?.id ?? '')
+  const [target, setTarget] = useState(() => edge?.target ?? nodes[1]?.id ?? nodes[0]?.id ?? '')
 
   function handleSave() {
     const parsedData = safeParseJson<Record<string, unknown>>(data)
 
-    if (!parsedData || Array.isArray(parsedData)) {
+    if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
       setJsonError('Data must be a valid JSON object.')
       return
     }

@@ -9,14 +9,18 @@ import { Button } from '../../../shared/components/ui/Button'
 import { Card } from '../../../shared/components/ui/Card'
 import { ErrorState } from '../../../shared/components/ui/ErrorState'
 import { LoadingState } from '../../../shared/components/ui/LoadingState'
-import { stringifyJson } from '../../../shared/utils/json'
+import { previewJson } from '../../../shared/utils/previewJson'
 
 interface GraphVisualizationProps {
   graphId: string
   refreshKey: number
 }
 
-export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationProps) {
+export function GraphVisualization(props: GraphVisualizationProps) {
+  return <GraphVisualizationSession key={JSON.stringify([props.graphId, props.refreshKey])} {...props} />
+}
+
+function GraphVisualizationSession({ graphId, refreshKey }: GraphVisualizationProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const graphRef = useRef<Core | null>(null)
   const [data, setData] = useState<GraphVisualizationData | null>(null)
@@ -27,16 +31,13 @@ export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationPr
 
   useEffect(() => {
     let active = true
-    queueMicrotask(() => {
-      if (!active) return
-      setIsLoading(true)
-      setError(null)
-      setDocument(null)
-    })
-
+    const controller = new AbortController()
     void graphApi
-      .getVisualization(graphId)
+      .getVisualization(graphId, controller.signal)
       .then((value) => {
+        if (value.nodes.length > 1000 || value.edges.length > 10000) {
+          throw new Error('Console visualization supports up to 1000 nodes and 10000 edges. Use a smaller graph.')
+        }
         if (active) setData(value)
       })
       .catch((loadError: unknown) => {
@@ -51,11 +52,12 @@ export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationPr
 
     return () => {
       active = false
+      controller.abort()
     }
   }, [graphId, refreshKey])
 
   useEffect(() => {
-    if (!containerRef.current || !data?.nodes.length) return undefined
+    if (isLoading || !containerRef.current || !data?.nodes.length) return undefined
 
     const graph = cytoscape({
       container: containerRef.current,
@@ -70,6 +72,7 @@ export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationPr
           },
         })),
       ],
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
       minZoom: 0.05,
       maxZoom: 6,
       wheelSensitivity: 0.18,
@@ -114,7 +117,7 @@ export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationPr
         },
       ],
       layout: {
-        name: 'cose',
+        name: data.nodes.length > 300 ? 'circle' : 'cose',
         animate: false,
         fit: true,
         padding: 45,
@@ -131,21 +134,26 @@ export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationPr
       },
     })
 
+    let selection: AbortController | null = null
     graph.on('tap', 'node', (event: EventObject) => {
+      selection?.abort()
+      const controller = new AbortController()
+      selection = controller
       const nodeId = String(event.target.id())
       setIsDocumentLoading(true)
       setDocument(null)
       void graphApi
-        .getNodeDocument(graphId, nodeId)
-        .then(setDocument)
+        .getNodeDocument(graphId, nodeId, controller.signal)
+        .then((value) => { if (!controller.signal.aborted) setDocument(value) })
         .catch((loadError: unknown) => {
+          if (controller.signal.aborted) return
           setError(
             loadError instanceof Error
               ? loadError
               : new Error(`Could not load document for ${nodeId}`),
           )
         })
-        .finally(() => setIsDocumentLoading(false))
+        .finally(() => { if (!controller.signal.aborted) setIsDocumentLoading(false) })
     })
 
     graphRef.current = graph
@@ -153,11 +161,12 @@ export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationPr
     resizeObserver.observe(containerRef.current)
 
     return () => {
+      selection?.abort()
       resizeObserver.disconnect()
       graph.destroy()
       graphRef.current = null
     }
-  }, [data, graphId])
+  }, [data, graphId, isLoading])
 
   if (isLoading) return <LoadingState label="Loading graph visualization" />
   if (error && !data) return <ErrorState message={error.message} />
@@ -212,7 +221,7 @@ export function GraphVisualization({ graphId, refreshKey }: GraphVisualizationPr
                   ) : null}
                 </div>
                 <pre className="max-h-[30rem] overflow-auto rounded-md bg-slate-950 p-3 text-xs text-green-100">
-                  {stringifyJson(document.document)}
+                  {previewJson(document.document)}
                 </pre>
               </div>
             ) : null}

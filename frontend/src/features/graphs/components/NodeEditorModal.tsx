@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '../../../shared/components/ui/Button'
 import { Input } from '../../../shared/components/ui/Input'
 import { Modal } from '../../../shared/components/ui/Modal'
@@ -12,23 +12,22 @@ interface NodeEditorModalProps {
   onSave: (input: { label: string; type?: string; data: Record<string, unknown> }) => void
 }
 
-export function NodeEditorModal({ isOpen, node, onClose, onSave }: NodeEditorModalProps) {
-  const [data, setData] = useState('{}')
-  const [jsonError, setJsonError] = useState('')
-  const [label, setLabel] = useState('')
-  const [type, setType] = useState('')
+export function NodeEditorModal(props: NodeEditorModalProps) {
+  if (!props.isOpen) return null
+  const node = props.node
+  return <NodeEditorModalForm key={node?.id} {...props} />
+}
 
-  useEffect(() => {
-    setLabel(node?.label ?? '')
-    setType(node?.type ?? '')
-    setData(node ? stringifyJson(node.data) : '{}')
-    setJsonError('')
-  }, [node, isOpen])
+function NodeEditorModalForm({ isOpen, node, onClose, onSave }: NodeEditorModalProps) {
+  const [data, setData] = useState(() => node ? stringifyJson(node.data) : '{}')
+  const [jsonError, setJsonError] = useState('')
+  const [label, setLabel] = useState(() => node?.label ?? '')
+  const [type, setType] = useState(() => node?.type ?? '')
 
   function handleSave() {
     const parsedData = safeParseJson<Record<string, unknown>>(data)
 
-    if (!parsedData || Array.isArray(parsedData)) {
+    if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
       setJsonError('Data must be a valid JSON object.')
       return
     }
