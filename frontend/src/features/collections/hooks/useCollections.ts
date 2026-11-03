@@ -3,7 +3,7 @@ import { useAsync } from '../../../shared/hooks/useAsync'
 import { collectionApi } from '../services/collectionApi'
 
 export function useCollections() {
-  const loadCollections = useCallback(() => collectionApi.listCollections(), [])
+  const loadCollections = useCallback((signal: AbortSignal) => collectionApi.listCollections(signal), [])
 
   return useAsync(loadCollections)
 }
