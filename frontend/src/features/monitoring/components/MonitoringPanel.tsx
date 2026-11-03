@@ -10,8 +10,8 @@ import {
   type ChartConfiguration,
 } from 'chart.js'
 import { useEffect, useMemo, useRef } from 'react'
-import { API_BASE_URL } from '../../../api/client/apiConfig'
-import { useAuth } from '../../auth/context/AuthContext'
+import { API_BASE_URL, secureEndpoint } from '../../../api/client/apiConfig'
+import { useAuth } from '../../auth/context/useAuth'
 import { Card } from '../../../shared/components/ui/Card'
 import { cn } from '../../../shared/utils/cn'
 import { useMonitoringSocket } from '../hooks/useMonitoringSocket'
@@ -20,7 +20,7 @@ import type { ConnectionStatus, RequestsSample } from '../types/monitoring.types
 Chart.register(CategoryScale, LinearScale, LineController, LineElement, PointElement, Filler, Tooltip)
 
 const monitoringSocketUrl =
-  import.meta.env.VITE_MONITORING_SOCKET_URL ?? API_BASE_URL
+  secureEndpoint(import.meta.env.VITE_MONITORING_SOCKET_URL ?? '', API_BASE_URL)
 
 function formatBytes(bytes?: number): string {
   if (bytes === undefined || !Number.isFinite(bytes)) {
@@ -119,7 +119,7 @@ function RequestsLineChart({ samples }: { samples: RequestsSample[] }) {
 
     chartRef.current.data.labels = samples.map((sample) => sample.label)
     chartRef.current.data.datasets[0].data = samples.map((sample) => sample.value)
-    chartRef.current.update()
+    chartRef.current.update('none')
   }, [samples])
 
   return <canvas aria-label="Requests per second chart" ref={canvasRef} />

@@ -38,7 +38,7 @@ function pickNumber(source: Record<string, unknown>, keys: string[], fallback?: 
 
 function normalizeActiveConnections(value: unknown): ActiveConnection[] {
   if (Array.isArray(value)) {
-    return value.map((connection, index) => {
+    return value.slice(0, 500).map((connection, index) => {
       if (typeof connection === 'string' || typeof connection === 'number') {
         return { id: String(connection) }
       }
@@ -57,13 +57,14 @@ function normalizeActiveConnections(value: unknown): ActiveConnection[] {
   }
 
   const count = asNumber(value, 0) ?? 0
-  return Array.from({ length: count }, (_, index) => ({ id: `connection-${index + 1}` }))
+  return Array.from({ length: Math.max(0, Math.min(500, Math.floor(count))) }, (_, index) => ({ id: `connection-${index + 1}` }))
 }
 
 function normalizeMetrics(payload: unknown): MonitoringMetrics {
   const data = asRecord(payload)
   const ram = asRecord(data.ram)
   const ssd = asRecord(data.ssd)
+  const receivedAt = pickNumber(data, ['receivedAt'], Date.now()) ?? Date.now()
 
   return {
     databaseHealthy: Boolean(
@@ -89,17 +90,17 @@ function normalizeMetrics(payload: unknown): MonitoringMetrics {
     activeConnections: normalizeActiveConnections(
       data.activeConnections ?? data.connections ?? data.connectionCount,
     ),
-    receivedAt: pickNumber(data, ['receivedAt'], Date.now()) ?? Date.now(),
+    receivedAt: Math.abs(receivedAt) <= 8_640_000_000_000_000 ? receivedAt : Date.now(),
   }
 }
 
+const sampleTimeFormat = new Intl.DateTimeFormat('en-US', {
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+})
+
 function createSample(metrics: MonitoringMetrics): RequestsSample {
   return {
-    label: new Intl.DateTimeFormat('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    }).format(metrics.receivedAt),
+    label: sampleTimeFormat.format(metrics.receivedAt),
     value: metrics.requestsPerSecond,
   }
 }
@@ -111,6 +112,15 @@ export function useMonitoringSocket(url: string, accessToken: string | null) {
   const [samples, setSamples] = useState<RequestsSample[]>([])
   const [retryKey, setRetryKey] = useState(0)
 
+  const [connectionInputs, setConnectionInputs] = useState({ url, accessToken, retryKey })
+  if (connectionInputs.url !== url || connectionInputs.accessToken !== accessToken || connectionInputs.retryKey !== retryKey) {
+    setConnectionInputs({ url, accessToken, retryKey })
+    setStatus('connecting')
+    setError(undefined)
+    setMetrics(defaultMetrics)
+    setSamples([])
+  }
+
   const reconnect = useCallback(() => {
     setStatus('connecting')
     setError(undefined)
@@ -118,16 +128,7 @@ export function useMonitoringSocket(url: string, accessToken: string | null) {
   }, [])
 
   useEffect(() => {
-    if (!accessToken) {
-      setStatus('disconnected')
-      setError('Sign in again to monitor database health.')
-      setMetrics(defaultMetrics)
-      setSamples([])
-      return undefined
-    }
-
-    setStatus('connecting')
-    setError(undefined)
+    if (!accessToken) return undefined
 
     const socket = io(url, {
       auth: { token: accessToken },
@@ -136,17 +137,39 @@ export function useMonitoringSocket(url: string, accessToken: string | null) {
       transports: ['websocket'],
     })
 
-    function handleMetrics(payload: unknown) {
+    let pending: unknown
+    let hasPending = false
+    let updateTimer: number | undefined
+    function flushMetrics() {
+      window.clearTimeout(updateTimer)
+      updateTimer = undefined
+      if (!hasPending || document.hidden) return
+      const payload = pending
+      hasPending = false
       try {
         const nextMetrics = normalizeMetrics(payload)
+        const sample = createSample(nextMetrics)
         setError(undefined)
         setStatus('connected')
         setMetrics(nextMetrics)
-        setSamples((current) => [...current, createSample(nextMetrics)].slice(-maxSamples))
+        setSamples((current) => [...current, sample].slice(-maxSamples))
       } catch {
         setError('Received an invalid monitoring payload.')
       }
     }
+
+    function handleMetrics(payload: unknown) {
+      pending = payload
+      hasPending = true
+      if (updateTimer === undefined && !document.hidden) updateTimer = window.setTimeout(flushMetrics, 250)
+    }
+    function resume() {
+      if (!document.hidden) {
+        flushMetrics()
+        if (socket.connected) socket.emit('metrics:refresh')
+      }
+    }
+    document.addEventListener('visibilitychange', resume)
 
     socket.on('connect', () => {
       setStatus('connected')
@@ -166,20 +189,29 @@ export function useMonitoringSocket(url: string, accessToken: string | null) {
     })
 
     const heartbeatId = window.setInterval(() => {
-      if (socket.connected) {
+      if (socket.connected && !document.hidden) {
         socket.emit('heartbeat')
       }
     }, 5000)
 
     return () => {
       window.clearInterval(heartbeatId)
+      window.clearTimeout(updateTimer)
+      document.removeEventListener('visibilitychange', resume)
+      socket.removeAllListeners()
       socket.disconnect()
     }
 
   }, [accessToken, retryKey, url])
 
   return useMemo(
-    () => ({ error, metrics, reconnect, samples, status }),
-    [error, metrics, reconnect, samples, status],
+    () => ({
+      error: accessToken ? error : 'Sign in again to monitor database health.',
+      metrics: accessToken ? metrics : defaultMetrics,
+      reconnect,
+      samples: accessToken ? samples : [],
+      status: accessToken ? status : 'disconnected' as ConnectionStatus,
+    }),
+    [accessToken, error, metrics, reconnect, samples, status],
   )
 }
