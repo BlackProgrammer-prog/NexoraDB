@@ -21,8 +21,9 @@ export const authApi = {
     return httpClient.post<AuthResponse, LoginInput>(authEndpoints.login, input)
   },
 
-  me(accessToken: string): Promise<AdminUser> {
+  me(accessToken: string, signal?: AbortSignal): Promise<AdminUser> {
     return httpClient.get<AdminUser>(authEndpoints.me, {
+      signal,
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
