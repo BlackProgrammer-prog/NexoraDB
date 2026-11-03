@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '../../../shared/components/ui/Button'
 import { Input } from '../../../shared/components/ui/Input'
 import { Modal } from '../../../shared/components/ui/Modal'
@@ -12,18 +12,20 @@ interface UpdateCollectionModalProps {
   onUpdated: () => void
 }
 
-export function UpdateCollectionModal({
+export function UpdateCollectionModal(props: UpdateCollectionModalProps) {
+  if (!props.isOpen) return null
+  const collection = props.collection
+  return <UpdateCollectionModalForm key={collection?.name} {...props} />
+}
+
+function UpdateCollectionModalForm({
   collection,
   isOpen,
   onClose,
   onUpdated,
 }: UpdateCollectionModalProps) {
   const [isSaving, setIsSaving] = useState(false)
-  const [name, setName] = useState('')
-
-  useEffect(() => {
-    setName(collection?.name ?? '')
-  }, [collection, isOpen])
+  const [name, setName] = useState(() => collection?.name ?? '')
 
   async function handleUpdate() {
     if (!collection || !name.trim()) {

@@ -20,6 +20,7 @@ from .api_bridge import (
 )
 from .config import AdminApiSettings
 from .admission import AdmissionMiddleware
+from .browser_security import BrowserSecurityMiddleware
 from .lifecycle import install_lifecycle
 from .document_store import (
     CreateCollectionRequest,
@@ -73,6 +74,7 @@ from .service import (
     login_admin,
     register_root_admin,
     root_exists,
+    require_active_admin,
     store_app_token,
 )
 
@@ -177,12 +179,14 @@ def create_app(
                 detail={"message": "missing bearer token"},
             )
         try:
-            return decode_access_token(authorization.removeprefix("Bearer ").strip(), current_settings)
+            payload = decode_access_token(authorization.removeprefix("Bearer ").strip(), current_settings)
         except TokenError as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"message": str(exc)},
             ) from exc
+        require_active_admin(get_engine(), payload)
+        return payload
 
     @app.middleware("http")
     async def record_monitoring_request(request: Request, call_next: Callable[..., Any]) -> Any:
@@ -594,6 +598,11 @@ def create_app(
             name="admin-dashboard-static",
         )
 
+    app.add_middleware(
+        BrowserSecurityMiddleware,
+        production=app_settings.environment.lower() == "production",
+        allowed_origins=app_settings.allowed_origins,
+    )
     return app
 
 

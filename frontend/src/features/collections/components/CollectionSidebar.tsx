@@ -1,16 +1,17 @@
-import { useCollections } from '../hooks/useCollections'
+import type { Collection } from '../types/collection.types'
 import { cn } from '../../../shared/utils/cn'
 
 interface CollectionSidebarProps {
+  collections: Collection[] | null
   onSelect?: (collectionName: string) => void
   selectedCollectionName?: string
 }
 
 export function CollectionSidebar({
+  collections,
   onSelect,
   selectedCollectionName,
 }: CollectionSidebarProps) {
-  const { data: collections } = useCollections()
 
   return (
     <aside className="rounded-lg border border-slate-200 bg-white p-4">

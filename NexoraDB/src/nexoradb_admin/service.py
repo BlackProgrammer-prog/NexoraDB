@@ -188,6 +188,21 @@ def get_current_public_user(engine: InternalUserEngine, username: str) -> Public
     return _public_user(user)
 
 
+def require_active_admin(engine: InternalUserEngine, payload: dict[str, Any]) -> PublicUser:
+    """Check current privileges, not just the role captured when a JWT was issued."""
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail={"message": "administrator access required"})
+    try:
+        user = get_current_public_user(engine, str(payload.get("sub") or ""))
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=401, detail={"message": "account no longer exists"}) from exc
+        raise
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail={"message": "administrator access required"})
+    return user
+
+
 def store_app_token(
     engine: InternalUserEngine,
     username: str,

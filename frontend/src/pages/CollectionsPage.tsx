@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { CollectionList } from '../features/collections/components/CollectionList'
 import { CreateCollectionModal } from '../features/collections/components/CreateCollectionModal'
 import { UpdateCollectionModal } from '../features/collections/components/UpdateCollectionModal'
@@ -16,18 +16,15 @@ export function CollectionsPage() {
   const updateModal = useDisclosure()
   const { data: collections, error, isLoading, refetch } = useCollections()
   const [collectionToEdit, setCollectionToEdit] = useState<Collection | null>(null)
-  const [selectedCollectionName, setSelectedCollectionName] = useState('')
-
-  useEffect(() => {
-    if (!selectedCollectionName && collections?.length) {
-      setSelectedCollectionName(collections[0].name)
-    }
-  }, [collections, selectedCollectionName])
+  const [selection, setSelectedCollectionName] = useState('')
+  const selectedCollectionName = collections?.some((item) => item.name === selection)
+    ? selection
+    : collections?.[0]?.name ?? ''
 
   async function deleteCollection(collection: Collection) {
     await collectionApi.deleteCollection(collection.name)
     if (selectedCollectionName === collection.name) {
-      setSelectedCollectionName(collections?.[0]?.name ?? '')
+      setSelectedCollectionName('')
     }
     await refetch()
   }

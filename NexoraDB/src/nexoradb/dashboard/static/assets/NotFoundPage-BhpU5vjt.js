@@ -1,0 +1,1 @@
+import{f as e}from"./index-C_kIWxzR.js";import{t}from"./PageHeader-Deldkbig.js";import{t as n}from"./EmptyState-BHBkvrsq.js";var r=e();function i(){return(0,r.jsxs)(`div`,{className:`space-y-8`,children:[(0,r.jsx)(t,{title:`Page not found`}),(0,r.jsx)(n,{description:`The requested admin panel page does not exist.`,title:`Nothing here`})]})}export{i as NotFoundPage};

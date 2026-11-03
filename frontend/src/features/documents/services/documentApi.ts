@@ -7,8 +7,8 @@ import type {
 } from '../types/document.types'
 
 export const documentApi = {
-  listDocuments(collectionName: string): Promise<DocumentRecord[]> {
-    return httpClient.get<DocumentRecord[]>(documentEndpoints.list(collectionName))
+  listDocuments(collectionName: string, signal?: AbortSignal): Promise<DocumentRecord[]> {
+    return httpClient.get<DocumentRecord[]>(documentEndpoints.list(collectionName), { signal })
   },
 
   getDocument(collectionName: string, documentId: string): Promise<DocumentRecord | null> {

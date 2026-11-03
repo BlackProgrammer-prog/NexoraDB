@@ -12,8 +12,8 @@ import type {
 } from '../types/graph.types'
 
 export const graphApi = {
-  listGraphs(): Promise<Graph[]> {
-    return httpClient.get<Graph[]>(graphEndpoints.list)
+  listGraphs(signal?: AbortSignal): Promise<Graph[]> {
+    return httpClient.get<Graph[]>(graphEndpoints.list, { signal })
   },
 
   createGraph(input: CreateGraphInput): Promise<Graph> {
@@ -24,12 +24,12 @@ export const graphApi = {
     return httpClient.delete<void>(graphEndpoints.delete(graphId))
   },
 
-  getVisualization(graphId: string): Promise<GraphVisualizationData> {
-    return httpClient.get<GraphVisualizationData>(graphEndpoints.visualization(graphId))
+  getVisualization(graphId: string, signal?: AbortSignal): Promise<GraphVisualizationData> {
+    return httpClient.get<GraphVisualizationData>(graphEndpoints.visualization(graphId), { signal })
   },
 
-  getNodeDocument(graphId: string, nodeId: string): Promise<GraphNodeDocument> {
-    return httpClient.get<GraphNodeDocument>(graphEndpoints.nodeDocument(graphId, nodeId))
+  getNodeDocument(graphId: string, nodeId: string, signal?: AbortSignal): Promise<GraphNodeDocument> {
+    return httpClient.get<GraphNodeDocument>(graphEndpoints.nodeDocument(graphId, nodeId), { signal })
   },
 
   createNode(graphId: string, input: CreateGraphNodeInput): Promise<Graph> {

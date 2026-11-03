@@ -7,8 +7,8 @@ import type {
 } from '../types/collection.types'
 
 export const collectionApi = {
-  listCollections(): Promise<Collection[]> {
-    return httpClient.get<Collection[]>(collectionEndpoints.list)
+  listCollections(signal?: AbortSignal): Promise<Collection[]> {
+    return httpClient.get<Collection[]>(collectionEndpoints.list, { signal })
   },
 
   createCollection(input: CreateCollectionInput): Promise<Collection> {

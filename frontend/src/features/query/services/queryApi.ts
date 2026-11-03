@@ -5,11 +5,11 @@ import { mockApiAdapter } from '../../../mocks/mockApiAdapter'
 import type { QueryRequest, QueryResult } from '../types/query.types'
 
 export const queryApi = {
-  executeQuery(input: QueryRequest): Promise<QueryResult> {
+  executeQuery(input: QueryRequest, signal?: AbortSignal): Promise<QueryResult> {
     if (USE_MOCK_API) {
       return mockApiAdapter.executeQuery(input)
     }
 
-    return httpClient.post<QueryResult, QueryRequest>(queryEndpoints.execute, input)
+    return httpClient.post<QueryResult, QueryRequest>(queryEndpoints.execute, input, { signal })
   },
 }

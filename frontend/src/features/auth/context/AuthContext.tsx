@@ -1,52 +1,38 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from 'react'
 import { authApi } from '../services/authApi'
-import { clearStoredToken, persistToken, readStoredToken } from '../services/authTokenStorage'
+import { clearStoredToken, persistToken, readStoredToken, subscribeToken } from '../services/authTokenStorage'
 import type { AdminUser, LoginInput, RegisterInput } from '../types/auth.types'
-
-interface AuthContextValue {
-  user: AdminUser | null
-  accessToken: string | null
-  isAuthenticated: boolean
-  isInitializing: boolean
-  login: (input: LoginInput) => Promise<void>
-  registerRootAdmin: (input: RegisterInput) => Promise<void>
-  logout: () => void
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
+import { AuthContext, type AuthContextValue } from './useAuth'
 
 interface AuthProviderProps {
   children: ReactNode
 }
 
 export function AuthProvider({ children }: AuthProviderProps) {
-  const [accessToken, setAccessToken] = useState<string | null>(() => readStoredToken())
+  const accessToken = useSyncExternalStore(subscribeToken, readStoredToken, () => null)
   const [user, setUser] = useState<AdminUser | null>(null)
   const [isInitializing, setIsInitializing] = useState(Boolean(accessToken))
 
   const logout = useCallback(() => {
     clearStoredToken()
-    setAccessToken(null)
     setUser(null)
     setIsInitializing(false)
   }, [])
 
   useEffect(() => {
     let isActive = true
+    const controller = new AbortController()
 
     async function loadCurrentUser(token: string) {
-      setIsInitializing(true)
-
       try {
-        const currentUser = await authApi.me(token)
+        const currentUser = await authApi.me(token, controller.signal)
 
         if (isActive) {
           setUser(currentUser)
@@ -54,7 +40,6 @@ export function AuthProvider({ children }: AuthProviderProps) {
       } catch {
         if (isActive) {
           clearStoredToken()
-          setAccessToken(null)
           setUser(null)
         }
       } finally {
@@ -65,7 +50,6 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
 
     if (!accessToken) {
-      setIsInitializing(false)
       return undefined
     }
 
@@ -73,13 +57,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     return () => {
       isActive = false
+      controller.abort()
     }
   }, [accessToken])
 
   const login = useCallback(async (input: LoginInput) => {
     const response = await authApi.login(input)
-    persistToken(response.accessToken)
-    setAccessToken(response.accessToken)
+    if (response.user.role !== 'admin' || response.user.status !== 'active') {
+      throw new Error('An active administrator account is required')
+    }
+    persistToken(response.accessToken, response.expiresIn)
+    setIsInitializing(false)
     setUser(response.user)
   }, [])
 
@@ -99,20 +87,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
       login,
       logout,
       registerRootAdmin,
-      user,
+      user: accessToken ? user : null,
     }),
     [accessToken, isInitializing, login, logout, registerRootAdmin, user],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-export function useAuth() {
-  const context = useContext(AuthContext)
-
-  if (context === null) {
-    throw new Error('useAuth must be used inside AuthProvider')
-  }
-
-  return context
 }

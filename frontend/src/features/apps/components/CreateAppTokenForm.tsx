@@ -143,7 +143,7 @@ export function CreateAppTokenForm({ onCreated }: CreateAppTokenFormProps) {
             Token created for {createdToken.appName}
           </p>
           <p className="text-xs text-green-700">
-            Copy this token now. It will not be shown again.
+            Copy this token to configure your application. Administrators can retrieve stored tokens from the list below.
           </p>
           <pre className="overflow-auto rounded-md bg-slate-950 p-4 text-xs text-green-100">
             {createdToken.token}

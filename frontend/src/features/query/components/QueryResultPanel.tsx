@@ -1,7 +1,9 @@
+import { lazy, Suspense } from 'react'
 import { EmptyState } from '../../../shared/components/ui/EmptyState'
 import { ErrorState } from '../../../shared/components/ui/ErrorState'
 import { LoadingState } from '../../../shared/components/ui/LoadingState'
-import { stringifyJson } from '../../../shared/utils/json'
+import { JsonPreview } from '../../../shared/components/ui/JsonPreview'
+import { PaginatedResults } from '../../../shared/components/ui/PaginatedResults'
 import type { QueryResult } from '../types/query.types'
 import { QueryExecutionStats } from './QueryExecutionStats'
 
@@ -47,11 +49,11 @@ export function QueryResultPanel({
     <div className="space-y-4">
       <QueryExecutionStats executionTimeMs={result.executionTimeMs} />
       {result.rows.length ? (
-        <div className="overflow-auto rounded-lg border border-slate-200">
+        <PaginatedResults items={result.rows}>{(page) => <div className="overflow-auto rounded-lg border border-slate-200">
           <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
             <thead className="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
-                {result.columns.map((column) => (
+                {result.columns.slice(0, 50).map((column) => (
                   <th className="px-4 py-3 font-semibold" key={column}>
                     {column}
                   </th>
@@ -59,12 +61,12 @@ export function QueryResultPanel({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
-              {result.rows.map((row, rowIndex) => (
+              {page.map((row, rowIndex) => (
                 <tr key={rowIndex}>
-                  {result.columns.map((column) => (
+                  {result.columns.slice(0, 50).map((column) => (
                     <td className="max-w-64 px-4 py-3 align-top" key={column}>
                       <span className="line-clamp-3 font-mono text-xs">
-                        {String(row[column] ?? '')}
+                        {String(row[column] ?? '').slice(0, 2000)}
                       </span>
                     </td>
                   ))}
@@ -72,16 +74,12 @@ export function QueryResultPanel({
               ))}
             </tbody>
           </table>
-        </div>
+        </div>}</PaginatedResults>
       ) : (
         <EmptyState description="The query completed but returned no rows." title="No rows" />
       )}
-      <div>
-        <h3 className="mb-2 text-sm font-semibold text-slate-950">Raw JSON</h3>
-        <pre className="max-h-80 overflow-auto rounded-md bg-slate-950 p-4 text-xs text-green-100">
-          {stringifyJson(result.raw)}
-        </pre>
-      </div>
+      {result.columns.length > 50 && <p className="text-sm text-slate-500">Showing the first 50 columns. Select fewer fields to inspect other columns.</p>}
+      <JsonPreview value={result.raw} />
       {graphId ? (
         <Suspense fallback={<div className="text-sm text-slate-500">Loading graph viewer…</div>}>
           <GraphVisualization graphId={graphId} refreshKey={result.executionTimeMs} />
@@ -106,4 +104,3 @@ function graphIdFromQueryResult(raw: unknown) {
   )
   return graphStatement?.graph ?? null
 }
-import { lazy, Suspense } from 'react'

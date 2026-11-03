@@ -8,8 +8,8 @@ import type {
 } from '../types/appToken.types'
 
 export const appTokenApi = {
-  listTokens(): Promise<StoredAppToken[]> {
-    return httpClient.get<StoredAppToken[]>(appTokenEndpoints.list)
+  listTokens(signal?: AbortSignal): Promise<StoredAppToken[]> {
+    return httpClient.get<StoredAppToken[]>(appTokenEndpoints.list, { signal })
   },
   listScopes(): Promise<AppScopesResponse> {
     return httpClient.get<AppScopesResponse>(appTokenEndpoints.scopes)

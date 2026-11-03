@@ -165,7 +165,12 @@ def test_admin_api_controls_require_auth_role_and_strict_booleans(native_engine)
     assert client.get('/performance').status_code == 401
     viewer = create_access_token(username='reader',role='reader',settings=settings)
     assert client.get('/performance',headers={'Authorization':'Bearer '+viewer}).status_code == 403
-    token = create_access_token(username='admin',role='admin',settings=settings)
+    # Admin routes now validate the live account as well as the signed role.
+    assert client.post('/auth/register', json={
+        'firstName': 'Test', 'lastName': 'Admin', 'email': 'admin@example.test',
+        'password': 'StrongPass123', 'confirmPassword': 'StrongPass123',
+    }).status_code == 201
+    token = client.post('/auth/login', json={'username': 'root', 'password': 'StrongPass123'}).json()['accessToken']
     headers = {'Authorization':'Bearer '+token}
     assert client.get('/performance',headers=headers).status_code == 200
     response = client.put('/performance',headers=headers,json={'smart_indexes':False,'index_advisor':True})

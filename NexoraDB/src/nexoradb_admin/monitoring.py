@@ -10,9 +10,11 @@ from typing import Any, Protocol
 
 import socketio
 import anyio
+from fastapi import HTTPException
 
 from .config import AdminApiSettings
 from .security import TokenError, decode_access_token
+from .service import require_active_admin
 
 ACTIVE_CONNECTION_WINDOW_SECONDS = 10.0
 REQUEST_RATE_WINDOW_SECONDS = 1.0
@@ -137,6 +139,7 @@ class MonitoringSocketServer:
         self._stop_event = None
         self.lifecycle = None
         self._metrics_limiter = anyio.CapacityLimiter(1)
+        self._admin_sessions: dict[str, dict[str, Any]] = {}
         self._configure_handlers()
 
     def asgi_app(self, fastapi_app: Any) -> socketio.ASGIApp:
@@ -147,7 +150,29 @@ class MonitoringSocketServer:
         )
 
     async def emit_snapshot(self, sid: str | None = None) -> None:
-        await self.sio.emit("metrics", await self.collect_metrics(), to=sid)
+        recipients = [sid] if sid is not None else list(self._admin_sessions)
+        authorized = []
+        for recipient in recipients:
+            if await self._authorize_session(recipient):
+                authorized.append(recipient)
+        if not authorized:
+            return
+        metrics = await self.collect_metrics()
+        for recipient in authorized:
+            await self.sio.emit("metrics", metrics, to=recipient)
+
+    async def _authorize_session(self, sid: str) -> bool:
+        payload = self._admin_sessions.get(sid)
+        try:
+            if not payload or int(payload.get("exp", 0)) <= int(time.time()):
+                raise TokenError("monitoring session expired")
+            await anyio.to_thread.run_sync(lambda: require_active_admin(self.engine_provider(), payload))
+            return True
+        except (TokenError, HTTPException):
+            self._admin_sessions.pop(sid, None)
+            await self.sio.disconnect(sid)
+            await self.state.remove_connection(f"socket:{sid}")
+            return False
 
     async def collect_metrics(self) -> dict[str, Any]:
         if self._stopping: raise RuntimeError("monitoring stopping")
@@ -251,8 +276,11 @@ class MonitoringSocketServer:
             token = str((auth or {}).get("token") or "")
             try:
                 payload = decode_access_token(token, self.settings)
-            except TokenError:
+                await anyio.to_thread.run_sync(lambda: require_active_admin(self.engine_provider(), payload))
+            except (TokenError, HTTPException):
                 raise socketio.exceptions.ConnectionRefusedError("invalid monitoring token") from None
+
+            self._admin_sessions[sid] = payload
 
             address = str(environ.get("REMOTE_ADDR") or "")
             await self.state.touch_connection(
@@ -271,10 +299,13 @@ class MonitoringSocketServer:
 
         @self.sio.event
         async def disconnect(sid: str) -> None:
+            self._admin_sessions.pop(sid, None)
             await self.state.remove_connection(f"socket:{sid}")
 
         @self.sio.on("heartbeat")
         async def heartbeat(sid: str) -> None:
+            if not await self._authorize_session(sid):
+                return
             session = await self.sio.get_session(sid)
             await self.state.touch_connection(
                 client_id=f"socket:{sid}",

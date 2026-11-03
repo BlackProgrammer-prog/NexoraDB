@@ -1,0 +1,82 @@
+CREATE COLLECTION users (
+  username STRING REQUIRED,
+  age INT64,
+  city STRING,
+  tags ARRAY
+) STRICT;
+
+CREATE COLLECTION posts (
+  author STRING REQUIRED,
+  title STRING REQUIRED,
+  likes INT64 DEFAULT 0
+) STRICT;
+
+CREATE COLLECTION follows (
+  from_user STRING REQUIRED,
+  to_user STRING REQUIRED
+) STRICT;
+
+INSERT INTO users VALUES ({"username":"ali","age":28,"city":"Tehran","tags":["db"]});
+INSERT INTO users VALUES ({"username":"sara","age":25,"city":"Shiraz","tags":["graph"]});
+INSERT INTO users VALUES ({"username":"reza","age":31,"city":"Tehran","tags":[]});
+INSERT INTO users VALUES ({"username":"mina","age":22,"city":"Tabriz","tags":[]});
+
+INSERT INTO posts VALUES ({"author":"ali","title":"Learning NexoraDB","likes":3});
+INSERT INTO posts VALUES ({"author":"sara","title":"Graphs are useful","likes":5});
+
+INSERT INTO follows VALUES ({"from_user":"ali","to_user":"sara"});
+INSERT INTO follows VALUES ({"from_user":"ali","to_user":"reza"});
+INSERT INTO follows VALUES ({"from_user":"sara","to_user":"reza"});
+INSERT INTO follows VALUES ({"from_user":"reza","to_user":"mina"});
+SHOW COLLECTIONS;
+
+SELECT * FROM users;
+SELECT username, age FROM users WHERE age >= 25 LIMIT 10;
+SELECT * FROM users LIMIT 2 SKIP 2;
+COUNT FROM users WHERE city = 'Tehran';
+EXISTS IN users WHERE username='ali';
+SELECT * FROM posts LOOKUP JOIN users ON posts.author = users.username LIMIT 10;
+
+CREATE UNIQUE INDEX idx_users_username ON users (username);
+CREATE INDEX idx_users_city ON users (city);
+CREATE INDEX idx_posts_author ON posts (author);
+SHOW INDEXES ON users;
+ADD FOREIGN KEY fk_posts_author ON posts (author) REFERENCES users (username);
+SHOW FOREIGN KEYS ON posts;
+SELECT * FROM users WHERE username = 'ali';
+
+UPDATE users SET city='Karaj' ADD TO SET tags='presenter' WHERE username='ali';
+UPDATE posts INCREMENT likes BY 1 WHERE title='Learning NexoraDB';
+SELECT * FROM users WHERE username='ali';
+SELECT * FROM posts WHERE title='Learning NexoraDB';
+INSERT INTO posts VALUES ({"author":"ali","title":"Temporary"});
+DELETE FROM posts WHERE title='Temporary';
+EXISTS IN posts WHERE title='Temporary';
+
+CREATE LIVE GRAPH social HETEROGENEOUS DIRECTED;
+USE GRAPH social;
+MAP NODE User FROM users KEY username;
+MAP EDGE FOLLOWS FROM follows SOURCE from_user AS User TARGET to_user AS User;
+BUILD GRAPH social;
+SHOW GRAPHS;
+GRAPH STATUS social;
+GRAPH STATS social;
+RENDER GRAPH social;
+
+USE GRAPH social;
+SELECT * FROM users WHERE username='ali';
+TRAVERSE User('ali') OUT FOLLOWS DEPTH 1 LIMIT 10;
+EDGE EXISTS FROM User('ali') TO User('sara') TYPE FOLLOWS;
+
+RUN LOCK MutualFriends ON social WITH user1='ali', user2='sara', edge_type='FOLLOWS';
+RUN LOCK MostConnected ON social WITH metric='out', node_type='User' LIMIT 4;
+
+CREATE COLLECTION demo_settings (name STRING REQUIRED, enabled BOOL DEFAULT true) STRICT;
+INSERT INTO demo_settings VALUES ({"name":"notifications"});
+DESCRIBE COLLECTION demo_settings;
+SELECT * FROM demo_settings;
+
+SYSTEM STATUS;
+SHOW PERFORMANCE;
+SHOW INDEX ADVICE;
+

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Badge } from '../../../shared/components/ui/Badge'
 import { Button } from '../../../shared/components/ui/Button'
 import { ErrorState } from '../../../shared/components/ui/ErrorState'
@@ -19,32 +19,40 @@ function formatDate(timestamp: number | null) {
 }
 
 function maskToken(token: string) {
-  if (token.length < 24) return token
+  if (token.length < 24) return '••••••••'
   return `${token.slice(0, 14)}••••••••${token.slice(-8)}`
 }
 
 export function AppTokenList({ refreshKey }: AppTokenListProps) {
+  return <AppTokenListContent key={refreshKey} />
+}
+
+function AppTokenListContent() {
   const [tokens, setTokens] = useState<StoredAppToken[]>([])
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  const loadTokens = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      setTokens(await appTokenApi.listTokens())
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Could not load app tokens')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [])
-
   useEffect(() => {
-    void loadTokens()
-  }, [loadTokens, refreshKey])
+    let active = true
+    const controller = new AbortController()
+    appTokenApi.listTokens(controller.signal).then(
+      (result) => {
+        if (active) {
+          setTokens(result)
+          setIsLoading(false)
+        }
+      },
+      (loadError: unknown) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : 'Could not load app tokens')
+          setIsLoading(false)
+        }
+      },
+    )
+    return () => { active = false; controller.abort() }
+  }, [])
 
   async function copyToken(token: StoredAppToken) {
     try {
