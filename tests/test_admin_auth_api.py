@@ -246,6 +246,70 @@ def test_login_rejects_wrong_password() -> None:
     assert response.json()["message"] == "invalid username or password"
 
 
+def test_admin_routes_reject_non_admin_disabled_demoted_and_deleted_accounts():
+    from nexoradb_admin.security import create_access_token
+    engine = FakeInternalUserEngine()
+    settings = AdminApiSettings(auth_secret='x' * 48)
+    client = TestClient(create_app(settings=settings, engine=engine))
+    assert client.post('/auth/register', json={
+        'firstName': 'Test', 'lastName': 'Admin', 'email': 'admin@example.test',
+        'password': 'StrongPass123',
+    }).status_code == 201
+    token = create_access_token(username='root', role='admin', settings=settings)
+    headers = {'Authorization': 'Bearer ' + token}
+    assert client.get('/collections', headers=headers).status_code == 200
+    reader = create_access_token(username='root', role='application', settings=settings)
+    assert client.get('/collections', headers={'Authorization': 'Bearer ' + reader}).status_code == 403
+    engine.users['root']['status'] = 'disabled'
+    assert client.get('/collections', headers=headers).status_code == 403
+    engine.users['root']['status'] = 'active'
+    engine.users['root']['role'] = 'application'
+    assert client.get('/collections', headers=headers).status_code == 403
+    engine.users.clear()
+    assert client.get('/collections', headers=headers).status_code == 401
+
+
+def test_monitoring_revalidates_privileges_and_expires_sessions():
+    from nexoradb_admin.security import create_access_token, decode_access_token
+    import time
+    engine = FakeInternalUserEngine()
+    settings = AdminApiSettings(auth_secret='x' * 48)
+    client = TestClient(create_app(settings=settings, engine=engine))
+    client.post('/auth/register', json={
+        'firstName': 'Test', 'lastName': 'Admin', 'email': 'admin@example.test',
+        'password': 'StrongPass123',
+    })
+    server = MonitoringSocketServer(settings=settings, state=MonitoringState(), engine_provider=lambda: engine)
+    disconnected = []
+    emitted = []
+
+    async def disconnect(sid):
+        disconnected.append(sid)
+
+    async def emit(event, data, to=None):
+        emitted.append(to)
+
+    server.sio.disconnect = disconnect
+    server.sio.emit = emit
+
+    async def scenario():
+        token = create_access_token(username='root', role='admin', settings=settings)
+        server._admin_sessions['admin'] = decode_access_token(token, settings)
+        assert await server._authorize_session('admin')
+        engine.users['root']['status'] = 'disabled'
+        await server.emit_snapshot('admin')
+        assert disconnected == ['admin'] and not emitted
+        engine.users['root']['status'] = 'active'
+        server._admin_sessions['expired'] = {'sub': 'root', 'role': 'admin', 'exp': int(time.time()) - 1}
+        assert not await server._authorize_session('expired')
+        assert 'expired' in disconnected
+        server._admin_sessions['reader'] = {'sub': 'root', 'role': 'application', 'exp': int(time.time()) + 60}
+        assert not await server._authorize_session('reader')
+        assert 'reader' in disconnected
+
+    asyncio.run(scenario())
+
+
 def test_created_app_tokens_are_persisted_and_listed() -> None:
     engine = FakeInternalUserEngine()
     settings = AdminApiSettings(auth_secret="x" * 48, api_token_secret="y" * 48)
