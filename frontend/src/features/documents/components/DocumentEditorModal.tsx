@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '../../../shared/components/ui/Button'
 import { Modal } from '../../../shared/components/ui/Modal'
 import type { JsonObject } from '../../../shared/utils/json'
@@ -12,24 +12,25 @@ interface DocumentEditorModalProps {
   onSave: (data: JsonObject) => void
 }
 
-export function DocumentEditorModal({
+export function DocumentEditorModal(props: DocumentEditorModalProps) {
+  if (!props.isOpen) return null
+  const document = props.document
+  return <DocumentEditorModalForm key={document ? JSON.stringify([document.collectionName, document.id]) : 'new'} {...props} />
+}
+
+function DocumentEditorModalForm({
   document,
   isOpen,
   onClose,
   onSave,
 }: DocumentEditorModalProps) {
   const [jsonError, setJsonError] = useState('')
-  const [value, setValue] = useState('{}')
-
-  useEffect(() => {
-    setValue(document ? stringifyJson(document.data) : '{}')
-    setJsonError('')
-  }, [document, isOpen])
+  const [value, setValue] = useState(() => document ? stringifyJson(document.data) : '{}')
 
   function handleSave() {
     const parsed = safeParseJson<JsonObject>(value)
 
-    if (!parsed || Array.isArray(parsed)) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       setJsonError('Document JSON must be a valid object.')
       return
     }
