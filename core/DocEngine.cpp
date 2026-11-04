@@ -3109,8 +3109,17 @@ namespace nexora {
                 const std::string& collection_name,
                 const nexora::query::Condition& condition,
                 std::uint32_t limit,
-                const std::string& continuation_token,size_t max_bytes) {
+                const std::string& continuation_token,size_t max_bytes,
+                const std::vector<std::array<std::string,3>>& joins) {
             PageResult result;
+            std::shared_lock ddl_lock(index_ddl_mutex_);
+            if (joins.size()>8) {result.error_msg="At most eight LOOKUP JOIN stages are allowed";return result;}
+            for (const auto& join:joins) {
+                if (IsReservedCollectionName(join[0]) || !CollectionExists(join[0]) ||
+                        !query::CompiledFieldPath(join[1]).valid() || !query::CompiledFieldPath(join[2]).valid()) {
+                    result.error_msg="Invalid LOOKUP JOIN collection or field path";return result;
+                }
+            }
             if (limit == 0) {
                 result.error_msg = "Page limit must be greater than zero";
                 return result;
@@ -3159,6 +3168,11 @@ namespace nexora {
                     });
                 session->collection = collection_name;
                 session->condition = condition;
+                session->joins = joins;
+                {
+                    std::lock_guard metadata_lock(metadata_cache_mutex_);
+                    session->join_metadata_epoch=metadata_epoch_;
+                }
                 session->created_at = now;
                 session->expires_at = now + std::chrono::seconds(pagination::kIdleLeaseSeconds);
                 page_sessions_.emplace(session_id, session);
@@ -3202,6 +3216,14 @@ namespace nexora {
                 PageResult& result;
                 ~SessionFailureGuard() {if(!result.success) retire();}
             } failure_guard{discard_session,result};
+            // Indexes created after this snapshot have no entries at its epoch.
+            // After any DDL, use snapshot data scans instead of current index
+            // metadata. The shared DDL gate excludes changes during this page.
+            bool join_force_scan=false;
+            if (!session->joins.empty()) {
+                std::lock_guard metadata_lock(metadata_cache_mutex_);
+                join_force_scan=session->join_metadata_epoch!=metadata_epoch_;
+            }
             const nexora::query::CompiledQuery compiled_query(
                     session->condition);
             if (!compiled_query.valid()) {
@@ -3265,6 +3287,55 @@ namespace nexora {
                     result.error_msg = decode_status.ToString();
                     discard_session();
                     return result;
+                }
+                if (!session->joins.empty()) {
+                    auto source=nlohmann::ordered_json::parse(document,nullptr,false);
+                    if (!source.is_object()) {result.error_msg="Invalid JOIN source";discard_session();return result;}
+                    bool include=true;
+                    for (size_t join_index=0;join_index<session->joins.size();++join_index) {
+                        CheckExecution();
+                        const auto& join=session->joins[join_index];
+                        const auto encoded=DocumentCodec::EncodeJson(source.dump());
+                        if (!encoded.success) {result.error_msg=encoded.error;discard_session();return result;}
+                        query::DocumentView view(std::string_view(encoded.value).substr(DocumentCodec::kEnvelopeSize));
+                        const auto value=view.Get(query::CompiledFieldPath(join[1]));
+                        query::ValueType type=query::ValueType::Null;
+                        switch(value.type) {
+                            case query::DocumentValueType::String: type=query::ValueType::String;break;
+                            case query::DocumentValueType::Int64: type=query::ValueType::Int64;break;
+                            case query::DocumentValueType::Float64: type=query::ValueType::Float64;break;
+                            case query::DocumentValueType::Bool: type=query::ValueType::Bool;break;
+                            default: include=false;break;
+                        }
+                        if (!include || (join[2]=="_id" && type!=query::ValueType::String)) {include=false;break;}
+                        DBResult target;
+                        if (join[2]=="_id") {
+                            auto lookup_options=read_options_;
+                            lookup_options.snapshot=session->snapshot.get();
+                            std::string stored, decoded;
+                            auto status=txn_db_->Get(lookup_options,MakeDocKey(join[0],ScalarToString(value)),&stored);
+                            if (status.IsNotFound()) {include=false;break;}
+                            if (!status.ok()) {result.error_msg=status.ToString();return result;}
+                            if (stored.size()>max_bytes) {result.error_msg="JOIN record exceeds page byte budget";return result;}
+                            BudgetLease target_scratch(ExecutionBudget(),ResourceBudget::Buffer,stored.size()*8+4096);
+                            status=DecodeStoredDocument(stored,decoded);
+                            if (!status.ok()) {result.error_msg=status.ToString();return result;}
+                            target=DBResult::Ok("["+decoded+"]");
+                        } else {
+                            target=ExecuteQuery(join[0],query::Condition::Leaf(join[2],query::Op::EQ,
+                                ScalarToString(value),type),1,0,join_force_scan,session->snapshot.get(),true).result;
+                        }
+                        if (!target.success) {result.error_msg=target.error_msg;discard_session();return result;}
+                        if (target.data.size()>max_bytes) {result.error_msg="JOIN record exceeds page byte budget";discard_session();return result;}
+                        const auto found=nlohmann::ordered_json::parse(target.data,nullptr,false);
+                        if (!found.is_array()) {result.error_msg="Invalid JOIN target";discard_session();return result;}
+                        if (found.empty()) {include=false;break;}
+                        if (join_index==0) source["__joined__"]=found.front();
+                        if (session->joins.size()>1) source["__joins__"][join[0]]=found.front();
+                        if (source.dump().size()+2>max_bytes) {result.error_msg="JOIN record exceeds page byte budget";discard_session();return result;}
+                    }
+                    if (!include) continue;
+                    document=source.dump();
                 }
                 if (max_bytes && document.size()+2>max_bytes) {
                     result.error_msg="document exceeds page byte budget";
