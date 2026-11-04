@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,8 +14,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/lint": "^6.9.7",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
     "@tailwindcss/vite": "^4.3.1",
     "chart.js": "^4.5.1",
+    "codemirror": "^6.0.2",
     "cytoscape": "^3.33.4",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
