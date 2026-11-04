@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import json
-import threading
-from typing import Any
+import re
+import time
+from collections import deque
 
-from textual import events
+from textual.actions import SkipAction
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, ScrollableContainer, Vertical
 from textual.screen import Screen
 from textual.widgets import (
@@ -21,10 +22,17 @@ from textual.widgets import (
     Select,
     Sparkline,
     Static,
-    TabPane,
     TabbedContent,
-    TextArea,
+    TabPane,
 )
+
+from .api_client import AdminApiClient, AuthSession
+from .console_api import ConsoleApi, graph_query
+from .monitoring import MonitoringClient, MonitoringMetrics
+from .presentation import PrivateInput, SecretInput, json_preview, literal
+from .query_client import QueryClientError, strict_json
+from .query_workspace import QueryWorkspace
+from .tasks import ScreenTasks
 
 DEFAULT_APP_SCOPES = ["query:execute"]
 SCOPE_PRESETS: dict[str, list[str]] = {
@@ -62,24 +70,21 @@ SCOPE_PRESETS: dict[str, list[str]] = {
 # هر آیتم: (label نمایشی, algo_id که به API پاس می‌شود, نوع: lock | job)
 GRAPH_ALGORITHMS: list[tuple[str, str, str]] = [
     # ─ LockAlgorithms (سبک — <100ms) ─────────────────────────────────────
-    ("۱ · Get Friends",        "GetFriends",            "lock"),
-    ("۲ · Are Connected",      "AreConnected",          "lock"),
-    ("۳ · Shortest Path",      "ShortestPath",          "lock"),
-    ("۴ · Friend Suggestion",  "FriendSuggestion",      "lock"),
-    ("۶ · Most Connected",     "MostConnected",         "lock"),
-    ("۷ · Mutual Friends",     "MutualFriends",         "lock"),
-    ("۸ · Network Stats",      "NetworkStats",          "lock"),
+    ("۱ · Get Friends", "GetFriends", "lock"),
+    ("۲ · Are Connected", "AreConnected", "lock"),
+    ("۳ · Shortest Path", "ShortestPath", "lock"),
+    ("۴ · Friend Suggestion", "FriendSuggestion", "lock"),
+    ("۶ · Most Connected", "MostConnected", "lock"),
+    ("۷ · Mutual Friends", "MutualFriends", "lock"),
+    ("۸ · Network Stats", "NetworkStats", "lock"),
     # ─ JobAlgorithms (سنگین — background thread) ─────────────────────────
-    ("۵ · Components (DSU)",   "ConnectedComponents",   "job"),
-    ("۹ · All Distances",      "AllDistances",          "job"),
+    ("۵ · Components (DSU)", "ConnectedComponents", "job"),
+    ("۹ · All Distances", "AllDistances", "job"),
     # ─ Bonus ─────────────────────────────────────────────────────────────
-    ("B1 · Betweenness",       "BetweennessCentrality", "bonus"),
-    ("B2 · Community",         "CommunityDetection",    "bonus"),
-    ("B3 · Influence Max",     "InfluenceMaximization", "bonus"),
+    ("B1 · Betweenness", "BetweennessCentrality", "bonus"),
+    ("B2 · Community", "CommunityDetection", "bonus"),
+    ("B3 · Influence Max", "InfluenceMaximization", "bonus"),
 ]
-
-from .api_client import AdminApiClient, AuthSession, NexoraAdminClientError
-from .monitoring import MonitoringClient, MonitoringMetrics
 
 NEXORADB_BANNER = """\
 ███╗   ██╗███████╗██╗  ██╗ ██████╗ ██████╗  █████╗ ██████╗ ██████╗
@@ -95,7 +100,8 @@ NEXORADB_BANNER = """\
 # LoginScreen  (بدون تغییر — فقط CSS ریسپانسیو‌تر شد)
 # ══════════════════════════════════════════════════════════════════════════════
 
-class LoginScreen(Screen[AuthSession]):
+
+class LoginScreen(ScreenTasks, Screen[AuthSession]):
     CSS = """
     LoginScreen {
         align: center middle;
@@ -153,6 +159,8 @@ class LoginScreen(Screen[AuthSession]):
     def __init__(self, client: AdminApiClient) -> None:
         super().__init__()
         self.client = client
+        self._init_tasks()
+        self.async_api = None
 
     def compose(self) -> ComposeResult:
         with Container(id="auth-card"):
@@ -161,37 +169,58 @@ class LoginScreen(Screen[AuthSession]):
             yield Static("Login or bootstrap the first root admin account.", classes="muted")
             with TabbedContent(id="auth-tabs"):
                 with TabPane("Login", id="login-tab"):
-                    yield Input(placeholder="Username", id="login-username")
-                    yield Input(placeholder="Password", password=True, id="login-password")
+                    yield Input(placeholder="Username", id="login-username", max_length=254)
+                    yield PrivateInput(
+                        placeholder="Password", password=True, id="login-password", max_length=1024
+                    )
                     yield Button("Login (ctrl+j)", id="login-button", variant="primary")
                 with TabPane("Register root", id="register-tab"):
-                    yield Input(placeholder="First name", id="register-first-name")
-                    yield Input(placeholder="Last name", id="register-last-name")
-                    yield Input(placeholder="Email", id="register-email")
-                    yield Input(placeholder="Password", password=True, id="register-password")
-                    yield Button("Create root admin (ctrl+j)", id="register-button", variant="success")
+                    yield Input(placeholder="First name", id="register-first-name", max_length=128)
+                    yield Input(placeholder="Last name", id="register-last-name", max_length=128)
+                    yield Input(placeholder="Email", id="register-email", max_length=254)
+                    yield PrivateInput(
+                        placeholder="Password",
+                        password=True,
+                        id="register-password",
+                        max_length=1024,
+                    )
+                    yield Button(
+                        "Create root admin (ctrl+j)", id="register-button", variant="success"
+                    )
             yield Static("", id="auth-error")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#login-username", Input).focus()
-        self.run_worker(self._load_setup_state, thread=True)
+        self.async_api = ConsoleApi(self.client.base_url)
+        self._launch("setup", self._load_setup_state)
+
+    async def on_unmount(self):
+        for field in ("login-password", "register-password"):
+            for widget in self.query("#" + field):
+                widget.value = ""
+        await self._close_tasks()
+        if self.async_api:
+            await self.async_api.close()
+
+    def _busy_changed(self, name, busy):
+        if name == "auth":
+            for identifier in ("login-button", "register-button"):
+                self.query_one("#" + identifier, Button).disabled = busy
+
+    def _task_error(self, name, error):
+        self._set_error(str(error))
 
     def action_submit(self) -> None:
-        active = self.query_one("#auth-tabs", TabbedContent).active
-        if active == "register-tab":
+        if self.query_one("#auth-tabs", TabbedContent).active == "register-tab":
             self._register()
         else:
             self._login()
 
-    def _load_setup_state(self) -> None:
-        try:
-            state = self.client.setup_state()
-        except NexoraAdminClientError as exc:
-            self.app.call_from_thread(self._set_error, f"Could not reach admin API: {exc}")
-            return
-        if state.get("needsSetup"):
-            self.app.call_from_thread(self._activate_register)
+    async def _load_setup_state(self):
+        state = await self.async_api.setup_state()
+        if state.get("needsSetup") and not self._closing:
+            self._activate_register()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "login-button":
@@ -200,56 +229,52 @@ class LoginScreen(Screen[AuthSession]):
             self._register()
 
     def _login(self) -> None:
-        username = self.query_one("#login-username", Input).value
-        password = self.query_one("#login-password", Input).value
-        self._set_error("Signing in...")
-        self.run_worker(lambda: self._login_worker(username, password), thread=True)
-
-    def _login_worker(self, username: str, password: str) -> None:
-        try:
-            session = self.client.login(username, password)
-        except NexoraAdminClientError as exc:
-            self.app.call_from_thread(self._set_error, str(exc))
+        if "auth" in self._tasks or self._closing or self._leaving:
             return
-        self.app.call_from_thread(self.dismiss, session)
+        username = self.query_one("#login-username", Input).value.strip()
+        password = self.query_one("#login-password", Input).value
+        self.query_one("#login-password", Input).value = ""
+        self._set_error("Signing in...")
+        self._launch("auth", lambda: self._login_worker(username, password))
+
+    async def _login_worker(self, username, password):
+        session = await self.async_api.login(username, password)
+        if not self._closing and not self._leaving:
+            self._leaving = True
+            self.dismiss(session)
 
     def _register(self) -> None:
-        first_name = self.query_one("#register-first-name", Input).value
-        last_name  = self.query_one("#register-last-name",  Input).value
-        email      = self.query_one("#register-email",      Input).value
-        password   = self.query_one("#register-password",   Input).value
-        self._set_error("Creating root admin...")
-        self.run_worker(
-            lambda: self._register_worker(first_name, last_name, email, password),
-            thread=True,
-        )
-
-    def _register_worker(
-        self, first_name: str, last_name: str, email: str, password: str
-    ) -> None:
-        try:
-            self.client.register(
-                first_name=first_name, last_name=last_name,
-                email=email, password=password,
-            )
-            session = self.client.login("root", password)
-        except NexoraAdminClientError as exc:
-            self.app.call_from_thread(self._set_error, str(exc))
+        if "auth" in self._tasks or self._closing or self._leaving:
             return
-        self.app.call_from_thread(self.dismiss, session)
+        values = [
+            self.query_one("#register-" + name, Input).value
+            for name in ("first-name", "last-name", "email", "password")
+        ]
+        self.query_one("#register-password", Input).value = ""
+        self._set_error("Creating root admin...")
+        self._launch("auth", lambda: self._register_worker(*values))
 
-    def _set_error(self, message: str) -> None:
-        self.query_one("#auth-error", Static).update(message)
+    async def _register_worker(self, first_name, last_name, email, password):
+        await self.async_api.register(first_name, last_name, email, password)
+        try:
+            session = await self.async_api.login("root", password)
+        except QueryClientError as exc:
+            raise QueryClientError(
+                "Account creation completed; sign in instead of registering again"
+            ) from exc
+        if not self._closing and not self._leaving:
+            self._leaving = True
+            self.dismiss(session)
 
-    def _activate_register(self) -> None:
+    def _set_error(self, message):
+        if not self._closing and not self._leaving:
+            self.query_one("#auth-error", Static).update(literal(message))
+
+    def _activate_register(self):
         self.query_one("#auth-tabs", TabbedContent).active = "register-tab"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MainScreen
-# ══════════════════════════════════════════════════════════════════════════════
-
-class MainScreen(Screen[None]):
+class MainScreen(ScreenTasks, Screen[None]):
     CSS = """
     /* ── کلی ──────────────────────────────────────────────────────────── */
     MainScreen {
@@ -316,41 +341,6 @@ class MainScreen(Screen[None]):
 
     #monitor-scroll {
         height: 1fr;
-    }
-
-    /* ── Query ─────────────────────────────────────────────────────────── */
-    #query-editor {
-        height: 8;
-        border: tall $primary;
-        margin-bottom: 1;
-    }
-
-    #query-actions {
-        height: 3;
-        margin-bottom: 1;
-    }
-
-    #query-actions Button {
-        margin-right: 1;
-        min-width: 18;
-        max-width: 24;
-    }
-
-    #query-results {
-        height: 1fr;
-    }
-
-    #query-table {
-        width: 1fr;
-        height: 100%;
-        border: round $primary;
-        margin-right: 1;
-    }
-
-    #query-output {
-        width: 1fr;
-        height: 100%;
-        border: round $primary;
     }
 
     /* ── App Tokens ────────────────────────────────────────────────────── */
@@ -529,16 +519,6 @@ class MainScreen(Screen[None]):
             layout: vertical;
     }
 
-    .medium #query-results {
-            layout: vertical;
-    }
-
-    .medium #query-table, .medium #query-output {
-            width: 100%;
-            height: 1fr;
-            margin: 0;
-    }
-
     .medium #metrics-grid {
             grid-size: 3;
             grid-columns: 1fr 1fr 1fr;
@@ -587,23 +567,37 @@ class MainScreen(Screen[None]):
     """
 
     BINDINGS = [
-        ("f1", "show_tab('monitor-tab')",  "Monitor"),
-        ("f2", "show_tab('query-tab')",    "Query"),
-        ("f3", "show_tab('tokens-tab')",   "Tokens"),
+        ("f1", "show_tab('monitor-tab')", "Monitor"),
+        ("f2", "show_tab('query-tab')", "Query"),
+        ("f3", "show_tab('tokens-tab')", "Tokens"),
         ("f4", "show_tab('algorithms-tab')", "Graph algorithms"),
-        ("r",  "refresh_metrics",          "Refresh"),
-        ("ctrl+enter", "run_or_create",    "Run/Create"),
-        ("ctrl+k",     "clear_active_output", "Clear"),
-        ("ctrl+l",     "logout",           "Logout"),
-        ("q",          "app.quit",         "Quit"),
+        ("f5", "run_or_create", "Run/Create"),
+        ("f6", "stop_query", "Stop query"),
+        ("f7", "next_query_page", "Next cursor"),
+        ("r", "refresh_metrics", "Refresh"),
+        ("ctrl+enter", "run_or_create", "Run/Create"),
+        ("ctrl+k", "clear_active_output", "Clear"),
+        ("ctrl+l", "logout", "Logout"),
+        ("q", "app.quit", "Quit"),
     ]
 
     def __init__(self, client: AdminApiClient, session: AuthSession) -> None:
         super().__init__()
         self.client = client
+        self._init_tasks()
+        self.async_api = None
         self.session = session
         self.metrics = MonitoringMetrics()
-        self.rps_samples: list[int] = []
+        self.rps_samples = deque(maxlen=60)
+        self._pending_metrics = None
+        self._pending_status = None
+        self._last_metrics_at = 0
+        self._last_sample_at = 0
+        self._cards = {}
+        self._connection_rows = {}
+        self._issued_token = None
+        self._hide_timer = None
+        self._leaving = False
         self.monitor: MonitoringClient | None = None
         self.available_scopes: list[str] = list(DEFAULT_APP_SCOPES)
         self._scope_widgets: dict[str, Checkbox] = {}
@@ -636,40 +630,36 @@ class MainScreen(Screen[None]):
         with ScrollableContainer(id="monitor-scroll"):
             with Grid(id="metrics-grid"):
                 yield Static("Database\nwaiting", id="database-health", classes="card metric")
-                yield Static("Traffic\n0 req/s",  id="rps-value",       classes="card metric")
-                yield Static("Active apps\n0",    id="active-apps",     classes="card metric")
-                yield Static("RAM\nwaiting",      id="ram-value",       classes="card metric")
-                yield Static("SSD\nwaiting",      id="ssd-value",       classes="card metric")
+                yield Static("Traffic\n0 req/s", id="rps-value", classes="card metric")
+                yield Static("Connections\n0", id="active-apps", classes="card metric")
+                yield Static("RAM\nwaiting", id="ram-value", classes="card metric")
+                yield Static("SSD\nwaiting", id="ssd-value", classes="card metric")
                 yield Static("Collections\nwaiting", id="collection-value", classes="card metric")
             yield Static("Traffic (last 60s)", classes="title")
             yield Sparkline([], id="rps-chart", classes="card")
             yield Static("Active connections (last 10s)", classes="title")
             table = DataTable(id="connections-table")
-            table.add_columns("id", "kind", "user/app", "address")
+            for label, width in (("id", 24), ("kind", 12), ("user/app", 24), ("address", 32)):
+                table.add_column(label, key=label, width=width)
             yield table
 
     # ── Query layout ──────────────────────────────────────────────────────
 
     def _query_layout(self) -> ComposeResult:
-        with Vertical():
-            yield Static("NexoraQL query editor", classes="title")
-            yield TextArea("SHOW COLLECTIONS;", id="query-editor", language="sql")
-            with Horizontal(id="query-actions"):
-                yield Button("▶ Run (ctrl+enter)", id="run-query", variant="primary")
-                yield Button("⌫ Clear (ctrl+k)",  id="clear-query-output")
-            with Horizontal(id="query-results"):
-                yield DataTable(id="query-table")
-                yield RichLog(id="query-output", highlight=True, markup=True, wrap=True)
-
-    # ── Tokens layout ─────────────────────────────────────────────────────
+        yield QueryWorkspace(self.client.base_url, self.session.access_token)
 
     def _tokens_layout(self) -> ComposeResult:
         with ScrollableContainer(id="tokens-scroll"):
             yield Static("Create a token for an external application", classes="title")
             with Vertical(id="token-form"):
-                yield Input(placeholder="app id, e.g. billing-service", id="app-id")
-                yield Input(placeholder="app display name",              id="app-name")
-                yield Input(placeholder="expires in seconds (empty = no expiry)", id="app-expiry")
+                yield Input(placeholder="app id, e.g. billing-service", id="app-id", max_length=128)
+                yield Input(placeholder="app display name", id="app-name", max_length=256)
+                yield Input(
+                    value="86400",
+                    placeholder="expires in seconds (empty = no expiry)",
+                    id="app-expiry",
+                    max_length=12,
+                )
             yield Static("Permission presets", classes="title")
             with Horizontal(id="scope-presets"):
                 for preset_name in SCOPE_PRESETS:
@@ -680,7 +670,19 @@ class MainScreen(Screen[None]):
                 for scope in DEFAULT_APP_SCOPES:
                     yield Checkbox(scope, id=f"scope-{scope.replace(':', '-')}", value=True)
             yield Button("Create app token (ctrl+enter)", id="create-token", variant="success")
-            yield RichLog(id="token-output", highlight=True, markup=True)
+            yield SecretInput(
+                "",
+                password=True,
+                id="issued-token",
+                max_length=16384,
+                placeholder="New token (hidden until Reveal)",
+            )
+            with Horizontal():
+                yield Button("Reveal token (30s)", id="reveal-token", disabled=True)
+                yield Button("Clear token", id="clear-token", disabled=True)
+            yield RichLog(
+                id="token-output", highlight=False, markup=False, max_lines=200, wrap=True
+            )
 
     # ── Admin Dashboard layout ────────────────────────────────────────────
 
@@ -699,6 +701,7 @@ class MainScreen(Screen[None]):
                 yield Input(
                     placeholder='e.g. ["u1","u2"]',
                     id="graph-param-input",
+                    max_length=4096,
                 )
 
             # ── legend رنگ‌ها ──────────────────────────────────────────
@@ -720,7 +723,7 @@ class MainScreen(Screen[None]):
             # ── خروجی الگوریتم ─────────────────────────────────────────
             yield Static("Output", classes="title")
             yield Static("", id="algo-status")
-            yield RichLog(id="algo-output", highlight=True, markup=True, wrap=True)
+            yield RichLog(id="algo-output", highlight=False, markup=False, max_lines=200, wrap=True)
 
     # ── on_mount ──────────────────────────────────────────────────────────
 
@@ -728,333 +731,390 @@ class MainScreen(Screen[None]):
         self._apply_responsive_classes(self.size.width)
         for scope in DEFAULT_APP_SCOPES:
             self._scope_widgets[scope] = self.query_one(
-                f"#scope-{scope.replace(':', '-')}", Checkbox,
+                "#scope-" + scope.replace(":", "-"), Checkbox
             )
+        self.async_api = ConsoleApi(self.client.base_url, self.session.access_token)
         self._start_monitoring()
-        self.run_worker(self._load_app_scopes,   thread=True)
-        self.run_worker(self._load_graph_list,   thread=True)
+        self._launch("scopes", self._load_app_scopes)
+        self._launch("graphs", self._load_graph_list)
+        self.set_interval(0.25, self._flush_metrics)
 
-    def on_resize(self, event: events.Resize) -> None:
+    def on_resize(self, event):
         self._apply_responsive_classes(event.size.width)
 
-    def _apply_responsive_classes(self, width: int) -> None:
+    def _apply_responsive_classes(self, width):
         self.set_class(width < 100, "medium")
         self.set_class(width < 65, "narrow")
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self):
+        self._clear_token()
+        await self._close_tasks()
         if self.monitor:
-            self.monitor.disconnect()
+            await self.monitor.disconnect()
+        if self.async_api:
+            await self.async_api.close()
+        self._issued_token = None
+        self.session.access_token = ""
+        self._pending_metrics = None
+        self._pending_status = None
+        self.rps_samples.clear()
+        for widget in self.query("#issued-token"):
+            widget.value = ""
 
-    # ── monitoring ────────────────────────────────────────────────────────
+    def _busy_changed(self, name, busy):
+        if name == "token":
+            self.query_one("#create-token", Button).disabled = busy
+        elif name == "algorithm":
+            for _, identifier, _ in GRAPH_ALGORITHMS:
+                self.query_one("#algo-" + identifier, Button).disabled = busy
 
-    def _start_monitoring(self) -> None:
-        self.monitor = MonitoringClient(
-            base_url=self.client.base_url,
-            token=self.session.access_token,
-            on_metrics=lambda m: self.app.call_from_thread(self._update_metrics, m),
-            on_status=lambda s: self.app.call_from_thread(self._set_monitor_status, s),
-        )
-        threading.Thread(target=self._connect_monitoring, daemon=True).start()
-        self.set_interval(5.0, self._heartbeat)
-
-    def _connect_monitoring(self) -> None:
-        if not self.monitor:
+    def _task_error(self, name, error):
+        if isinstance(error, QueryClientError) and error.status == 401:
+            self.action_logout()
             return
-        try:
-            self.monitor.connect()
-        except Exception as exc:  # noqa: BLE001
-            self.app.call_from_thread(self._set_monitor_status, f"monitor error: {exc}")
-
-    def _heartbeat(self) -> None:
-        if self.monitor:
-            self.monitor.heartbeat()
-
-    def action_refresh_metrics(self) -> None:
-        if self.monitor:
-            self.monitor.refresh()
-
-    # ── graph list ────────────────────────────────────────────────────────
-
-    def _load_graph_list(self) -> None:
-        """لیست گراف‌ها را از API می‌گیرد و Select را پر می‌کند."""
-        try:
-            graphs: list[str] = self.client.list_graphs(self.session.access_token)
-        except NexoraAdminClientError as exc:
-            # اگر API هنوز endpoint ندارد، fallback خالی
-            graphs = []
-            self.app.call_from_thread(
-                self._write_algo_log, f"[yellow]Could not load graph list: {exc}[/yellow]"
+        if name == "monitor":
+            self._set_monitor_status("Monitoring unavailable")
+        elif name in {"algorithm", "graphs"}:
+            self._write_algo_log(str(error))
+            self.query_one("#algo-status", Static).update(
+                literal("Algorithm failed or unavailable")
             )
-        self._available_graphs = graphs
-        self.app.call_from_thread(self._populate_graph_select, graphs)
-
-    def _populate_graph_select(self, graphs: list[str]) -> None:
-        sel = self.query_one("#graph-select", Select)
-        if graphs:
-            sel.set_options([(g, g) for g in graphs])
         else:
-            sel.set_options([("(no graphs found)", "")])
+            self._write_token_error(str(error))
 
-    # ── actions ───────────────────────────────────────────────────────────
+    def _start_monitoring(self):
+        self.monitor = MonitoringClient(
+            self.client.base_url,
+            self.session.access_token,
+            on_metrics=self._queue_metrics,
+            on_status=self._queue_status,
+            on_auth_error=self.action_logout,
+        )
+        self._launch("monitor", self.monitor.connect)
 
-    def action_logout(self) -> None:
-        self.dismiss(None)
+    def _queue_metrics(self, metrics):
+        if not self._closing and not self._leaving:
+            self._pending_metrics = metrics
+            self._last_metrics_at = time.monotonic()
 
-    def action_show_tab(self, tab_id: str) -> None:
+    def _queue_status(self, status):
+        if not self._closing and not self._leaving:
+            self._pending_status = status
+
+    def _flush_metrics(self):
+        if self._closing or self.query_one("#main-tabs", TabbedContent).active != "monitor-tab":
+            return
+        metrics, self._pending_metrics = self._pending_metrics, None
+        if metrics is not None:
+            self._update_metrics(metrics)
+        if self._pending_status:
+            self._set_monitor_status(self._pending_status)
+            self._pending_status = None
+        if self._last_metrics_at and time.monotonic() - self._last_metrics_at > 15:
+            self._set_monitor_status("Monitoring stale; current health unknown")
+
+    def action_refresh_metrics(self):
+        if self.monitor:
+            self._launch("refresh", self.monitor.refresh)
+
+    async def _load_graph_list(self):
+        graphs = await self.async_api.graphs()
+        if not self._closing and not self._leaving:
+            self._available_graphs = graphs
+            self._populate_graph_select(graphs)
+
+    def _populate_graph_select(self, graphs):
+        self.query_one("#graph-select", Select).set_options(
+            [(literal(g, 128), g) for g in graphs] or [("(no graphs found)", "")]
+        )
+
+    def action_logout(self):
+        if not self._leaving and not self._closing:
+            self._leaving = True
+            self._clear_token()
+            for workspace in self.query(QueryWorkspace):
+                workspace.disabled = True
+                workspace.action_stop_query()
+            self.dismiss(None)
+
+    def on_query_workspace_session_expired(self, event):
+        event.stop()
+        self.action_logout()
+
+    def action_show_tab(self, tab_id):
+        self.set_focus(None)
         self.query_one("#main-tabs", TabbedContent).active = tab_id
+        if tab_id != "tokens-tab":
+            self._hide_token()
+        target = {
+            "monitor-tab": "#monitor-scroll",
+            "query-tab": "#query-editor",
+            "tokens-tab": "#app-id",
+            "algorithms-tab": "#graph-select",
+        }.get(tab_id)
+        if target:
+            self.query_one(target).focus()
 
-    def action_run_or_create(self) -> None:
+    def on_tabbed_content_tab_activated(self, event):
+        if event.tabbed_content.id == "main-tabs" and event.tab is not event.tabbed_content.get_tab(
+            "tokens-tab"
+        ):
+            self._hide_token()
+
+    def action_run_or_create(self):
         active = self.query_one("#main-tabs", TabbedContent).active
         if active == "query-tab":
             self._run_query()
         elif active == "tokens-tab":
             self._create_app_token()
 
-    def action_clear_active_output(self) -> None:
+    def action_stop_query(self):
+        if self.query_one("#main-tabs", TabbedContent).active == "query-tab":
+            self.query_one(QueryWorkspace).action_stop_query()
+
+    def action_next_query_page(self):
+        if self.query_one("#main-tabs", TabbedContent).active == "query-tab":
+            self.query_one(QueryWorkspace).action_next_cursor()
+
+    def action_clear_active_output(self):
         active = self.query_one("#main-tabs", TabbedContent).active
         if active == "query-tab":
-            self.query_one("#query-output", RichLog).clear()
-            self.query_one("#query-table", DataTable).clear(columns=True)
+            self.query_one(QueryWorkspace).clear_output()
         elif active == "tokens-tab":
-            self.query_one("#token-output", RichLog).clear()
+            self._clear_token()
         elif active == "algorithms-tab":
             self.query_one("#algo-output", RichLog).clear()
-            self.query_one("#algo-status", Static).update("")
 
-    # ── button handler ────────────────────────────────────────────────────
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    def on_button_pressed(self, event):
         bid = event.button.id or ""
-
-        if bid == "run-query":
-            self._run_query()
-        elif bid == "clear-query-output":
-            self.query_one("#query-output", RichLog).clear()
-            self.query_one("#query-table", DataTable).clear(columns=True)
-        elif bid == "create-token":
+        if bid == "create-token":
             self._create_app_token()
+        elif bid == "reveal-token":
+            self._reveal_token()
+        elif bid == "clear-token":
+            self._clear_token()
         elif bid.startswith("preset-"):
-            safe_id = bid.removeprefix("preset-")
-            for preset_name in SCOPE_PRESETS:
-                if preset_name.lower().replace(" ", "-").replace("/", "-") == safe_id:
-                    self._apply_scope_preset(preset_name)
-                    break
+            for name in SCOPE_PRESETS:
+                if name.lower().replace(" ", "-").replace("/", "-") == bid.removeprefix("preset-"):
+                    self._apply_scope_preset(name)
         elif bid.startswith("algo-"):
-            algo_id = bid.removeprefix("algo-")
-            self._run_algorithm(algo_id)
+            self._run_algorithm(bid.removeprefix("algo-"))
 
-    # ── algorithm runner ──────────────────────────────────────────────────
-
-    def _run_algorithm(self, algo_id: str) -> None:
-        """الگوریتم انتخاب‌شده را روی گراف انتخاب‌شده اجرا می‌کند."""
-        # ── گراف ──
-        sel = self.query_one("#graph-select", Select)
-        graph_name = str(sel.value) if sel.value and sel.value != Select.BLANK else ""
-
-        # ── پارامترها ──
-        raw_params = self.query_one("#graph-param-input", Input).value.strip()
-        params: list[str] = []
-        if raw_params:
-            try:
-                parsed = json.loads(raw_params)
-                if isinstance(parsed, list):
-                    params = [str(x) for x in parsed]
-                else:
-                    params = [str(parsed)]
-            except json.JSONDecodeError:
-                # پارامترهای comma-separated هم قبول می‌کنیم
-                params = [p.strip() for p in raw_params.split(",") if p.strip()]
-
-        status_msg = (
-            f"[yellow]Running [bold]{algo_id}[/bold]"
-            f"{' on ' + graph_name if graph_name else ''}…[/yellow]"
-        )
-        self._write_algo_log(status_msg)
-        self.query_one("#algo-status", Static).update(
-            f"⏳  {algo_id}" + (f" @ {graph_name}" if graph_name else "")
-        )
-
-        self.run_worker(
-            lambda: self._algo_worker(algo_id, graph_name, params),
-            thread=True,
-        )
-
-    def _algo_worker(
-        self, algo_id: str, graph_name: str, params: list[str]
-    ) -> None:
-        try:
-            result = self.client.run_graph_algorithm(
-                token=self.session.access_token,
-                algo_id=algo_id,
-                graph_name=graph_name,
-                params=params,
-            )
-        except NexoraAdminClientError as exc:
-            self.app.call_from_thread(
-                self._write_algo_log, f"[red]Error: {exc}[/red]"
-            )
-            self.app.call_from_thread(
-                self.query_one("#algo-status", Static).update,
-                f"❌  {algo_id} failed",
-            )
+    def _run_algorithm(self, algo_id):
+        if "algorithm" in self._tasks or self._closing:
             return
-
-        self.app.call_from_thread(self._render_algo_result, algo_id, result)
-
-    def _render_algo_result(self, algo_id: str, result: dict[str, Any]) -> None:
-        log = self.query_one("#algo-output", RichLog)
-        elapsed = result.get("elapsedMs", result.get("elapsed_ms", "?"))
-        log.write(f"[green]✔ {algo_id} — {elapsed}ms[/green]")
-        log.write(json.dumps(result.get("result", result), indent=2, ensure_ascii=False))
-        self.query_one("#algo-status", Static).update(f"✔  {algo_id} — {elapsed}ms")
-
-    def _write_algo_log(self, message: str) -> None:
-        self.query_one("#algo-output", RichLog).write(message)
-
-    # ── query ─────────────────────────────────────────────────────────────
-
-    def _run_query(self) -> None:
-        query = self.query_one("#query-editor", TextArea).text
-        self.query_one("#query-output", RichLog).write("[yellow]Running query...[/yellow]")
-        self.run_worker(lambda: self._query_worker(query), thread=True)
-
-    def _query_worker(self, query: str) -> None:
+        value = self.query_one("#graph-select", Select).value
+        graph = value if isinstance(value, str) else ""
         try:
-            result = self.client.execute_query(self.session.access_token, query)
-        except NexoraAdminClientError as exc:
-            self.app.call_from_thread(self._write_query_error, str(exc))
+            raw = self.query_one("#graph-param-input", Input).value.strip()
+            params = strict_json(raw) if raw else []
+            graph_query(algo_id, graph, params)
+        except (ValueError, RecursionError) as exc:
+            self._write_algo_log(str(exc))
             return
-        self.app.call_from_thread(self._render_query_result, result)
+        self._write_algo_log("Running " + algo_id + " on " + graph)
+        self.query_one("#algo-status", Static).update(literal("Running " + algo_id))
+        self._launch("algorithm", lambda: self._algo_worker(algo_id, graph, params))
 
-    # ── scopes ────────────────────────────────────────────────────────────
+    async def _algo_worker(self, algo, graph, params):
+        result = await self.async_api.algorithm(algo, graph, params)
+        if not self._closing and not self._leaving:
+            self._render_algo_result(algo, result)
 
-    def _load_app_scopes(self) -> None:
-        try:
-            scopes = self.client.list_app_scopes(self.session.access_token)
-        except NexoraAdminClientError as exc:
-            self.app.call_from_thread(self._write_token_error, str(exc))
-            return
-        if scopes:
-            self.app.call_from_thread(self._schedule_render_scope_checkboxes, scopes)
+    def _render_algo_result(self, algo, result):
+        self._write_algo_log(f"Completed {algo} in {result.get('executionTimeMs', '?')} ms")
+        self.query_one("#algo-output", RichLog).write(json_preview(result))
+        self.query_one("#algo-status", Static).update(literal("Completed " + algo))
 
-    def _schedule_render_scope_checkboxes(self, scopes: list[str]) -> None:
-        self.run_worker(self._render_scope_checkboxes(scopes))
+    def _write_algo_log(self, message):
+        if not self._closing and not self._leaving:
+            self.query_one("#algo-output", RichLog).write(literal(message))
 
-    async def _render_scope_checkboxes(self, scopes: list[str]) -> None:
+    def _run_query(self):
+        self.query_one(QueryWorkspace).action_run_query()
+
+    async def _load_app_scopes(self):
+        scopes = await self.async_api.scopes()
+        if scopes and not self._closing:
+            await self._render_scope_checkboxes(scopes)
+
+    async def _render_scope_checkboxes(self, scopes):
         self.available_scopes = scopes
         self._scope_widgets = {}
-        scope_list = self.query_one("#scope-list", Vertical)
-        await scope_list.remove_children()
+        container = self.query_one("#scope-list", Vertical)
+        await container.remove_children()
+        if self._closing:
+            return
+        checkboxes = []
         for scope in scopes:
             checkbox = Checkbox(
-                scope,
-                id=f"scope-{scope.replace(':', '-')}",
+                literal(scope),
+                id="scope-" + scope.replace(":", "-"),
                 value=scope in DEFAULT_APP_SCOPES,
             )
             self._scope_widgets[scope] = checkbox
-            await scope_list.mount(checkbox)
+            checkboxes.append(checkbox)
+        await container.mount(*checkboxes)
 
-    def _selected_scopes(self) -> list[str]:
+    def _selected_scopes(self):
         return [scope for scope, cb in self._scope_widgets.items() if cb.value]
 
-    def _apply_scope_preset(self, preset_name: str) -> None:
-        preset = set(SCOPE_PRESETS.get(preset_name, []))
+    def _apply_scope_preset(self, name):
         for scope, cb in self._scope_widgets.items():
-            cb.value = scope in preset
+            cb.value = scope in SCOPE_PRESETS.get(name, [])
 
-    # ── token ─────────────────────────────────────────────────────────────
-
-    def _create_app_token(self) -> None:
-        app_id    = self.query_one("#app-id",    Input).value.strip()
-        app_name  = self.query_one("#app-name",  Input).value.strip() or None
-        expiry_raw= self.query_one("#app-expiry", Input).value.strip()
-        scopes    = self._selected_scopes()
+    def _create_app_token(self):
+        if "token" in self._tasks or self._closing:
+            return
+        identifier = self.query_one("#app-id", Input).value.strip()
+        name = self.query_one("#app-name", Input).value.strip() or None
+        raw = self.query_one("#app-expiry", Input).value.strip()
+        scopes = self._selected_scopes()
         if not scopes:
-            self._write_token_error("Select at least one permission scope.")
+            self._write_token_error("Select at least one permission scope")
             return
         try:
-            expiry = int(expiry_raw) if expiry_raw else None
+            expiry = int(raw) if raw else None
+            if expiry is not None and not 1 <= expiry <= 31536000:
+                raise ValueError()
         except ValueError:
-            self._write_token_error("Expiry must be a number of seconds.")
+            self._write_token_error("Expiry must be 1..31536000 seconds, or empty")
             return
-        self.run_worker(
-            lambda: self._token_worker(app_id, app_name, expiry, scopes),
-            thread=True,
-        )
+        self._clear_token()
+        self._launch("token", lambda: self._token_worker(identifier, name, expiry, scopes))
 
-    def _token_worker(
-        self, app_id: str, app_name: str | None, expiry: int | None, scopes: list[str]
-    ) -> None:
-        try:
-            token = self.client.create_app_token(
-                self.session.access_token,
-                app_id=app_id,
-                app_name=app_name,
-                expires_in_seconds=expiry,
-                scopes=scopes,
+    async def _token_worker(self, identifier, name, expiry, scopes):
+        result = await self.async_api.create_token(identifier, name, expiry, scopes)
+        if not self._closing and not self._leaving:
+            self._write_token(result)
+
+    def _write_token_error(self, message):
+        if not self._closing and not self._leaving:
+            self.query_one("#token-output", RichLog).write(literal(message, style="red"))
+
+    def _write_token(self, token):
+        secret = token.get("token")
+        if not isinstance(secret, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,16384}", secret):
+            raise QueryClientError("Invalid token response; token was not displayed")
+        self._issued_token = secret
+        field = self.query_one("#issued-token", Input)
+        field.value, field.password = secret, True
+        self.query_one("#reveal-token", Button).disabled = False
+        self.query_one("#clear-token", Button).disabled = False
+        metadata = {
+            key: token[key]
+            for key in ("tokenId", "appId", "appName", "expiresAt", "scopes")
+            if key in token
+        }
+        self.query_one("#token-output", RichLog).clear()
+        self.query_one("#token-output", RichLog).write(json_preview(metadata))
+
+    def _reveal_token(self):
+        if self._issued_token:
+            self.query_one("#issued-token", Input).password = False
+            if self._hide_timer:
+                self._hide_timer.stop()
+            self._hide_timer = self.set_timer(30, self._hide_token)
+
+    def _hide_token(self):
+        if self._hide_timer:
+            self._hide_timer.stop()
+            self._hide_timer = None
+        for field in self.query("#issued-token"):
+            field.password = True
+
+    def _clear_token(self):
+        self._hide_token()
+        self._issued_token = None
+        for field in self.query("#issued-token"):
+            field.value = ""
+        for identifier in ("reveal-token", "clear-token"):
+            for button in self.query("#" + identifier):
+                button.disabled = True
+        for log in self.query("#token-output"):
+            log.clear()
+
+    def _card(self, identifier, text):
+        if self._cards.get(identifier) != text:
+            self.query_one("#" + identifier, Static).update(literal(text, 512))
+            self._cards[identifier] = text
+
+    def _update_metrics(self, metrics):
+        self.metrics = metrics
+        self._card(
+            "database-health",
+            "Database: " + ("healthy" if metrics.database_healthy else "unhealthy"),
+        )
+        if metrics.source != "live":
+            self._card(
+                "database-health",
+                "HTTP reachable; database health unknown"
+                if metrics.database_healthy
+                else "HTTP unavailable; database health unknown",
             )
-        except NexoraAdminClientError as exc:
-            self.app.call_from_thread(self._write_token_error, str(exc))
+            self.rps_samples.clear()
+            self.query_one("#rps-chart", Sparkline).data = []
+            for identifier in (
+                "rps-value",
+                "active-apps",
+                "ram-value",
+                "ssd-value",
+                "collection-value",
+            ):
+                self._card(identifier, "Unavailable (health-only fallback)")
+            self._sync_connections([])
             return
-        self.app.call_from_thread(self._write_token, token)
-
-    # ── render helpers ────────────────────────────────────────────────────
-
-    def _render_query_result(self, result: dict[str, Any]) -> None:
-        output = self.query_one("#query-output", RichLog)
-        table  = self.query_one("#query-table",  DataTable)
-        table.clear(columns=True)
-        columns = [str(c) for c in result.get("columns", [])]
-        rows    = result.get("rows") if isinstance(result.get("rows"), list) else []
-        if columns:
-            table.add_columns(*columns)
-            for row in rows:
-                record = row if isinstance(row, dict) else {}
-                table.add_row(*(str(record.get(col, "")) for col in columns))
-        output.write(
-            f"[green]Executed in {result.get('executionTimeMs', 0)}ms · {len(rows)} rows[/green]"
+        now = time.monotonic()
+        if now - self._last_sample_at > 2:
+            self.rps_samples.clear()
+        if now - self._last_sample_at >= 1:
+            self.rps_samples.append(metrics.requests_per_second)
+            self._last_sample_at = now
+            self.query_one("#rps-chart", Sparkline).data = list(self.rps_samples)
+        self._card("rps-value", f"Traffic: {metrics.requests_per_second} req/s")
+        self._card(
+            "active-apps",
+            f"Connections: {len(metrics.active_connections)} shown / "
+            f"{metrics.connection_count or len(metrics.active_connections)} total",
         )
-        output.write(json.dumps(result.get("raw"), indent=2, ensure_ascii=False))
+        self._card("ram-value", "RAM: " + _format_bytes(metrics.ram_usage_bytes))
+        self._card("ssd-value", "SSD: " + _format_bytes(metrics.disk_usage_bytes))
+        self._card("collection-value", f"Collections: {metrics.collection_count}")
+        self._sync_connections(metrics.active_connections)
 
-    def _write_query_error(self, message: str) -> None:
-        self.query_one("#query-output", RichLog).write(f"[red]{message}[/red]")
-
-    def _write_token_error(self, message: str) -> None:
-        self.query_one("#token-output", RichLog).write(f"[red]{message}[/red]")
-
-    def _write_token(self, token: dict[str, Any]) -> None:
-        self.query_one("#token-output", RichLog).write(json.dumps(token, indent=2))
-
-    def _update_metrics(self, metrics: MonitoringMetrics) -> None:
-        self.metrics    = metrics
-        self.rps_samples = [*self.rps_samples, metrics.requests_per_second][-60:]
-        self.query_one("#database-health", Static).update(
-            f"Database\n{'healthy' if metrics.database_healthy else 'unhealthy'}"
-        )
-        self.query_one("#rps-value",   Static).update(
-            f"Traffic\n{metrics.requests_per_second} req/s"
-        )
-        self.query_one("#active-apps", Static).update(
-            f"Active apps\n{len(metrics.active_connections)} in 10s"
-        )
-        self.query_one("#ram-value", Static).update(
-            f"RAM\n{_format_bytes(metrics.ram_usage_bytes)}"
-        )
-        self.query_one("#ssd-value", Static).update(
-            f"SSD\n{_format_bytes(metrics.disk_usage_bytes)}"
-        )
-        self.query_one("#collection-value", Static).update(
-            f"Collections\n{metrics.collection_count} active"
-        )
-        self.query_one("#rps-chart", Sparkline).data = self.rps_samples
-
+    def _sync_connections(self, connections):
         table = self.query_one("#connections-table", DataTable)
-        table.clear()
-        for conn in metrics.active_connections:
-            table.add_row(conn.id, conn.kind, conn.user, conn.address)
+        rows = {c.id: (c.id, c.kind, c.user or "", c.address or "") for c in connections[:200]}
+        for key in self._connection_rows.keys() - rows.keys():
+            table.remove_row(key)
+        labels = ("id", "kind", "user/app", "address")
+        for key, values in rows.items():
+            if key not in self._connection_rows:
+                table.add_row(*(literal(value, 256) for value in values), key=key)
+            elif self._connection_rows[key] != values:
+                for label, old, new in zip(labels, self._connection_rows[key], values, strict=True):
+                    if old != new:
+                        table.update_cell(key, label, literal(new, 256))
+        self._connection_rows = rows
 
-    def _set_monitor_status(self, status: str) -> None:
-        self.query_one("#database-health", Static).update(f"Monitor\n{status}")
+    def _set_monitor_status(self, status):
+        if self._closing or self._leaving:
+            return
+        self._card("database-health", status)
+        if any(
+            word in status.lower() for word in ("unavailable", "disconnected", "stale", "fallback")
+        ):
+            for identifier in (
+                "rps-value",
+                "active-apps",
+                "ram-value",
+                "ssd-value",
+                "collection-value",
+            ):
+                self._card(identifier, "Unavailable (monitoring data stale)")
+            self.rps_samples.clear()
+            self.query_one("#rps-chart", Sparkline).data = []
+            self._sync_connections([])
 
 
 def _format_bytes(value: int) -> str:
@@ -1070,9 +1130,30 @@ def _format_bytes(value: int) -> str:
 # App entry‑point
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class NexoraCliApp(App[None]):
-    TITLE     = "NexoraDB CLI"
+    TITLE = "NexoraDB CLI"
     SUB_TITLE = "Admin console, monitor, and query workbench"
+    BINDINGS = [
+        Binding("ctrl+c", "copy_or_quit", show=False, priority=True),
+        Binding("ctrl+q", "quit", "Quit", priority=True),
+    ]
+
+    def action_copy_or_quit(self):
+        # Older Textual handles Ctrl+C at App priority before child bindings.
+        # Route it explicitly so masked fields cannot export credentials.
+        widget = self.focused
+        action = getattr(widget, "action_copy", None)
+        if action is not None:
+            try:
+                action()
+            except SkipAction:
+                pass
+        elif isinstance(getattr(widget, "selected_text", None), str):
+            if widget.selected_text:
+                self.copy_to_clipboard(widget.selected_text)
+        else:
+            self.exit()
 
     def __init__(self, base_url: str) -> None:
         super().__init__()
