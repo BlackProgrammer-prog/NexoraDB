@@ -1,0 +1,1 @@
+import{h as e,u as t}from"./index-Cv9r7o59.js";var n=e();function r({children:e,className:r}){return(0,n.jsx)(`span`,{className:t(`inline-flex items-center rounded-full bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700 ring-1 ring-green-100`,r),children:e})}export{r as t};
