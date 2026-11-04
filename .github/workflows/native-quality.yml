@@ -20,9 +20,9 @@ jobs:
         with:
           python-version: '3.10'
       - name: Python API dependencies
-        run: python -m pip install 'anyio>=4,<5' fastapi 'httpx[http2]>=0.28,<1' pytest python-socketio argon2-cffi cryptography lark 'pymongo>=4.18.3,<5'
+        run: python -m pip install 'anyio>=4.14.2,<5' fastapi 'httpx[http2]>=0.28,<1' pytest 'textual>=0.86,<9' 'aiohttp>=3.14.5,<4' python-socketio argon2-cffi 'cryptography>=50' 'certifi>=2026.10.18' lark 'pymongo>=4.18.3,<5'
       - name: API admission, monitoring, streaming and authorization
-        run: python -m pytest -q tests/test_cursor_pool_acl.py tests/test_transport_safety.py tests/test_api_capacity_streaming.py tests/test_admin_auth_api.py tests/test_query_contracts.py tests/test_performance_controls.py tests/test_binary_protocol.py tests/test_exclusive_ingestion.py
+        run: python -m pytest -q tests/test_cursor_pool_acl.py tests/test_transport_safety.py tests/test_api_capacity_streaming.py tests/test_admin_auth_api.py tests/test_query_contracts.py tests/test_performance_controls.py tests/test_binary_protocol.py tests/test_exclusive_ingestion.py tests/test_tui_query_workspace.py tests/test_tui_security.py
       - name: PyMongo security regressions
         env:
           PYTHONPATH: nexora-scale-lab
