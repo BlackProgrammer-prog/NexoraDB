@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-    "setuptools>=70",
+    "setuptools>=84.1.0",
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "NexoraDataBase"
-version = "0.5.1"
+version = "0.5.2"
 description = "Open-source document and graph database with NexoraQL, a C++20/RocksDB engine, and Python API"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
@@ -44,8 +44,9 @@ classifiers = [
 
 dependencies = [
     "httpx[http2]>=0.28,<1",
-    "anyio>=4.0,<5",
-    "cryptography>=42.0.0",
+    "certifi>=2026.10.18",
+    "anyio>=4.14.2,<5",
+    "cryptography>=50.0.0",
     "lark>=1.1.9",
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
@@ -53,7 +54,8 @@ dependencies = [
     "argon2-cffi>=23.1.0",
     "python-socketio>=5.11.0",
     "websocket-client>=1.8.0",
-    "textual>=0.86.0"
+    "aiohttp>=3.14.5,<4",
+    "textual>=0.86.0,<9"
 ]
 
 
@@ -66,7 +68,8 @@ api = [
     "argon2-cffi>=23.1.0",
     "python-socketio>=5.11.0",
     "websocket-client>=1.8.0",
-    "textual>=0.86.0"
+    "aiohttp>=3.14.5,<4",
+    "textual>=0.86.0,<9"
 ]
 
 dashboard = [
@@ -91,7 +94,8 @@ all = [
     "argon2-cffi>=23.1.0",
     "python-socketio>=5.11.0",
     "websocket-client>=1.8.0",
-    "textual>=0.86.0",
+    "aiohttp>=3.14.5,<4",
+    "textual>=0.86.0,<9",
 ]
 
 
