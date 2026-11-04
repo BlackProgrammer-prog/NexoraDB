@@ -123,6 +123,7 @@ class DocumentStream {
     DocEngine* engine_;
     std::string collection_,token_;
     Condition condition_;
+    std::vector<std::array<std::string,3>> joins_;
     uint32_t page_size_;
     size_t max_bytes_,offset_=0;
     bool ended_=false;
@@ -131,9 +132,11 @@ class DocumentStream {
     py::list page_;
     std::mutex mutex_;
 public:
-    DocumentStream(DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes)
+    DocumentStream(DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes,
+                   std::vector<std::array<std::string,3>> joins={})
         :engine_(&engine),collection_(std::move(collection)),condition_(std::move(condition)),
          page_size_(page_size),max_bytes_(max_bytes) {
+        joins_=std::move(joins);
         if (!page_size || page_size>nexora::core::pagination::kMaxRecords ||
                 max_bytes<nexora::core::pagination::kMinBytes || max_bytes>nexora::core::pagination::kMaxBytes)
             throw std::invalid_argument("stream requires page_size 1..1000 and max_page_bytes 2..64MiB");
@@ -151,7 +154,7 @@ public:
             PageResult result;
             {
                 py::gil_scoped_release release;
-                result=engine_->FindPage(collection_,condition_,page_size_,token_,max_bytes_);
+                result=engine_->FindPage(collection_,condition_,page_size_,token_,max_bytes_,joins_);
             }
             if (!result.success) {
                 engine_->ClosePage(token_); token_.clear(); ended_=true;
@@ -185,7 +188,7 @@ public:
         uint32_t count=0;
         {
             py::gil_scoped_release release;
-            result=engine_->FindPage(collection_,condition_,std::min(requested,page_size_),token_,max_bytes_);
+            result=engine_->FindPage(collection_,condition_,std::min(requested,page_size_),token_,max_bytes_,joins_);
             if (result.success) {
                 // FindPage emits a JSON array of objects from the trusted
                 // codec. Split only top-level objects, respecting escapes,
@@ -1106,6 +1109,11 @@ PYBIND11_MODULE(nexoradb, m) {
             .def("iter_documents",[](DocEngine& engine,std::string collection,Condition condition,uint32_t page_size,size_t max_bytes) {
                 return std::make_unique<DocumentStream>(engine,std::move(collection),std::move(condition),page_size,max_bytes);
             },py::arg("collection"),py::arg("condition")=Condition{},py::arg("page_size")=128,
+               py::arg("max_page_bytes")=nexora::core::pagination::kDefaultBytes,py::keep_alive<0,1>())
+            .def("iter_join_documents",[](DocEngine& engine,std::string collection,
+                     std::vector<std::array<std::string,3>> joins,Condition condition,uint32_t page_size,size_t max_bytes) {
+                return std::make_unique<DocumentStream>(engine,std::move(collection),std::move(condition),page_size,max_bytes,std::move(joins));
+            },py::arg("collection"),py::arg("joins"),py::arg("condition")=Condition{},py::arg("page_size")=128,
                py::arg("max_page_bytes")=nexora::core::pagination::kDefaultBytes,py::keep_alive<0,1>())
             .def("find_page",
                  [](DocEngine& e, const std::string& collection,
