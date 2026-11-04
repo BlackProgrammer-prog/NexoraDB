@@ -107,7 +107,7 @@ async function request<TResponse, TBody = unknown>(
     } else if (!response.ok || response.body) {
       await response.body?.cancel()
     }
-    if (!response.ok) throw new ApiError(getErrorMessage(payload, response.status), response.status)
+    if (!response.ok) throw new ApiError(getErrorMessage(payload, response.status), response.status, payload)
     if (!isJson && response.status !== 204 && response.status !== 205) throw new Error('API returned a non-JSON response')
     return payload as TResponse
   } finally {

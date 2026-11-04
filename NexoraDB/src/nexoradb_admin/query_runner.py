@@ -149,7 +149,7 @@ def execute_query(*, engine, graph_manager, payload, granted_scopes=None,
     try:
         statements = nexoraql.parse(_normalize_query(payload.query), payload.parameters)
     except Exception as exc:
-        _raise_query_error(exc, nexoraql)
+        _raise_query_error(exc, nexoraql, payload.query)
     # Server-derived policy units. Unknown/large work is deliberately expensive;
     # these are admission estimates, not a CPU-time or memory measurement.
     cost = min(controller.policy.owner_cost, 1 + len(payload.query.encode()) // 16384)
@@ -223,7 +223,7 @@ def _execute_query(
         finally:
             execution_token.native = None
     except Exception as exc:
-        _raise_query_error(exc, nexoraql)
+        _raise_query_error(exc, nexoraql, payload.query)
     finally:
         close = getattr(executor, "close_execution", executor.abort_transaction)
         close()
@@ -244,22 +244,63 @@ def _execute_query(
 
 
 def _normalize_query(query: str) -> str:
-    normalized = query.strip()
-    if not normalized:
+    if not query.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"message": "Query cannot be empty"},
         )
-    return normalized if normalized.endswith(";") else f"{normalized};"
+    # Preserve original coordinates, and append outside any trailing line comment.
+    last = ""
+    i = 0
+    quote = None
+    while i < len(query):
+        char = query[i]
+        if quote:
+            if char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+            last = char
+        elif query.startswith("--", i):
+            newline = query.find("\n", i)
+            i = len(query) if newline < 0 else newline
+            continue
+        elif query.startswith("/*", i):
+            end = query.find("*/", i + 2)
+            if end < 0:
+                return query  # Let the parser diagnose the unfinished comment.
+            i = end + 2
+            continue
+        elif char in ("'", '"'):
+            quote = char
+            last = char
+        elif not char.isspace():
+            last = char
+        i += 1
+    return query if last == ";" else query + "\n;"
 
 
-def _raise_query_error(exc: Exception, nexoraql: ModuleType) -> NoReturn:
+def query_diagnostic(exc, source=None):
+    payload = exc.to_dict() if hasattr(exc, 'to_dict') else {'message': str(exc)}
+    if source is not None and payload.get('line') is not None:
+        lines = source.split('\n')
+        line = payload['line']
+        if line > len(lines) or line < 1:
+            payload['line'], payload['column'] = len(lines), len(lines[-1]) + 1
+    return payload
+
+
+def _raise_query_error(exc: Exception, nexoraql: ModuleType, source=None) -> NoReturn:
     nexoraql_error = getattr(nexoraql, "NexoraQLError", None)
     if nexoraql_error is not None and isinstance(exc, nexoraql_error):
-        error_payload = exc.to_dict() if hasattr(exc, "to_dict") else {"message": str(exc)}
+        error_payload = query_diagnostic(exc, source)
+        message = error_payload.get('message', str(exc))
+        if error_payload.get('line') is not None:
+            message += f" (line {error_payload['line']}, col {error_payload.get('column') or 1})"
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"message": str(exc), "queryError": error_payload},
+            detail={"message": message, "queryError": error_payload},
         ) from exc
 
     raise exc

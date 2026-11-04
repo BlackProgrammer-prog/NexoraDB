@@ -1,6 +1,6 @@
 {
   "name": "nexoradb",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "NexoraDB - Document + Graph Database Engine",
   "dependencies": [
     {

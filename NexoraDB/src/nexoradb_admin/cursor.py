@@ -10,17 +10,22 @@ from .execution_control import current_execution
 
 
 def open_document_stream(engine, collection, *args, **kwargs):
+    joins = kwargs.pop('joins', None)
+    def open_native():
+        if joins:
+            return engine.iter_join_documents(collection, joins, *args, **kwargs)
+        return engine.iter_documents(collection, *args, **kwargs)
     token = current_execution.get()
     factory = getattr(engine, "execution_scope", None)
     if token is None or factory is None:
-        return engine.iter_documents(collection, *args, **kwargs)
+        return open_native()
     token.check()
     scope = factory(max(1, min(300000, int((token.deadline-time.monotonic())*1000))))
     token.attach(scope)
     with scope:
         # Native stream retains the control and installs it for each batch,
         # even if a subsequent batch runs on a different worker thread.
-        return engine.iter_documents(collection, *args, **kwargs)
+        return open_native()
 
 
 class CursorBudget:
@@ -126,7 +131,11 @@ async def stream_cursor(open_stream, authorize, owner, budget, *, batch_size=128
             while chunk:
                 yield chunk
                 chunk = await anyio.to_thread.run_sync(take)
-            yield '{"end":true}\n'
+            errors = getattr(stream, 'errors', [])
+            if errors:
+                yield json.dumps({'error': 'Statement failed; earlier writes may have committed. ' + '; '.join(errors)}) + '\n'
+            else:
+                yield '{"end":true}\n'
         except Exception:
             yield '{"error":"cursor failed; discard incomplete result"}\n'
         finally:

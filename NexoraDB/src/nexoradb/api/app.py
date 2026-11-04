@@ -19,8 +19,7 @@ from nexoradb_admin.admission import AdmissionMiddleware
 from nexoradb_admin.lifecycle import install_lifecycle
 from nexoradb_admin.idempotency import RequestJournal
 from nexoradb_admin.cursor import CursorBudget, stream_cursor, open_document_stream
-from nexoradb_admin.query_runner import _load_nexoraql_package, _authorize_statements, authorize_collections, _raise_query_error
-import importlib
+from nexoradb_admin.query_runner import _authorize_statements, authorize_collections
 import time
 
 
@@ -31,6 +30,15 @@ def create_api_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["NexoraDB API"])
     cursor_budget = CursorBudget()
+    program_lock = RLock()
+
+    @router.get('/query/requests/{request_key}')
+    def query_request_status(request_key: str, request: Request, app: AppTokenClaims = Depends(require_app_token)):
+        require_scope(app, 'query:execute')
+        engine = engine_provider()
+        if app.managed and not engine.is_internal_app_token_active(app.token_id):
+            raise HTTPException(401, 'Application token revoked')
+        return RequestJournal(request.app.state.settings.db_path / 'query_requests.sqlite3').inspect('app:' + app.app_id, request_key)
 
     def authorize_read(app: AppTokenClaims, collection: str) -> Any:
         require_scope(app, "documents:read")
@@ -47,37 +55,49 @@ def create_api_router(
         return authorize_read(app, collection)
 
     @router.post("/query/cursor")
-    async def query_cursor(payload: QueryExecuteRequest,
+    async def query_cursor(payload: QueryExecuteRequest, request: Request,
                            batch_size: int = Query(128, ge=1, le=1000),
                            app: AppTokenClaims = Depends(require_app_token)):
         require_scope(app, "query:execute")
         def prepare():
-            parser = _load_nexoraql_package()
-            statements = parser.parse(payload.query, payload.parameters)
-            if len(statements) != 1 or type(statements[0]).__name__ != "Select":
-                raise HTTPException(422, "Cursor requires exactly one SELECT")
-            statement = statements[0]
-            if statement.joins:
-                raise HTTPException(422, "Streaming JOIN cursor is not supported; no buffered fallback")
+            from nexoradb_admin.query_tools import prepare_program
+            statements, semantic = prepare_program(payload)
             _authorize_statements(statements, frozenset(app.scopes))
             authorize_collections(statements, getattr(app, "collections", None))
-            semantic = importlib.import_module(parser.__name__ + ".semantic")
-            semantic.Validator().validate(statement)
-            return statement, semantic
-        try:
-            statement, semantic = await anyio.to_thread.run_sync(prepare)
-        except Exception as exc:
-            _raise_query_error(exc, _load_nexoraql_package())
+            return statements, semantic
+        statements, semantic = await anyio.to_thread.run_sync(prepare)
         def authorize():
-            return authorize_cursor(app, statement.collection)
+            if getattr(app, 'expires_at', None) is not None and app.expires_at <= int(time.time()):
+                raise HTTPException(401, 'Application token expired')
+            engine = engine_provider()
+            if app.managed and not engine.is_internal_app_token_active(app.token_id):
+                raise HTTPException(401, 'Application token revoked')
+            _authorize_statements(statements, frozenset(app.scopes))
+            authorize_collections(statements, getattr(app, 'collections', None))
+            return engine
         def open_stream():
-            return open_document_stream(authorize(), statement.collection, semantic.build_condition(statement.where),
-                                              page_size=batch_size, max_page_bytes=1024 * 1024)
+            from nexoradb_admin.query_program import ProgramStream, ProgramResults, needs_graph_manager, validate_graph_program
+            from nexoradb_admin.query_tools import READ_ONLY
+            engine = authorize()
+            graph = graph_manager_provider() if needs_graph_manager(statements) else None
+            validate_graph_program(statements, graph)
+            factory = lambda: ProgramStream(engine, statements, semantic, graph, authorize)
+            if any(type(s).__name__ not in READ_ONLY for s in statements):
+                with program_lock:
+                    results = getattr(request.app.state, 'query_program_results', None)
+                    if results is None:
+                        results = ProgramResults(request.app.state.settings.db_path / 'query_requests.sqlite3')
+                        request.app.state.query_program_results = results
+                        lifecycle = getattr(request.app.state, 'lifecycle', None)
+                        if lifecycle is not None:
+                            lifecycle.resource_closers.append(results.shutdown)
+                        else:
+                            request.app.add_event_handler('shutdown', results.shutdown)
+                return results.prepare('app:' + app.app_id, request.headers.get('Idempotency-Key'),
+                                       {'query': payload.query, 'parameters': payload.parameters}, factory)
+            return factory()
         owner = app.app_id
-        return await stream_cursor(open_stream, authorize, owner, cursor_budget, batch_size=batch_size,
-                                   skip=statement.skip, limit=statement.limit or None,
-                                   project=(None if statement.projection is None else
-                                            semantic.Executor._compile_projection(statement.projection)))
+        return await stream_cursor(open_stream, authorize, owner, cursor_budget, batch_size=batch_size)
 
     @router.get("/collections/{collection}/documents")
     def document_page(

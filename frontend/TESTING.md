@@ -18,7 +18,7 @@ runtime. Root StrictMode is explicitly enabled for effect-replay and session
 tests. Fixtures use fake credentials, fake clocks and mocked transports; no real
 database, API, browser profile or user session is accessed.
 
-## Current matrix: 98 cases in 10 files
+## Current matrix: 127 cases in 13 files
 
 | File in `tests/` | Cases | Behavior covered |
 | --- | ---: | --- |
@@ -30,8 +30,11 @@ database, API, browser profile or user session is accessed.
 | `authTokenStorage.test.ts` | 7 | Memory-only credentials, no cookies/Web Storage persistence, legacy cleanup, expiry, replacing timers, unsubscribe, fresh-page state and blocked browser storage |
 | `authProvider.test.tsx` | 7 | Root StrictMode session revalidation, valid sign-in, unsuitable accounts, rejected login, delayed responses after logout and external invalidation |
 | `previewJson.test.ts` | 7 | Unicode, million-element sparse input, wide/deep objects, cycles, bigint, large strings and prototype-like keys |
-| `queryRunner.test.tsx` | 4 | Success, replaced queries, errors clearing stale results and unmount cancellation |
+| `queryRunner.test.tsx` | 5 | Success, replaced queries, partial script failures, errors clearing stale results and unmount cancellation |
 | `documentFetching.test.tsx` | 3 | Controlled/empty parent results do not trigger duplicate fetching; standalone lists retain internal fetching |
+| `queryStreaming.test.ts` | 15 | Incremental UTF-8/NDJSON, bounded batches/frames, statement envelopes/receipts, partial failure delivery, completion/error handling, cancellation and Unicode diagnostic coordinates |
+| `queryWorkspace.test.tsx` | 10 | Stream retention, request keys, prepared statement errors, incomplete/empty results, cursor page replacement/close, stale responses, repeated Next clicks and debounced validation |
+| `resultPreview.test.ts` | 3 | Ring-buffer order, UTF-8 byte eviction before row limits, and oversized row exclusion |
 
 Tests assert behavior and resource bounds instead of machine-specific elapsed-time
 thresholds. In particular, the Profiler test verifies that 500 metrics events
@@ -56,6 +59,11 @@ the development component tests, which do not provide a layout/rendering engine.
 
 The release workflow runs unit/component tests, their type check, lint, build and
 the bundle budget. Browser integration checks currently run separately.
+
+The browser suite also exercises the actual CodeMirror editor, multiline input,
+syntax colors, Ctrl+Enter, inline diagnostics and streaming/cursor result modes.
+Native-backed API cases live in `tests/test_query_workspace.py`; see the
+[query workspace contract](../docs/QUERY_WORKSPACE.md) for endpoints and limits.
 
 ## Regressions found by the new tests
 

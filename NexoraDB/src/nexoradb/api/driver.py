@@ -240,15 +240,20 @@ class NexoraDBClient:
         raise NexoraDBError(f"API request failed ({response.status_code}); redirects are not followed")
 
     @contextmanager
-    def cursor(self, query: str, parameters=None, *, batch_size: int = 128):
+    def cursor(self, query: str, parameters=None, *, batch_size: int = 128, idempotency_key: str | None = None):
         """Use `with client.cursor(...) as rows` and consume lazily.
 
-        SELECT-only streaming is never retried/restarted implicitly: a new
-        stream can observe a different snapshot.
+        Reads/JOINs are incremental. Write programs require an explicit request
+        key and finish before delivery. Multi-statement records are tagged by
+        statement number. No request is retried/restarted implicitly.
         """
         if not 1 <= batch_size <= 1000:
             raise ValueError("batch_size must be 1..1000")
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        if idempotency_key is not None:
+            if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', idempotency_key):
+                raise ValueError('Invalid Idempotency-Key')
+            headers['Idempotency-Key'] = idempotency_key
         body = json.dumps({"query": query, "parameters": parameters or {}}, allow_nan=False)
         try:
             with self._lease(), self._client.stream("POST", f"{self.url}/api/v1/query/cursor?batch_size={batch_size}",
@@ -282,7 +287,14 @@ class NexoraDBClient:
         except httpx.PoolTimeout as exc:
             raise NexoraDBPoolBusy("Pool acquisition timeout; cursor not sent") from exc
         except (httpx.TransportError, json.JSONDecodeError) as exc:
+            if idempotency_key:
+                raise NexoraDBOutcomeUnknown('Cursor transport failed; reconcile the SAME request key before retrying writes') from exc
             raise NexoraDBError("Cursor transport failed; do not silently restart") from exc
+
+    def query_request_status(self, key: str):
+        if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', key):
+            raise ValueError('Invalid Idempotency-Key')
+        return self._request('GET', '/api/v1/query/requests/' + key, None)
 
 
 def connect(*, url: str = "http://localhost:8000", token: str, timeout: float = 10.0,

@@ -9,6 +9,14 @@ vi.mock('../src/features/query/services/queryApi', () => ({ queryApi: { executeQ
 const response: QueryResult = { columns: ['value'], rows: [{ value: 'current' }], raw: {}, executionTimeMs: 1 }
 
 describe('query runner request lifecycle', () => {
+  it('does not report a partially failed script as successful just because HTTP returned 200', async () => {
+    vi.mocked(queryApi.executeQuery).mockResolvedValue({ ...response, statementErrors: ['collection does not exist'] })
+    const { result } = renderHook(useQueryRunner)
+    await act(async () => { await result.current.runQuery('SHOW COLLECTIONS; SELECT * FROM missing;') })
+    expect(result.current.state).toBe('error')
+    expect(result.current.error?.message).toContain('Earlier writes may have committed')
+    expect(result.current.result?.statementErrors).toEqual(['collection does not exist'])
+  })
   it('starts idle and exposes a successful result', async () => {
     vi.mocked(queryApi.executeQuery).mockResolvedValue(response)
     const { result } = renderHook(useQueryRunner)

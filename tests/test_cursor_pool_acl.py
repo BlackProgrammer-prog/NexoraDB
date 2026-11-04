@@ -148,7 +148,9 @@ def test_query_cursor_projection_limit_skip_acl_and_rejection(monkeypatch):
         assert records == [{"document": {"_id": str(i), "value": i}} for i in (2, 3, 4)] + [{"end": True}]
         assert engine.stream.closed
         assert client.post("/api/v1/query/cursor", json={"query": "SELECT * FROM secret;"}, headers=headers).status_code == 403
-        assert client.post("/api/v1/query/cursor", json={"query": "DELETE FROM allowed WHERE _id = 'one';"}, headers=headers).status_code == 422
+        assert client.post("/api/v1/query/cursor", json={"query": "DELETE FROM allowed WHERE _id = 'one';"}, headers=headers).status_code == 403
+        assert client.post('/api/v1/query/cursor', json={'query': 'SELECT * FROM allowed; DELETE FROM allowed WHERE _id = \'one\';'}, headers=headers).status_code == 403
+        assert client.post('/api/v1/query/cursor', json={'query': 'SELECT * FROM allowed LOOKUP JOIN secret ON x = y;'}, headers=headers).status_code == 403
         assert client.get("/api/v1/collections/secret/documents", headers=headers).status_code == 403
 
 
@@ -240,6 +242,25 @@ def test_driver_lazy_cursor_closes_transport_on_early_stop():
         with client.cursor("SELECT * FROM items;") as rows:
             assert next(rows) == {"id": 1}
         assert body.closed
+
+
+def test_driver_cursor_write_key_and_receipt_lookup_are_explicit():
+    requests = []
+    def handle(request):
+        requests.append(request)
+        if request.method == 'GET': return httpx.Response(200, json={'status': 'completed', 'receipts': []})
+        return httpx.Response(200, content=b'{"document":{"executionReceipt":true,"success":true}}\n{"end":true}\n')
+    with NexoraDBClient(url='http://localhost', token='test') as client:
+        client._client.close()
+        client._client = httpx.Client(transport=httpx.MockTransport(handle))
+        with client.cursor('CREATE COLLECTION once;', idempotency_key='write-key') as rows:
+            assert list(rows) == [{'executionReceipt': True, 'success': True}]
+        assert requests[0].headers['Idempotency-Key'] == 'write-key'
+        assert client.query_request_status('write-key')['status'] == 'completed'
+        assert requests[1].url.path == '/api/v1/query/requests/write-key'
+        with pytest.raises(ValueError):
+            with client.cursor('CREATE COLLECTION once;', idempotency_key='../bad'): pass
+        assert len(requests) == 2
 
 
 @pytest.mark.parametrize('body', [b'{"document":{}}\n',

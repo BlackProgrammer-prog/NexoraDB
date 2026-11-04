@@ -59,6 +59,27 @@ def main():
             data = {'accessToken': 'test-only-bearer', 'expiresIn': expires_in, 'tokenType': 'bearer', 'user': user}
         elif path == '/auth/me':
             data = user
+        elif path == '/query/validate':
+            query = route.request.post_data_json['query']
+            invalid = 'FRUM' in query
+            data = dict(valid=not invalid, diagnostics=[dict(message='Expected FROM', line=2, column=1, severity='error')] if invalid else [],
+                        statementCount=0 if invalid else max(1, query.count(';')), cursorSupported=not invalid)
+        elif path == '/query/stream':
+            assert route.request.headers.get('idempotency-key')
+            if route.request.post_data_json['query'].count('SELECT') > 1:
+                records = [{'statement': 1, 'statementType': 'Select', 'row': {'marker': 'script-row', 'value': 17}},
+                           {'statement': 1, 'statementType': 'Select', 'receipt': True, 'success': True, 'rowCount': 1},
+                           {'statement': 2, 'statementType': 'Select', 'receipt': True, 'success': True, 'rowCount': 0}]
+            else:
+                records = [{'value': i} for i in range(2000)]
+            body = ''.join(json.dumps({'document': row})+'\n' for row in records) + '{"end":true}\n'
+            return route.fulfill(content_type='application/x-ndjson', body=body)
+        elif path == '/query/cursors':
+            data = dict(cursorId='browser-test', rows=[dict(value=i) for i in range(100)], columns=['value'], hasMore=True, sequence=1, totalRows=100)
+        elif path == '/query/cursors/browser-test/next':
+            data = dict(cursorId=None, rows=[dict(value=i) for i in range(100, 150)], columns=['value'], hasMore=False, sequence=2, totalRows=150)
+        elif path == '/query/cursors/browser-test':
+            return route.fulfill(status=204)
         elif path == '/collections':
             if unauthorized:
                 return route.fulfill(status=401, json={'message': 'expired'})
@@ -158,20 +179,58 @@ def main():
             expect(page.get_by_text('Bounded preview;', exact=False)).to_be_visible()
             page.get_by_label('Query', exact=True).fill('REDIRECT')
             page.get_by_role('button', name='Run Query', exact=True).click()
-            expect(page.get_by_text('Failed to fetch', exact=False)).to_be_visible()
+            expect(page.get_by_text('Failed to fetch', exact=False).first).to_be_visible()
             assert counts['/leaked-token'] == 0
             page.get_by_label('Query', exact=True).fill('NON_JSON')
             page.get_by_role('button', name='Run Query', exact=True).click()
-            expect(page.get_by_text('API returned a non-JSON response', exact=False)).to_be_visible()
+            expect(page.get_by_text('API returned a non-JSON response', exact=False).first).to_be_visible()
             assert page.evaluate('window.xss') is None
             page.get_by_label('Query', exact=True).fill('OVERSIZE')
             page.get_by_role('button', name='Run Query', exact=True).click()
-            expect(page.get_by_text('Response exceeds the console 8 MiB limit.', exact=False)).to_be_visible()
+            expect(page.get_by_text('Response exceeds the console 8 MiB limit.', exact=False).first).to_be_visible()
             page.get_by_label('Query', exact=True).fill('GRAPH')
             page.get_by_role('button', name='Run Query', exact=True).click()
             expect(page.get_by_text('Interactive graph', exact=True)).to_be_visible()
             expect(page.locator('canvas').first).to_be_visible()
             assert any('GraphVisualization-' in value for value in requests)
+
+            editor = page.get_by_label('Query', exact=True)
+            editor.fill('SELECT *\nFRUM users;')
+            expect(page.get_by_text('Line 2, column 1: Expected FROM', exact=True)).to_be_visible()
+            expect(page.get_by_role('button', name='Run Query', exact=True)).to_be_disabled()
+            expect(page.locator('.cm-lintRange-error').first).to_be_visible()
+            editor.fill('SELECT *\nFROM users;')
+            expect(page.get_by_text('Syntax and semantic checks passed.', exact=False)).to_be_visible()
+            assert page.locator('.cm-line').count() >= 2
+            assert page.locator('.cm-line span').evaluate_all("(spans) => spans.some(span => span.textContent === 'SELECT' && getComputedStyle(span).color !== getComputedStyle(span.closest('.cm-content')).color)")
+            editor.press('Control+Enter')
+            expect(page.get_by_text('1–50 of 2500', exact=True)).to_be_visible()
+
+            page.get_by_label('Results mode', exact=True).select_option('stream')
+            page.get_by_role('button', name='Run Query', exact=True).click()
+            expect(page.get_by_text('2000 rows received.', exact=False)).to_be_visible()
+            expect(page.get_by_text('Preview is limited to 1,000 rows and 8 MiB of encoded row data. Earlier rows were discarded.', exact=True)).to_be_visible()
+            expect(page.get_by_role('button', name='Run Query', exact=True)).to_be_enabled()
+            assert page.locator('tbody tr').count() == 50
+
+            page.get_by_label('Results mode', exact=True).select_option('cursor')
+            page.get_by_role('button', name='Run Query', exact=True).click()
+            expect(page.get_by_role('button', name='Next server page', exact=True)).to_be_enabled()
+            page.get_by_role('button', name='Next server page', exact=True).click()
+            expect(page.get_by_text('150 rows received.', exact=False)).to_be_visible()
+            expect(page.get_by_role('button', name='Next server page', exact=True)).to_have_count(0)
+            expect(page.locator('tbody tr').first).to_contain_text('100')
+            page.get_by_role('button', name='Run Query', exact=True).click()
+            with page.expect_response(lambda response: response.url.endswith('/query/cursors/browser-test') and response.request.method == 'DELETE'):
+                page.get_by_role('button', name='Close cursor', exact=True).click()
+            expect(page.get_by_text('Stopped.', exact=False)).to_be_visible()
+            editor.fill('SELECT value FROM users LIMIT 1;\nSELECT value FROM users LIMIT 1;')
+            page.get_by_label('Results mode', exact=True).select_option('stream')
+            expect(page.get_by_role('button', name='Run Query', exact=True)).to_be_enabled()
+            page.get_by_role('button', name='Run Query', exact=True).click()
+            expect(page.get_by_text('3 rows received.', exact=False)).to_be_visible()
+            expect(page.locator('tbody')).to_contain_text('"marker":"script-row"')
+            expect(page.get_by_text('Request key:', exact=False)).to_be_visible()
             unauthorized = True
             page.get_by_role('link', name='Documents', exact=True).click()
             expect(page.get_by_role('button', name='Sign in', exact=True)).to_be_visible()
@@ -188,6 +247,7 @@ def main():
             print('PASS: production routes, deferred chunks, logos, memory-only auth, 401 invalidation, reload logout,')
             print('      single document fetch, stale-request abort, editor reset, bounded pagination/JSON, XSS escaping,')
             print('      redirect rejection, non-JSON rejection, expiry logout, response cap, graph canvas and CSP.')
+            print('      CodeMirror multiline/highlighting, inline diagnostics, Ctrl+Enter, streaming retention, script receipts/JSON cells, request keys and server cursor navigation/close.')
             browser.close()
     finally:
         server.should_exit = True

@@ -2,14 +2,16 @@
 NexoraDB Admin API client.
 مسیر: src/nexoradb/cli/api_client.py
 """
+
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from typing import Any
 
-import urllib.request
-import urllib.error
+import httpx
+
+from .query_client import strict_json
 
 
 class NexoraAdminClientError(Exception):
@@ -25,11 +27,22 @@ class AuthSession:
 class AdminApiClient:
     """
     HTTP client ساده برای Admin API.
-    از urllib استاندارد Python استفاده می‌کند تا نیازی به httpx/requests نباشد.
+    Responses are bounded; redirects, cookies and environment proxies are disabled.
     """
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
+        url = httpx.URL(self.base_url)
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.host
+            or url.userinfo
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(
+                "Expected an HTTP(S) server URL without credentials, query or fragment"
+            )
 
     # ── internal ────────────────────────────────────────────────────────────
 
@@ -41,35 +54,52 @@ class AdminApiClient:
         token: str | None = None,
         json_body: Any = None,
     ) -> Any:
+        if not path.startswith("/") or path.startswith("//") or chr(92) in path:
+            raise NexoraAdminClientError("Invalid API path")
         url = self.base_url + path
-        data: bytes | None = None
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-
+        headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-
-        if json_body is not None:
-            data = json.dumps(json_body).encode()
-
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read()
-                if not raw:
-                    return {}
-                return json.loads(raw)
-        except urllib.error.HTTPError as exc:
-            body = exc.read()
-            try:
-                detail = json.loads(body)
-                msg = detail.get("message") or detail.get("detail") or str(detail)
-            except Exception:
-                msg = body.decode(errors="replace") or f"HTTP {exc.code}"
-            raise NexoraAdminClientError(msg) from exc
-        except urllib.error.URLError as exc:
-            raise NexoraAdminClientError(f"Cannot reach {self.base_url}: {exc.reason}") from exc
-        except Exception as exc:
-            raise NexoraAdminClientError(str(exc)) from exc
+            data = None if json_body is None else json.dumps(json_body, allow_nan=False).encode()
+            if data is not None and len(data) > 1024 * 1024:
+                raise NexoraAdminClientError("Request exceeds 1 MiB")
+            with httpx.Client(follow_redirects=False, trust_env=False, timeout=15) as client:
+                with client.stream(method, url, content=data, headers=headers) as response:
+                    if response.headers.get("content-encoding", "identity") != "identity":
+                        raise NexoraAdminClientError("Unexpected compressed response")
+                    limit = 8 * 1024 * 1024 if response.is_success else 65536
+                    raw = bytearray()
+                    for chunk in response.iter_bytes():
+                        if len(raw) + len(chunk) > limit:
+                            raise NexoraAdminClientError(
+                                "Response exceeds the terminal byte budget"
+                            )
+                        raw.extend(chunk)
+                    if not response.is_success:
+                        try:
+                            detail = strict_json(raw)
+                            message = detail.get("message") or detail.get("detail")
+                            if isinstance(message, dict):
+                                message = message.get("message")
+                        except (ValueError, AttributeError):
+                            message = None
+                        raise NexoraAdminClientError(
+                            message
+                            if isinstance(message, str)
+                            else f"API request failed ({response.status_code})"
+                        )
+                    if not raw:
+                        return {}
+                    if "application/json" not in response.headers.get("content-type", "").lower():
+                        raise NexoraAdminClientError("Expected a JSON response")
+                    return strict_json(raw)
+        except NexoraAdminClientError:
+            raise
+        except (httpx.HTTPError, ValueError, TypeError, RecursionError) as exc:
+            raise NexoraAdminClientError(
+                "Database transport failed; reconcile writes before retrying"
+            ) from exc
 
     # ── auth ────────────────────────────────────────────────────────────────
 
@@ -158,6 +188,7 @@ class AdminApiClient:
             "rows": rows,
             "executionTimeMs": resp.get("executionTimeMs", 0),
             "raw": resp,
+            "statementErrors": resp.get("statementErrors", []),
         }
 
     # ── graphs ──────────────────────────────────────────────────────────────
@@ -182,57 +213,23 @@ class AdminApiClient:
         params: list[str],
     ) -> dict[str, Any]:
         """Run one of the dashboard algorithms through the real NexoraQL endpoint."""
-        if not graph_name:
-            raise NexoraAdminClientError("Select a graph before running an algorithm.")
+        from .console_api import graph_query
 
-        quote = lambda value: "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-        p1 = quote(params[0]) if params else None
-        p2 = quote(params[1]) if len(params) > 1 else None
-        two_nodes = {
-            "AreConnected": ("user1", "user2"),
-            "MutualFriends": ("user1", "user2"),
-            "ShortestPath": ("from", "to"),
-        }
-        one_node = {
-            "GetFriends": "user",
-            "FriendSuggestion": "user",
-            "AllDistances": "source",
-        }
-        job_algorithms = {
-            "ConnectedComponents", "AllDistances", "BetweennessCentrality",
-            "CommunityDetection", "InfluenceMaximization",
-        }
-        kind = "JOB" if algo_id in job_algorithms else "LOCK"
-        with_parts: list[str] = []
-        if algo_id in two_nodes:
-            if not p1 or not p2:
-                raise NexoraAdminClientError(f"{algo_id} needs two node ids in Params.")
-            first, second = two_nodes[algo_id]
-            with_parts.extend((f"{first}={p1}", f"{second}={p2}"))
-        elif algo_id in one_node:
-            if not p1:
-                raise NexoraAdminClientError(f"{algo_id} needs one node id in Params.")
-            with_parts.append(f"{one_node[algo_id]}={p1}")
-
-        if algo_id == "AllDistances":
-            with_parts.extend(("all=true", "max_hops=4"))
-        elif algo_id == "CommunityDetection":
-            with_parts.extend(("max_iterations=10", "min_community_size=2", "members=true"))
-        elif algo_id == "InfluenceMaximization":
-            with_parts.extend(("k=5", "simulations=20", "probability=0.1"))
-
-        with_clause = f" WITH {', '.join(with_parts)}" if with_parts else ""
-        limit_clause = " LIMIT 20" if algo_id in {"GetFriends", "FriendSuggestion", "MostConnected"} else ""
-        query = f"RUN {kind} {algo_id} ON {graph_name}{with_clause}{limit_clause};"
         try:
-            resp = self._request(
-                "POST",
-                "/query/execute",
-                token=token,
-                json_body={"query": query},
-            )
-            return {"result": resp, "query": query, "elapsedMs": resp.get("executionTimeMs", 0)}
-        except NexoraAdminClientError as exc:
-            raise NexoraAdminClientError(
-                f"Algorithm '{algo_id}' failed: {exc}\nQuery: {query}"
-            ) from exc
+            query, bindings = graph_query(algo_id, graph_name, params)
+        except ValueError as exc:
+            raise NexoraAdminClientError(str(exc)) from exc
+        response = self._request(
+            "POST",
+            "/query/execute",
+            token=token,
+            json_body={"query": query, "parameters": bindings},
+        )
+        if response.get("statementErrors"):
+            raise NexoraAdminClientError("Algorithm statement failed")
+        return {
+            "result": response,
+            "query": query,
+            "parameters": bindings,
+            "elapsedMs": response.get("executionTimeMs", 0),
+        }

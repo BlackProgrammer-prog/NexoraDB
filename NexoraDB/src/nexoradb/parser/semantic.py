@@ -742,6 +742,19 @@ class Executor:
             return {"success": True, "count": len(docs), "documents": docs}
         # ── LOOKUP JOIN ──
         if s.joins:
+            if hasattr(self.engine, 'iter_join_documents'):
+                import itertools
+                if len(s.joins) > 8 or len({j[0] for j in s.joins}) != len(s.joins):
+                    raise NexoraQLUnsupportedError('Use at most eight distinct LOOKUP JOIN targets')
+                stream = self.engine.iter_join_documents(s.collection, s.joins, build_condition(s.where),
+                                                         page_size=128, max_page_bytes=1024*1024)
+                try:
+                    records = (json.dumps(row, ensure_ascii=False) for row in iter(lambda: next(stream, None), None))
+                    records = itertools.islice(records, s.skip, s.skip+s.limit if s.limit else None)
+                    docs = self._decode_response_records(records, s.projection)
+                    return {'success': True, 'count': len(docs), 'documents': docs}
+                finally:
+                    stream.close()
             if len(s.joins) > 1:
                 raise NexoraQLUnsupportedError(
                     "Multiple LOOKUP JOINs not supported in MVP (engine does one per call)")

@@ -17,6 +17,25 @@ class RequestJournal:
     def __init__(self, path):
         self.path = Path(path)
 
+    def inspect(self, principal, key):
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", key):
+            raise HTTPException(400, 'Invalid Idempotency-Key')
+        identity = hashlib.sha256((principal + '\0' + key).encode()).hexdigest()
+        if not self.path.exists():
+            raise HTTPException(404, 'Request key not found')
+        connection = sqlite3.connect(self.path, timeout=2)
+        try:
+            row = connection.execute('SELECT response FROM requests WHERE id=?', (identity,)).fetchone()
+            if row is None: raise HTTPException(404, 'Request key not found')
+            if row[0] is None: return {'status': 'in_progress_or_unknown', 'requestKey': key}
+            result = json.loads(row[0])
+            return {'status': 'completed', 'requestKey': key, 'receipts': result.get('receipts', []),
+                    'statementErrors': result.get('errors', [])}
+        except sqlite3.Error as exc:
+            raise HTTPException(503, 'Request journal unavailable') from exc
+        finally:
+            connection.close()
+
     def run(self, principal, key, payload, action):
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", key):
             raise HTTPException(400, "Invalid Idempotency-Key")

@@ -21,6 +21,7 @@ class ServiceLifecycle:
         self.closed = False
         self.started = None
         self.background = None
+        self.resource_closers = []
 
     def mark(self, stage, **details):
         self.stage = stage
@@ -55,6 +56,8 @@ class ServiceLifecycle:
             engine, manager = self.resources()  # No lazy initialization during shutdown.
             self.mark("stop_workers")
             if self.background is not None: await self.background.shutdown()
+            for close in self.resource_closers:
+                await anyio.to_thread.run_sync(close)
             if manager is not None:
                 self.mark("release_graph_snapshots_flush")
                 if not await anyio.to_thread.run_sync(manager.prepare_shutdown):

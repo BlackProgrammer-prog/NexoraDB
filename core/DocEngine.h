@@ -70,6 +70,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <array>
 
 // ─────────────────────────────────────────────────────────────
 // Namespace: nexora::core
@@ -688,7 +689,8 @@ namespace nexora {
                     const nexora::query::Condition& condition,
                     std::uint32_t limit,
                     const std::string& continuation_token = "",
-                    size_t max_bytes=pagination::kDefaultBytes);
+                    size_t max_bytes=pagination::kDefaultBytes,
+                    const std::vector<std::array<std::string,3>>& joins = {});
             void ClosePage(const std::string& continuation_token);
 
             // ──────────────────────────────────────────────────────────
@@ -1082,6 +1084,8 @@ namespace nexora {
                 std::mutex scan_mutex;
                 std::string collection;
                 nexora::query::Condition condition;
+                std::vector<std::array<std::string,3>> joins;
+                uint64_t join_metadata_epoch=0;
                 std::chrono::steady_clock::time_point expires_at;
                 std::chrono::steady_clock::time_point created_at;
             };
