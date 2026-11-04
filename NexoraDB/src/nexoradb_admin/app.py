@@ -64,6 +64,7 @@ from .models import (
 from .monitoring import MonitoringSocketServer, MonitoringState
 from .native import create_doc_engine, create_graph_manager, load_native_module
 from .query_runner import QueryExecuteRequest, QueryExecuteResponse, execute_query
+from .query_routes import install_query_routes
 from .performance import PerformanceUpdate
 from .security import TokenError, decode_access_token
 from .service import (
@@ -187,6 +188,8 @@ def create_app(
             ) from exc
         require_active_admin(get_engine(), payload)
         return payload
+
+    install_query_routes(app, current_token_payload, get_engine, get_optional_graph_manager)
 
     @app.middleware("http")
     async def record_monitoring_request(request: Request, call_next: Callable[..., Any]) -> Any:
