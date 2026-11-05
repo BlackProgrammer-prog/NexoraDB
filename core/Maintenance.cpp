@@ -54,7 +54,8 @@ void DocEngine::ValidateFormatManifest() const {
         return;
     }
     require(status);
-    const auto actual=Json::parse(bytes),known=supported();
+    const auto actual=Json::parse(bytes);
+    auto known=supported();if(native_iam_) known["iam"]=1;
     if(actual==legacy_supported() && store=="2")
         throw std::runtime_error("Legacy index format requires offline copy migration to generation 3");
     if(actual!=known) throw std::runtime_error("unsupported or incomplete storage component versions");
@@ -63,7 +64,8 @@ void DocEngine::ValidateFormatManifest() const {
 rocksdb::Status DocEngine::EnsureIndexFormatFence() {
     std::lock_guard migration(document_migration_mutex_);
     rocksdb::WriteBatch batch;
-    batch.Put(manifest_key,supported().dump());batch.Put("meta:format:documents","3");
+    auto manifest=supported();if(native_iam_) manifest["iam"]=1;
+    batch.Put(manifest_key,manifest.dump());batch.Put("meta:format:documents","3");
     auto options=write_options_;options.sync=true;
     return txn_db_->Write(options,&batch);
 }
@@ -127,7 +129,8 @@ DBResult DocEngine::UpgradeFormatManifest() {
         require(txn_db_->Get(read_options_,"meta:format:documents",&format));
         if(format!="1" && format!="3") throw std::runtime_error("finish document migration first");
         rocksdb::WriteBatch batch;
-        batch.Put(manifest_key,supported().dump());
+        auto manifest=supported();if(native_iam_) manifest["iam"]=1;
+        batch.Put(manifest_key,manifest.dump());
         // Pre-phase-8 binaries reject this existing marker before initialization.
         // Physical document envelopes stay NXD1; this is the store reader fence.
         batch.Put("meta:format:documents","3");
