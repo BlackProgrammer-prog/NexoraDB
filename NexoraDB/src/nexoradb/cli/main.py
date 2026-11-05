@@ -33,6 +33,7 @@ from .presentation import PrivateInput, SecretInput, json_preview, literal
 from .query_client import QueryClientError, strict_json
 from .query_workspace import QueryWorkspace
 from .tasks import ScreenTasks
+from .security_panel import SecurityPanel
 
 DEFAULT_APP_SCOPES = ["query:execute"]
 SCOPE_PRESETS: dict[str, list[str]] = {
@@ -166,7 +167,7 @@ class LoginScreen(ScreenTasks, Screen[AuthSession]):
         with Container(id="auth-card"):
             yield Static(NEXORADB_BANNER, classes="banner")
             yield Static("CLI Console", classes="hero")
-            yield Static("Login or bootstrap the first root admin account.", classes="muted")
+            yield Static("Sign in with your enrolled username. Owner enrollment is local to the database host.", classes="muted")
             with TabbedContent(id="auth-tabs"):
                 with TabPane("Login", id="login-tab"):
                     yield Input(placeholder="Username", id="login-username", max_length=254)
@@ -174,19 +175,13 @@ class LoginScreen(ScreenTasks, Screen[AuthSession]):
                         placeholder="Password", password=True, id="login-password", max_length=1024
                     )
                     yield Button("Login (ctrl+j)", id="login-button", variant="primary")
-                with TabPane("Register root", id="register-tab"):
-                    yield Input(placeholder="First name", id="register-first-name", max_length=128)
-                    yield Input(placeholder="Last name", id="register-last-name", max_length=128)
-                    yield Input(placeholder="Email", id="register-email", max_length=254)
-                    yield PrivateInput(
-                        placeholder="Password",
-                        password=True,
-                        id="register-password",
-                        max_length=1024,
-                    )
-                    yield Button(
-                        "Create root admin (ctrl+j)", id="register-button", variant="success"
-                    )
+                with TabPane("Local setup", id="register-tab"):
+                    yield Static("On the database host: nexora_iam init <path>. Existing data: nexora_iam adopt <path>. Save recovery factors offline.")
+                    yield Button("Local setup only", id="register-button", disabled=True)
+                with TabPane("Password reset", id="reset-tab"):
+                    yield PrivateInput(placeholder="Administrator-issued reset token", password=True, id="reset-token", max_length=72)
+                    yield PrivateInput(placeholder="New password (15+ characters)", password=True, id="reset-password", max_length=1024)
+                    yield Button("Complete password reset", id="reset-button")
             yield Static("", id="auth-error")
         yield Footer()
 
@@ -206,7 +201,7 @@ class LoginScreen(ScreenTasks, Screen[AuthSession]):
     def _busy_changed(self, name, busy):
         if name == "auth":
             for identifier in ("login-button", "register-button"):
-                self.query_one("#" + identifier, Button).disabled = busy
+                    self.query_one("#" + identifier, Button).disabled = busy or identifier == "register-button"
 
     def _task_error(self, name, error):
         self._set_error(str(error))
@@ -227,6 +222,15 @@ class LoginScreen(ScreenTasks, Screen[AuthSession]):
             self._login()
         elif event.button.id == "register-button":
             self._register()
+        elif event.button.id == "reset-button":
+            token = self.query_one("#reset-token", Input).value
+            password = self.query_one("#reset-password", Input).value
+            self.query_one("#reset-token", Input).value = ""
+            self.query_one("#reset-password", Input).value = ""
+            async def reset():
+                await self.async_api.client.request("POST", "/auth/reset-password", {"resetToken": token, "newPassword": password})
+                self._set_error("Password reset complete; sign in with the new password")
+            self._launch("auth", reset)
 
     def _login(self) -> None:
         if "auth" in self._tasks or self._closing or self._leaving:
@@ -244,27 +248,7 @@ class LoginScreen(ScreenTasks, Screen[AuthSession]):
             self.dismiss(session)
 
     def _register(self) -> None:
-        if "auth" in self._tasks or self._closing or self._leaving:
-            return
-        values = [
-            self.query_one("#register-" + name, Input).value
-            for name in ("first-name", "last-name", "email", "password")
-        ]
-        self.query_one("#register-password", Input).value = ""
-        self._set_error("Creating root admin...")
-        self._launch("auth", lambda: self._register_worker(*values))
-
-    async def _register_worker(self, first_name, last_name, email, password):
-        await self.async_api.register(first_name, last_name, email, password)
-        try:
-            session = await self.async_api.login("root", password)
-        except QueryClientError as exc:
-            raise QueryClientError(
-                "Account creation completed; sign in instead of registering again"
-            ) from exc
-        if not self._closing and not self._leaving:
-            self._leaving = True
-            self.dismiss(session)
+        self._set_error("Owner enrollment is offline only. Ask the database operator to run nexora_iam init/adopt.")
 
     def _set_error(self, message):
         if not self._closing and not self._leaving:
@@ -622,6 +606,12 @@ class MainScreen(ScreenTasks, Screen[None]):
                     yield from self._tokens_layout()
                 with TabPane("Graph algorithms (f4)", id="algorithms-tab"):
                     yield from self._algorithms_layout()
+                with TabPane("Account and access", id="security-tab"):
+                    yield SecurityPanel(
+                        self.client.base_url, self.session.access_token,
+                        is_superuser=self.session.is_superuser,
+                        protected_root=self.session.protected_root,
+                    )
         yield Footer()
 
     # ── Monitor layout ────────────────────────────────────────────────────
@@ -656,7 +646,7 @@ class MainScreen(ScreenTasks, Screen[None]):
                 yield Input(placeholder="app display name", id="app-name", max_length=256)
                 yield Input(
                     value="86400",
-                    placeholder="expires in seconds (empty = no expiry)",
+                    placeholder="expires in seconds (empty = one day)",
                     id="app-expiry",
                     max_length=12,
                 )
@@ -669,6 +659,7 @@ class MainScreen(ScreenTasks, Screen[None]):
             with Vertical(id="scope-list"):
                 for scope in DEFAULT_APP_SCOPES:
                     yield Checkbox(scope, id=f"scope-{scope.replace(':', '-')}", value=True)
+            yield Input(value="{}", placeholder='Collection grants JSON: {"orders":["read"]}', id="app-collections", max_length=8192)
             yield Button("Create app token (ctrl+enter)", id="create-token", variant="success")
             yield SecretInput(
                 "",
@@ -830,14 +821,26 @@ class MainScreen(ScreenTasks, Screen[None]):
 
     def action_logout(self):
         if not self._leaving and not self._closing:
-            self._leaving = True
             self._clear_token()
             for workspace in self.query(QueryWorkspace):
                 workspace.disabled = True
                 workspace.action_stop_query()
-            self.dismiss(None)
+            async def leave():
+                try:
+                    await self.async_api.client.request("POST", "/auth/logout", {})
+                except QueryClientError:
+                    pass
+                finally:
+                    if not self._closing:
+                        self._leaving = True
+                        self.dismiss(None)
+            self._launch("logout", leave)
 
     def on_query_workspace_session_expired(self, event):
+        event.stop()
+        self.action_logout()
+
+    def on_security_panel_password_changed(self, event):
         event.stop()
         self.action_logout()
 
@@ -975,16 +978,19 @@ class MainScreen(ScreenTasks, Screen[None]):
             return
         try:
             expiry = int(raw) if raw else None
-            if expiry is not None and not 1 <= expiry <= 31536000:
+            grants = strict_json(self.query_one("#app-collections", Input).value)
+            if not isinstance(grants, dict):
+                raise ValueError()
+            if expiry is not None and not 300 <= expiry <= 31536000:
                 raise ValueError()
         except ValueError:
-            self._write_token_error("Expiry must be 1..31536000 seconds, or empty")
+            self._write_token_error("Expiry must be 300..31536000 seconds, or empty; collection grants must be a JSON object")
             return
         self._clear_token()
-        self._launch("token", lambda: self._token_worker(identifier, name, expiry, scopes))
+        self._launch("token", lambda: self._token_worker(identifier, name, expiry, scopes, grants))
 
-    async def _token_worker(self, identifier, name, expiry, scopes):
-        result = await self.async_api.create_token(identifier, name, expiry, scopes)
+    async def _token_worker(self, identifier, name, expiry, scopes, grants=None):
+        result = await self.async_api.create_token(identifier, name, expiry, scopes, grants)
         if not self._closing and not self._leaving:
             self._write_token(result)
 
