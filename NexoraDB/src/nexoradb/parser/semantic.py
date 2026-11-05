@@ -502,7 +502,8 @@ class Executor:
             if t not in allowed:
                 raise NexoraQLUnsupportedError(
                     f"{t} is not supported inside a transaction")
-            if t in {"Insert", "InsertBatch", "Update", "Delete"} and self.gm is not None:
+            if (t in {"Insert", "InsertBatch", "Update", "Delete"} and self.gm is not None
+                    and not getattr(self.engine, "native_projection_on_commit", False)):
                 raise NexoraQLUnsupportedError(
                     "Transactional graph projection is not yet supported; "
                     "the write was not executed")
@@ -515,9 +516,33 @@ class Executor:
                 NexoraQLUnsupportedError):
             raise
         except Exception as e:  # noqa: BLE001
+            if t in {'DefineRole', 'SetUserRoles', 'SetUserGrants', 'ShowSecurityUsers', 'ShowSecurityRoles'}:
+                # Preserve the native adapter's authentication/authorization status.
+                raise
             raise NexoraQLExecutionError(f"{t}: {e}") from e
 
     # ── helpers ───────────────────────────────────────────────
+
+    def _security(self, operation, arguments=None):
+        if not getattr(self.engine, 'is_native_iam', False):
+            raise NexoraQLUnsupportedError('Security statements require native IAM')
+        result = self.engine.administer(operation, arguments or {})
+        return {'success': True, 'data': result, 'error': ''}
+
+    def _x_DefineRole(self, s):
+        return self._security('set_role', {'name': s.name, 'grants': s.grants, 'parents': s.parents})
+
+    def _x_SetUserRoles(self, s):
+        return self._security('set_user', {'id': s.identity_id, 'roles': s.roles})
+
+    def _x_SetUserGrants(self, s):
+        return self._security('set_user', {'id': s.identity_id, 'grants': s.grants})
+
+    def _x_ShowSecurityUsers(self, _s):
+        return self._security('list_users')
+
+    def _x_ShowSecurityRoles(self, _s):
+        return self._security('list_roles')
 
     @staticmethod
     def _res(r) -> dict:

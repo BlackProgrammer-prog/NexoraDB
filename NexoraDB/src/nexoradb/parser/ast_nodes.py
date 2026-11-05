@@ -63,6 +63,35 @@ class TrueCond:
 ConditionNode = Union[Cmp, InCmp, ExistsCmp, And, Or, Not, TrueCond, None]
 
 
+@dataclass
+class DefineRole:
+    name: str
+    grants: dict
+    parents: list = field(default_factory=list)
+
+
+@dataclass
+class SetUserRoles:
+    identity_id: str
+    roles: list
+
+
+@dataclass
+class SetUserGrants:
+    identity_id: str
+    grants: dict
+
+
+@dataclass
+class ShowSecurityUsers:
+    pass
+
+
+@dataclass
+class ShowSecurityRoles:
+    pass
+
+
 # ══════════════════════════════════════════════════════════════
 # §2  DDL — Collections / Index / FK
 # ══════════════════════════════════════════════════════════════
