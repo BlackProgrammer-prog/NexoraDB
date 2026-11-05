@@ -280,9 +280,18 @@ Never remove the repository root or the entire home directory.
 Before configuring a source checkout, run from the repository root:
 
 ```sh
+bash scripts/native_prerequisites.sh --install  # Ubuntu 22.04
 bash scripts/bootstrap_vcpkg.sh
 python3 scripts/check_vcpkg_registry.py
 ```
+
+Use `bash scripts/native_prerequisites.sh --check` for a read-only check on an
+already prepared host. The archive macros from `autoconf-archive` are required
+in addition to the `autoconf` executable. Cached vcpkg binaries can conceal a
+missing macro package; the debug CI job therefore sets
+`VCPKG_BINARY_SOURCES=clear` and builds dependencies from source. Source archive
+downloads can still be cached. On a failed dependency build, native-quality and
+publication workflows retain the manifest install log and port build logs.
 
 `cmake/vcpkg-revision.txt` pins the registry/tool checkout used by native,
 publication and performance workflows. It is separate from the manifest's

@@ -1,5 +1,11 @@
 # 0.5.3 CI registry and compatibility fixes
 
+> Follow-up: these earlier tests allowed vcpkg binary caches. A subsequent
+> uncached remote build exposed missing host `autoconf-archive` macros. Native
+> and publication jobs now share the complete host prerequisite installer and
+> an explicit preflight, and the debug job builds dependencies without binary
+> caches. See [cold-build verification](ci-cold-build-v0.5.3.md).
+
 The first remote native jobs checked out vcpkg commit
 `7476f0d4e77d3333fbb249657df8251c28c4faae`, whose version database does not
 contain the manifest's libsodium 1.0.22 override. Local validation used a newer
