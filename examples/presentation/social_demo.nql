@@ -1,3 +1,27 @@
+-- Native IAM presentation: run as an interactive SuperUser after offline init/adopt.
+-- The users collection below contains application profiles, NOT login identities.
+-- Create login identities with passwords in React /security or TUI Account and access.
+-- Never put a password or recovery/reset factor in this file or query history.
+-- Full guide (including password recovery): docs/security/users-and-recovery-fa.md
+SHOW SECURITY USERS;
+SHOW SECURITY ROLES;
+
+-- Exact collection names; read, write and manage are independent permissions.
+-- These statements replace role definitions. They grant no graph access.
+CREATE OR REPLACE ROLE social_reader GRANTS {"users":["read"],"posts":["read"],"follows":["read"]};
+CREATE OR REPLACE ROLE social_editor GRANTS {"users":["write"],"posts":["write"],"follows":["write"]} INHERITS ["social_reader"];
+
+-- Optional: after creating a login user in the UI, copy its immutable ID from
+-- SHOW SECURITY USERS. Uncomment ONE example and replace the placeholder.
+-- ALTER USER 'COPY_IMMUTABLE_ID_HERE' SET ROLES ["social_reader"];
+-- ALTER USER 'COPY_IMMUTABLE_ID_HERE' SET GRANTS {"posts":["read","write"]};
+-- SET ROLES and SET GRANTS replace the respective list/map; [] / {} clears it.
+-- Changes invalidate the target's sessions; custom-role edits sign out ordinary users.
+-- Only the initial protected owner (root identity, any username) can run:
+-- ALTER USER 'COPY_IMMUTABLE_ID_HERE' SET ROLES ["superuser"];
+-- A delegated SuperUser can create ordinary users but cannot promote anyone.
+-- IAM statements cannot run inside BEGIN/COMMIT or with service credentials.
+
 CREATE COLLECTION users (
   username STRING REQUIRED,
   age INT64,
