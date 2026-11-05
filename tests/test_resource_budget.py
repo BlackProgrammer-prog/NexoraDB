@@ -110,14 +110,22 @@ def test_resource_pool_shared_across_engines_and_pressure_is_not_io_failure(tmp_
 
 
 def test_service_sizing_applies_effective_rocks_and_all_margins(tmp_path, native):
+    import importlib.util
     from nexoradb_admin.native import create_doc_engine
     from nexoradb_admin.config import AdminApiSettings
-    settings = AdminApiSettings(db_path=tmp_path/'sized', rocks_auto_tune=False, rocks_memory_mb=16,
+    settings = AdminApiSettings(db_path=tmp_path/'sized', graph_dir=tmp_path/'graphs', rocks_auto_tune=False, rocks_memory_mb=16,
         resource_process_mb=64, resource_allocator_margin_mb=8, resource_python_margin_mb=8,
         resource_page_cache_margin_mb=8, resource_safety_margin_mb=4)
-    engine = create_doc_engine(settings)
-    assert report(engine.execution_budget())['capacity_bytes'] == 20*1024**2
-    assert engine.prepare_shutdown().success
+    # The real server factory now requires explicit offline IAM enrollment.
+    spec = importlib.util.spec_from_file_location('iam_sizing_enrollment', ROOT/'scripts/verify_iam_cli.py')
+    helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+    binary = Path(os.environ.get('NEXORADB_TEST_IAM_CLI', ROOT/'build/debug/nexora_iam'))
+    helper.terminal_enroll(binary, settings.db_path)
+    service = create_doc_engine(settings)
+    token = service.login('selected.owner', 'Terminal-secret-test-8931!', 'test')['accessToken']
+    memory = json.loads(service.bind(token).memory_report())
+    assert memory['execution_budget']['capacity_bytes'] == 20*1024**2
+    assert service.prepare_shutdown().success
     rejected = tmp_path/'not-opened'
     with pytest.raises(RuntimeError, match='headroom'):
         create_doc_engine(AdminApiSettings(db_path=rejected, rocks_auto_tune=False, rocks_memory_mb=16,

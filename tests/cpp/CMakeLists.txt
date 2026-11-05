@@ -1,5 +1,26 @@
 find_package(GTest CONFIG REQUIRED)
 
+add_executable(nexora_iam_tests test_native_iam.cpp test_secure_iam.cpp)
+target_link_libraries(nexora_iam_tests PRIVATE nexora_core GTest::gtest_main)
+add_test(NAME cpp.NativeIam COMMAND nexora_iam_tests)
+if(UNIX AND NOT NEXORA_ENABLE_TSAN)
+    add_executable(nexora_iam_crash_probe iam_crash_probe.cpp)
+    target_link_libraries(nexora_iam_crash_probe PRIVATE nexora_core)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME cpp.NativeIamCrashMatrix
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/verify_iam_recovery.py
+            --probe $<TARGET_FILE:nexora_iam_crash_probe>)
+    set_tests_properties(cpp.NativeIamCrashMatrix PROPERTIES TIMEOUT 60)
+    # Loading an ASan DSO into an ordinary Python interpreter requires a
+    # separately configured ASan host/preload. Keep this check on normal builds.
+    if(NEXORA_BUILD_PYTHON AND NOT NEXORA_ENABLE_ASAN)
+        add_test(NAME cpp.NativeIamCliAndPython
+            COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/verify_iam_cli.py
+                --cli $<TARGET_FILE:nexora_iam> --module $<TARGET_FILE:nexoradb_py>)
+        set_tests_properties(cpp.NativeIamCliAndPython PROPERTIES TIMEOUT 60)
+    endif()
+endif()
+
 include(GoogleTest)
 
 # GCC's ThreadSanitizer can fail before main() on WSL2 with
@@ -28,6 +49,8 @@ function(nexora_configure_tsan_wsl_launcher target_name)
             "${NEXORA_SETARCH_EXECUTABLE};${CMAKE_SYSTEM_PROCESSOR};-R"
     )
 endfunction()
+
+nexora_configure_tsan_wsl_launcher(nexora_iam_tests)
 
 add_executable(nexora_doc_tests
         test_doc_engine.cpp
