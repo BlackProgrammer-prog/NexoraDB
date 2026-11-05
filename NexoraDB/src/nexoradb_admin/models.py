@@ -14,10 +14,10 @@ class AdminRegisterRequest(BaseModel):
     first_name: str = Field(alias="firstName", min_length=1, max_length=100)
     last_name: str = Field(alias="lastName", min_length=1, max_length=100)
     email: str = Field(min_length=3, max_length=254)
-    password: str = Field(min_length=1, max_length=1024)
-    confirm_password: str | None = Field(default=None, alias="confirmPassword")
+    password: str = Field(min_length=1, max_length=1024, repr=False)
+    confirm_password: str | None = Field(default=None, alias="confirmPassword", repr=False)
 
-    @field_validator("first_name", "last_name", "email", "password", "confirm_password")
+    @field_validator("first_name", "last_name", "email")
     @classmethod
     def strip_text(cls, value: str | None) -> str | None:
         return value.strip() if isinstance(value, str) else value
@@ -37,10 +37,11 @@ class AdminRegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     username: str = Field(min_length=1, max_length=100)
-    password: str = Field(min_length=1, max_length=1024)
+    password: str = Field(min_length=1, max_length=1024, repr=False)
 
-    @field_validator("username", "password")
+    @field_validator("username")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
@@ -51,6 +52,9 @@ class PublicUser(BaseModel):
     username: str
     email: str | None = None
     role: Literal["admin", "application"]
+    roles: list[str] = Field(default_factory=list)
+    protected_root: bool = Field(default=False, alias="protectedRoot")
+    grants: dict[str, list[str]] = Field(default_factory=dict)
     first_name: str | None = Field(default=None, alias="firstName")
     last_name: str | None = Field(default=None, alias="lastName")
     status: Literal["active", "disabled", "deleted"]
