@@ -14,6 +14,7 @@ const LoginPage = lazy(() => import('../pages/auth/LoginPage').then((module) => 
 const RegisterPage = lazy(() => import('../pages/auth/RegisterPage').then((module) => ({ default: module.RegisterPage })))
 const NotFoundPage = lazy(() => import('../pages/NotFoundPage').then((module) => ({ default: module.NotFoundPage })))
 const QueryPage = lazy(() => import('../pages/QueryPage').then((module) => ({ default: module.QueryPage })))
+const SecurityPage = lazy(() => import('../pages/SecurityPage').then((module) => ({ default: module.SecurityPage })))
 
 function FullPageLoading() {
   return (
@@ -56,6 +57,7 @@ export function AppRoutes() {
           <Route element={<GraphsPage />} path="/graphs" />
           <Route element={<QueryPage />} path="/query" />
           <Route element={<AppTokensPage />} path="/app-tokens" />
+          <Route element={<SecurityPage />} path="/security" />
         </Route>
       </Route>
       <Route element={<NotFoundPage />} path="*" />
