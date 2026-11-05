@@ -22,8 +22,8 @@ from nexoradb.cli.query_editor import QueryEditor
 from nexoradb.cli.query_workspace import QueryWorkspace
 from nexoradb_admin.app import create_app
 from nexoradb_admin.config import AdminApiSettings
-from nexoradb_admin.security import create_access_token
 from textual.app import App
+from verify_iam_cli import terminal_enroll
 
 
 def main():
@@ -47,6 +47,9 @@ def main():
             rocks_memory_mb=32,
             execution_memory_mb=32,
         )
+        terminal_enroll(
+            Path(nexoradb.__file__).parent / "native/nexora_iam", settings.db_path
+        )
         app = create_app(settings=settings)
         with TestClient(app) as client:
             assert (
@@ -59,11 +62,17 @@ def main():
                         "password": "ReleaseSmoke123!",
                     },
                 ).status_code
-                == 201
+                == 403
             )
-            token = create_access_token(
-                username="root", role="admin", settings=settings
+            login = client.post(
+                "/auth/login",
+                json={
+                    "username": "selected.owner",
+                    "password": "Terminal-secret-test-8931!",
+                },
             )
+            assert login.status_code == 200, login.text
+            token = login.json()["accessToken"]
             client.headers["Authorization"] = "Bearer " + token
             dashboard = client.get("/admin/")
             assert (
@@ -86,7 +95,7 @@ def main():
                 )
             )
             assert client.get("/admin/assets/" + query_chunk.name).status_code == 200
-            engine = app.state.engine
+            engine = app.state.engine.bind(token)
             assert engine.create_collection("items").success
             assert engine.create_collection("targets").success
             assert engine.insert_one(
@@ -101,8 +110,9 @@ def main():
             frames = [json.loads(line) for line in response.text.splitlines()]
             assert (
                 frames[-1] == {"end": True}
+                and "document" in frames[0]
                 and frames[0]["document"]["__joined__"]["label"] == "joined"
-            )
+            ), frames
             cursor = client.post(
                 "/query/cursors", json={"query": query, "pageSize": 1}
             ).json()
@@ -136,9 +146,9 @@ def main():
 
             async def terminal():
                 transport = QueryClient(
-                    "http://installed", token, transport=httpx.ASGITransport(app=app)
+                    "http://localhost", token, transport=httpx.ASGITransport(app=app)
                 )
-                workspace = QueryWorkspace("http://installed", token, client=transport)
+                workspace = QueryWorkspace("http://localhost", token, client=transport)
 
                 class Console(App):
                     def compose(self):
