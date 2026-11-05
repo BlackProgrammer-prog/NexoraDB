@@ -57,7 +57,8 @@ jobs:
           CXX: g++-11
         run: |
           cmake --preset ${{ matrix.preset }} -DNEXORA_BUILD_PYTHON=${{ matrix.preset == 'debug' && 'ON' || 'OFF' }}
-          cmake --build build/${{ matrix.preset }} --target nexora_doc_tests nexora_graph_tests --parallel 2
+          cmake --build build/${{ matrix.preset }} --target nexora_doc_tests nexora_graph_tests nexora_iam nexora_iam_tests --parallel 2
+          if [ '${{ matrix.preset }}' != tsan-full ]; then cmake --build build/${{ matrix.preset }} --target nexora_iam_crash_probe --parallel 2; fi
           if [ '${{ matrix.preset }}' = debug ]; then cmake --build build/debug --target nexoradb_py --parallel 2; fi
       - name: Native tests
         run: |
@@ -70,6 +71,9 @@ jobs:
         if: matrix.preset == 'debug'
         env:
           PYTHONPATH: build/debug
+          NEXORADB_TEST_NATIVE_PATH: ${{ github.workspace }}/build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
+          NEXORADB_NATIVE_MODULE_PATH: ${{ github.workspace }}/build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
+          NEXORADB_TEST_IAM_CLI: ${{ github.workspace }}/build/debug/nexora_iam
         run: |
           python3 -m pip install -r tests/performance-requirements.txt
           python3 -m pytest -q tests/test_command_imports.py
@@ -78,6 +82,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_benchmark_history.py'
           python3 tests/test_operations_metrics.py
           python3 -m pytest -q tests/test_memory_ownership.py tests/test_memory_reporting.py
+          python3 -m pytest -q tests/test_native_iam_http.py tests/test_iam_tui.py tests/test_iam_query_syntax.py
           python3 -m pytest -q tests/test_resource_budget.py tests/test_bounded_execution.py --junitxml=build/debug/mem003004-tests.xml
           python3 -m pytest -q tests/test_execution_lifecycle.py tests/test_api_capacity_streaming.py tests/test_query_contracts.py --junitxml=build/debug/mem005006-tests.xml
           python3 scripts/verify_execution_lifecycle.py --directory build/debug/mem005006-signal --native build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
