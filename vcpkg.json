@@ -1,8 +1,9 @@
 {
   "name": "nexoradb",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "NexoraDB - Document + Graph Database Engine",
   "dependencies": [
+    { "name": "libsodium" },
     {
       "name": "rocksdb",
       "features": ["snappy", "zstd", "lz4"]
@@ -27,5 +28,10 @@
     }
   ],
   "builtin-baseline": "7476f0d4e77d3333fbb249657df8251c28c4faae",
-  "overrides": []
+  "overrides": [
+    { "name": "libsodium", "version": "1.0.22" },
+    { "name": "vcpkg-make", "version-date": "2026-01-01" },
+    { "name": "vcpkg-cmake-get-vars", "version-date": "2025-05-29" },
+    { "name": "vcpkg-msbuild", "version-date": "2023-08-08" }
+  ]
 }
