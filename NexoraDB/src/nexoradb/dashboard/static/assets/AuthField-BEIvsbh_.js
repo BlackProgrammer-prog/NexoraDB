@@ -1,0 +1,1 @@
+import{h as e}from"./index-B_0-93EM.js";import{t}from"./Input-37e9QuW_.js";var n=e();function r({id:e,label:r,...i}){return(0,n.jsxs)(`label`,{className:`block`,htmlFor:e,children:[(0,n.jsx)(`span`,{className:`text-sm font-medium text-slate-700`,children:r}),(0,n.jsx)(t,{className:`mt-2 h-11`,id:e,...i})]})}export{r as t};

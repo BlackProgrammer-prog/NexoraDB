@@ -1,0 +1,1 @@
+import{h as e}from"./index-B_0-93EM.js";var t=e();function n({description:e,title:n}){return(0,t.jsxs)(`div`,{className:`rounded-lg border border-dashed border-slate-300 bg-white p-8 text-center`,children:[(0,t.jsx)(`h3`,{className:`text-sm font-semibold text-slate-900`,children:n}),e?(0,t.jsx)(`p`,{className:`mt-2 text-sm text-slate-500`,children:e}):null]})}export{n as t};
