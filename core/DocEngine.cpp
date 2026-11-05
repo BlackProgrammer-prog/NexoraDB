@@ -18,6 +18,7 @@
  */
 
 #include "DocEngine.h"
+#include "security/NativeIam.h"
 #include "DocumentCodec.h"
 #include "IndexCodec.h"
 #include "query/CompiledQuery.h"
@@ -672,7 +673,11 @@ namespace nexora {
         DocEngine::DocEngine(
                 const std::string& db_path,
                 const TransactionSettings& transaction_settings,const RocksSettings& rocks_settings)
-                : db_path_(db_path),
+                :DocEngine(db_path,transaction_settings,rocks_settings,false) {}
+
+        DocEngine::DocEngine(const std::string& db_path,const TransactionSettings& transaction_settings,
+                const RocksSettings& rocks_settings,bool native_access)
+                : native_iam_(native_access), db_path_(db_path),
                   rocks_settings_(rocks_settings),
                   rocks_resources_(rocks_settings.shared_resources ? rocks_settings.shared_resources :
                       std::make_shared<RocksResources>(rocks_settings.memory_budget_bytes,rocks_settings.block_cache_bytes)),
@@ -717,6 +722,8 @@ namespace nexora {
             }
 
             txn_db_.reset(raw_db);
+            if(native_iam_) nexora::security::requireEnrolledStore(*txn_db_);
+            else nexora::security::requireLegacyAccessAllowed(*txn_db_);
 
             std::string stored_document_format;
             s = txn_db_->Get(
@@ -744,7 +751,7 @@ namespace nexora {
                 }
                 if(!indexes->status().ok()) throw std::runtime_error(indexes->status().ToString());
             }
-            if (!EnsureInternalCollections()) {
+            if (!native_iam_ && !EnsureInternalCollections()) {
                 throw std::runtime_error("[NexoraDB] Failed to initialize internal collections");
             }
             {

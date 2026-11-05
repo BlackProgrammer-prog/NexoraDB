@@ -76,6 +76,7 @@
 // Namespace: nexora::core
 // ─────────────────────────────────────────────────────────────
 
+namespace nexora::security { class SecureDatabase; }
 namespace nexora {
     namespace core {
 
@@ -1051,6 +1052,9 @@ namespace nexora {
             // ──────────────────────────────────────────────────────────
 
             friend struct PageSessionTestAccess;
+            friend class nexora::security::SecureDatabase;
+            DocEngine(const std::string&, const TransactionSettings&, const RocksSettings&, bool native_access);
+            bool native_iam_ = false;
             std::string db_path_;
             mutable OperationsState operations_;
             std::atomic<uint8_t> query_tuning_{3}; // Read admission + query index selection. Never disables index maintenance.
