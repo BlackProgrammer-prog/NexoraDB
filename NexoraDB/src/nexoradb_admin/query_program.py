@@ -21,8 +21,8 @@ from .query_runner import _rows_from_single_result, _raise_query_error, _load_ne
 from .query_tools import READ_ONLY
 
 
-def validate_graph_program(statements, graph_manager):
-    if graph_manager is None: return
+def validate_graph_program(statements, graph_manager, engine=None):
+    if graph_manager is None or getattr(engine, "native_projection_on_commit", False): return
     active = False
     for statement in statements:
         name = type(statement).__name__
@@ -34,7 +34,7 @@ def validate_graph_program(statements, graph_manager):
 
 class ProgramStream:
     def __init__(self, engine, statements, semantic, graph_manager=None, authorize=lambda: None):
-        validate_graph_program(statements, graph_manager)
+        validate_graph_program(statements, graph_manager, engine)
         self.engine, self.statements, self.semantic = engine, statements, semantic
         self.authorize = authorize
         self.executor = semantic.Executor(engine, graph_manager)
