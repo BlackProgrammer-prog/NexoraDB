@@ -19,6 +19,7 @@ function formatDate(timestamp: number | null) {
 }
 
 function maskToken(token: string) {
+  if (!token) return 'Shown once when created'
   if (token.length < 24) return '••••••••'
   return `${token.slice(0, 14)}••••••••${token.slice(-8)}`
 }
@@ -112,7 +113,7 @@ function AppTokenListContent() {
               <dt className="text-slate-500">Expires</dt><dd className="text-slate-700">{formatDate(token.expiresAt)}</dd>
             </dl>
             <div className="mt-4 grid grid-cols-2 gap-2">
-              <Button onClick={() => copyToken(token)} variant="secondary">
+              <Button disabled={!token.token} onClick={() => copyToken(token)} variant="secondary">
                 {copiedId === token.id ? 'Copied' : 'Copy token'}
               </Button>
               <Button className="text-red-700" disabled={deletingId === token.id} onClick={() => deleteToken(token)} variant="ghost">
@@ -173,6 +174,7 @@ function AppTokenListContent() {
                   <div className="flex justify-end gap-2">
                     <Button
                       className="h-8 px-3 text-xs"
+                      disabled={!token.token}
                       onClick={() => copyToken(token)}
                       variant="secondary"
                     >

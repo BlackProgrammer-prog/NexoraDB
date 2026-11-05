@@ -1,7 +1,6 @@
 export function secureEndpoint(configured: string, fallback: string): string {
   const value = configured || fallback
-  if (!value) return ''
-  const url = new URL(value, window.location.origin)
+  const url = new URL(value || window.location.origin, window.location.origin)
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error('API endpoint must be an HTTP(S) URL without credentials, query or fragment')
   }
@@ -9,7 +8,7 @@ export function secureEndpoint(configured: string, fallback: string): string {
   if (url.protocol === 'http:' && (!loopback || window.location.protocol === 'https:')) {
     throw new Error('Remote API endpoints require HTTPS')
   }
-  return url.href.replace(/\/$/, '')
+  return value ? url.href.replace(/\/$/, '') : ''
 }
 
 export const API_BASE_URL = secureEndpoint(

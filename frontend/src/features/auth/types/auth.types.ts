@@ -3,6 +3,9 @@ export interface AdminUser {
   username: string
   email: string | null
   role: 'admin' | 'application'
+  roles?: string[]
+  protectedRoot?: boolean
+  grants?: Record<string, string[]>
   firstName: string | null
   lastName: string | null
   status: 'active' | 'disabled' | 'deleted'
