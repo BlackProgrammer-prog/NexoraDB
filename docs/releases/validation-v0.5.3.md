@@ -1,5 +1,11 @@
 # Local validation: NexoraDB 0.5.3
 
+> Follow-up: the first remote CI run exposed an older registry checkout that
+> differed from the local candidate environment. See the
+> [CI correction and fresh sanitizer verification](ci-fix-v0.5.3.md).
+> Artifact hashes below describe the earlier local candidate, not an artifact
+> rebuilt from the subsequent CI fixes.
+
 Validated on 2026-11-05 in Ubuntu WSL, CPython 3.10 and Node.js 24.17.0.
 The candidate includes uncommitted working-tree changes on base commit
 `8df5d3972933d14a63c97eaf9c5399035cf8e04c`. The publication workflow must rebuild

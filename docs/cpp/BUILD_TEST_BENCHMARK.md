@@ -274,3 +274,25 @@ cmake --preset debug
 ```
 
 Never remove the repository root or the entire home directory.
+
+## Pinned dependency registry
+
+Before configuring a source checkout, run from the repository root:
+
+```sh
+bash scripts/bootstrap_vcpkg.sh
+python3 scripts/check_vcpkg_registry.py
+```
+
+`cmake/vcpkg-revision.txt` pins the registry/tool checkout used by native,
+publication and performance workflows. It is separate from the manifest's
+`builtin-baseline`: that older baseline preserves existing dependency versions,
+while the pinned registry contains newer explicit overrides such as libsodium
+1.0.22. Do not reset the registry checkout to the baseline commit. Cache keys
+include both the manifest and registry revision. The bootstrap fails before
+CMake if a requested override is missing from the pinned version database.
+
+The `tsan-full` workflow runs configure/build as well as CTest under
+`setarch "$(uname -m)" -R`: Autoconf probes and GoogleTest discovery execute
+instrumented binaries during configuration/build too. This does not disable
+ThreadSanitizer instrumentation.
