@@ -17,7 +17,7 @@ export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const { isAuthenticated, isInitializing, login } = useAuth()
-  const [username, setUsername] = useState('root')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isCheckingSetup, setIsCheckingSetup] = useState(true)
@@ -26,7 +26,7 @@ export function LoginPage() {
   const candidate = (location.state as LoginLocationState | null)?.from?.pathname
   const redirectTo = candidate && ['/dashboard', '/collections', '/documents', '/graphs', '/query', '/app-tokens'].includes(candidate)
     ? candidate
-    : '/dashboard'
+    : '/collections'
 
   useEffect(() => {
     let isActive = true

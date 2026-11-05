@@ -13,6 +13,7 @@ const navItems: Array<{ label: string; path: string }> = [
   { label: 'Graphs', path: '/graphs' },
   { label: 'Query editor', path: '/query' },
   { label: 'App tokens', path: '/app-tokens' },
+  { label: 'Account and access', path: '/security' },
 ]
 
 export function DashboardLayout() {
@@ -36,7 +37,7 @@ export function DashboardLayout() {
             </div>
           </div>
           <nav className="flex gap-2 overflow-x-auto p-4 lg:flex-col">
-            {navItems.map((item) => (
+            {navItems.filter((item) => user?.role === 'admin' || !['/dashboard', '/graphs', '/app-tokens'].includes(item.path)).map((item) => (
               <NavLink
                 className={({ isActive }) =>
                   cn(
