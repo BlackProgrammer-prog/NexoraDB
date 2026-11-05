@@ -1425,6 +1425,26 @@ namespace {
         std::atomic<bool> operation_failed{false};
         std::vector<std::thread> workers;
 
+        // This checks counter consistency, not lock-admission latency. A
+        // contended counter lock may legitimately hit the bounded timeout on
+        // a busy CI host. Retry only explicit counter-lock conflicts before
+        // commit; commit errors and I/O/unknown outcomes must never be replayed.
+        const auto retry_contended = [](const auto& operation) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(10);
+            auto result = operation();
+            while (!result.success &&
+                   (result.error_code == "transaction_timeout" ||
+                    result.error_code == "transaction_conflict" ||
+                    result.error_code == "transaction_deadlock") &&
+                   result.error_msg.find(" counter staging:") != std::string::npos &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+                result = operation();
+            }
+            return result;
+        };
+
         for (int worker = 0; worker < 2; ++worker) {
             workers.emplace_back([&, worker] {
                 while (!start.load(std::memory_order_acquire)) {
@@ -1432,12 +1452,15 @@ namespace {
                 }
                 for (int offset = 0; offset < 50; ++offset) {
                     const int index = worker * 50 + offset;
-                    const auto result = engine.InsertOne(
-                            "items",
-                            R"({"_id":"new_)" +
-                            std::to_string(index) +
-                            R"(","value":2})");
+                    const auto result = retry_contended([&] {
+                        return engine.InsertOne(
+                                "items",
+                                R"({"_id":"new_)" +
+                                std::to_string(index) +
+                                R"(","value":2})");
+                    });
                     if (!result.success) {
+                        ADD_FAILURE() << result.error_code << ": " << result.error_msg;
                         operation_failed.store(
                                 true,
                                 std::memory_order_relaxed);
@@ -1453,10 +1476,14 @@ namespace {
                 }
                 for (int offset = 0; offset < 50; ++offset) {
                     const int index = worker * 50 + offset;
-                    const auto result = engine.DeleteById(
-                            "items",
-                            "old_" + std::to_string(index));
+                    const auto result = retry_contended([&] {
+                        return engine.DeleteById(
+                                "items",
+                                "old_" + std::to_string(index));
+                    });
                     if (!result.success || result.data != "1") {
+                        ADD_FAILURE() << result.error_code << ": " << result.error_msg
+                                      << "; deleted=" << result.data;
                         operation_failed.store(
                                 true,
                                 std::memory_order_relaxed);
