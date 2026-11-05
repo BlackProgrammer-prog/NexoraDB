@@ -22,7 +22,7 @@ from .query_tools import READ_ONLY
 
 
 def validate_graph_program(statements, graph_manager, engine=None):
-    if graph_manager is None or getattr(engine, "native_projection_on_commit", False): return
+    if graph_manager is None or getattr(engine, "native_projection_on_commit", False) is True: return
     active = False
     for statement in statements:
         name = type(statement).__name__

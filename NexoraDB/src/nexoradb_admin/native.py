@@ -150,7 +150,7 @@ def create_doc_engine(settings: AdminApiSettings) -> Any:
 
 def create_graph_manager(settings: AdminApiSettings, engine: Any) -> Any:
     native = load_native_module(settings)
-    if getattr(engine, "is_native_iam", False):
+    if getattr(engine, "is_native_iam", False) is True:
         from .native_iam import SecureGraphAdapter
         return engine.service.graph or SecureGraphAdapter(engine.service, str(settings.graph_dir), engine.token)
     if not getattr(native, "GRAPH_ENABLED", False):

@@ -503,7 +503,7 @@ class Executor:
                 raise NexoraQLUnsupportedError(
                     f"{t} is not supported inside a transaction")
             if (t in {"Insert", "InsertBatch", "Update", "Delete"} and self.gm is not None
-                    and not getattr(self.engine, "native_projection_on_commit", False)):
+                    and getattr(self.engine, "native_projection_on_commit", False) is not True):
                 raise NexoraQLUnsupportedError(
                     "Transactional graph projection is not yet supported; "
                     "the write was not executed")
