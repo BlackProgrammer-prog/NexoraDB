@@ -54,16 +54,11 @@ jobs:
           path: |
             vcpkg
             ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'cmake/vcpkg-revision.txt') }}
 
       - name: Bootstrap vcpkg
         run: |
-          if [ ! -x vcpkg/vcpkg ]; then
-            git clone https://github.com/microsoft/vcpkg.git vcpkg
-            ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
-          fi
-          git -C vcpkg checkout 7476f0d4e77d3333fbb249657df8251c28c4faae
-          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          bash scripts/bootstrap_vcpkg.sh
 
       - name: Set up dashboard toolchain
         uses: actions/setup-node@v4
