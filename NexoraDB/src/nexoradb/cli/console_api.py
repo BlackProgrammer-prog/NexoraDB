@@ -87,7 +87,8 @@ class ConsoleApi:
         token = result.get("accessToken")
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,16384}", token):
             raise QueryClientError("Invalid login response")
-        return AuthSession(token, username)
+        user = result.get("user") or {}
+        return AuthSession(token, username, user.get("role") == "admin", user.get("protectedRoot") is True)
 
     async def register(self, first, last, email, password):
         return await self.client.request(
@@ -120,11 +121,12 @@ class ConsoleApi:
                 graphs.append(name)
         return graphs
 
-    async def create_token(self, app_id, name, expiry, scopes):
+    async def create_token(self, app_id, name, expiry, scopes, collections=None):
         return await self.client.request(
             "POST",
             "/apps/tokens",
-            {"appId": app_id, "appName": name, "expiresInSeconds": expiry, "scopes": scopes},
+            {"appId": app_id, "appName": name, "expiresInSeconds": expiry, "scopes": scopes,
+             "collections": collections or {}},
         )
 
     async def algorithm(self, algo, graph, params):

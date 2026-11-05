@@ -40,6 +40,8 @@ def strict_json(value):
 class QueryClient:
     def __init__(self, base_url, token=None, *, transport=None):
         url = httpx.URL(base_url)
+        if transport is None and url.scheme == "http" and url.host not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Remote credential transport requires HTTPS")
         if (
             url.scheme not in {"http", "https"}
             or not url.host
