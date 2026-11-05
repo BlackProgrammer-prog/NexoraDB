@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from threading import RLock
@@ -66,6 +67,8 @@ from .native import create_doc_engine, create_graph_manager, load_native_module
 from .query_runner import QueryExecuteRequest, QueryExecuteResponse, execute_query
 from .query_routes import install_query_routes
 from .performance import PerformanceUpdate
+from .native_iam import NativeTokenContextMiddleware, authenticate_token, current_native_token
+from .iam_routes import install_iam_routes
 from .security import TokenError, decode_access_token
 from .service import (
     InternalUserEngine,
@@ -101,10 +104,11 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(app_settings.allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
     app.state.settings = app_settings
+    app.add_middleware(NativeTokenContextMiddleware)
     initialization_lock = RLock()
     def release_resources():
         app.state.graph_manager = None
@@ -132,8 +136,28 @@ def create_app(
     def get_engine() -> InternalUserEngine:
         with initialization_lock:
             if app.state.engine is None:
-                app.state.engine = resolved_engine_factory(app.state.settings)
-            return app.state.engine
+                try:
+                    app.state.engine = resolved_engine_factory(app.state.settings)
+                except RuntimeError as error:
+                    if "not initialized" in str(error):
+                        raise HTTPException(503, "Local IAM setup or migration is required on the database host") from error
+                    raise
+            service = app.state.engine
+            return service.bind() if getattr(service, "is_native_iam", False) else service
+
+    app.state.iam_engine_provider = get_engine
+    existing_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def native_ready(application):
+        async with existing_lifespan(application):
+            if engine is None and engine_factory is None:
+                # Refuse to listen with a missing/corrupt IAM store or failed
+                # graph recovery. Bootstrap/migration are local CLI operations.
+                get_engine()
+            yield
+
+    app.router.lifespan_context = native_ready
 
     def get_native_module() -> Any:
         with initialization_lock:
@@ -143,14 +167,24 @@ def create_app(
 
     def get_graph_manager() -> Any:
         with initialization_lock:
+            engine = get_engine()
+            if getattr(engine, "is_native_iam", False):
+                claims = engine.claims()
+                if claims["role"] != "admin" or claims["service"]:
+                    raise HTTPException(403, "Graph administration requires an interactive superuser session")
             if app.state.graph_manager is None:
-                app.state.graph_manager = create_graph_manager(app.state.settings, get_engine())
+                app.state.graph_manager = create_graph_manager(app.state.settings, engine)
             return app.state.graph_manager
 
     def get_graph_metadata_store() -> GraphMetadataStore:
         return app.state.graph_metadata_store
 
     def get_optional_graph_manager() -> Any | None:
+        engine = get_engine()
+        if getattr(engine, "is_native_iam", False):
+            claims = engine.claims()
+            if claims["role"] != "admin" or claims["service"]:
+                return None
         try:
             native = get_native_module()
         except RuntimeError:
@@ -163,11 +197,8 @@ def create_app(
         if authorization is None or not authorization.startswith("Bearer "):
             return None
         try:
-            return decode_access_token(
-                authorization.removeprefix("Bearer ").strip(),
-                app.state.settings,
-            )
-        except TokenError:
+            return authenticate_token(get_engine(), authorization.removeprefix("Bearer ").strip(), app.state.settings)
+        except (TokenError, HTTPException):
             return None
 
     def current_token_payload(
@@ -180,16 +211,18 @@ def create_app(
                 detail={"message": "missing bearer token"},
             )
         try:
-            payload = decode_access_token(authorization.removeprefix("Bearer ").strip(), current_settings)
+            payload = authenticate_token(get_engine(), authorization.removeprefix("Bearer ").strip(), current_settings)
+            if payload.get("service"):
+                raise HTTPException(403, "Service credentials use /api/v1; console access requires an interactive session")
         except TokenError as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"message": str(exc)},
             ) from exc
-        require_active_admin(get_engine(), payload)
         return payload
 
     install_query_routes(app, current_token_payload, get_engine, get_optional_graph_manager)
+    install_iam_routes(app, get_engine, current_token_payload)
 
     @app.middleware("http")
     async def record_monitoring_request(request: Request, call_next: Callable[..., Any]) -> Any:
@@ -216,7 +249,13 @@ def create_app(
         return MessageResponse(message="ok")
 
     @app.get("/auth/setup-state", response_model=SetupStateResponse)
-    def setup_state(current_engine: InternalUserEngine = Depends(get_engine)) -> dict[str, bool]:
+    def setup_state() -> dict[str, bool]:
+        try:
+            current_engine = get_engine()
+        except HTTPException as error:
+            if error.status_code == 503:
+                return {"needsSetup": True}
+            raise
         return {"needsSetup": not root_exists(current_engine)}
 
     @app.post(
@@ -228,14 +267,20 @@ def create_app(
         payload: AdminRegisterRequest,
         current_engine: InternalUserEngine = Depends(get_engine),
     ) -> PublicUser:
+        if getattr(current_engine, "is_native_iam", False):
+            raise HTTPException(403, "Owner enrollment is local only; use nexora_iam init or adopt on the server")
         return register_root_admin(current_engine, payload)
 
     @app.post("/auth/login", response_model=AuthResponse)
     def login(
         payload: LoginRequest,
+        request: Request,
         current_engine: InternalUserEngine = Depends(get_engine),
         current_settings: AdminApiSettings = Depends(get_settings),
     ) -> AuthResponse:
+        if getattr(current_engine, "is_native_iam", False):
+            return AuthResponse.model_validate(current_engine.service.login(
+                payload.username, payload.password, request.client.host if request.client else "unknown"))
         return login_admin(current_engine, payload.username, payload.password, current_settings)
 
     @app.get("/auth/me", response_model=PublicUser)
@@ -243,6 +288,8 @@ def create_app(
         token_payload: dict[str, Any] = Depends(current_token_payload),
         current_engine: InternalUserEngine = Depends(get_engine),
     ) -> PublicUser:
+        if getattr(current_engine, "is_native_iam", False):
+            return PublicUser.model_validate(current_engine.claims()["user"])
         return get_current_public_user(current_engine, str(token_payload["sub"]))
 
     @app.post("/apps/tokens", response_model=CreateAppTokenResponse)
@@ -252,6 +299,8 @@ def create_app(
         current_engine: InternalUserEngine = Depends(get_engine),
         current_settings: AdminApiSettings = Depends(get_settings),
     ) -> CreateAppTokenResponse:
+        if getattr(current_engine, "is_native_iam", False):
+            return CreateAppTokenResponse.model_validate(current_engine.administer("issue_token", payload.model_dump(exclude_none=True)))
         issued = create_app_token(
             app_id=payload.appId,
             app_name=payload.appName,
@@ -299,6 +348,8 @@ def create_app(
     def application_token_scopes(
         _: dict[str, Any] = Depends(current_token_payload),
     ) -> dict[str, list[str]]:
+        if getattr(get_engine(), "is_native_iam", False):
+            return {"scopes": ["query:execute", "collections:read", "collections:write", "documents:read", "documents:write"]}
         return {"scopes": list(AVAILABLE_APP_SCOPES)}
 
     def performance_admin(payload: dict[str, Any] = Depends(current_token_payload)) -> dict[str, Any]:
@@ -434,7 +485,7 @@ def create_app(
         )
 
     @app.get("/system/execution")
-    def execution_status(_: dict[str, Any] = Depends(current_token_payload)):
+    def execution_status(_: dict[str, Any] = Depends(performance_admin)):
         return lifecycle.report()
 
     @app.get("/graphs")
