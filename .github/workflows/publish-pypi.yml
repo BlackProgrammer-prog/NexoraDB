@@ -46,7 +46,7 @@ jobs:
         run: test "$GITHUB_REF" = refs/heads/main
 
       - name: Install native build tools
-        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+        run: bash scripts/native_prerequisites.sh --install
 
       - name: Restore vcpkg cache
         uses: actions/cache@v4
@@ -82,6 +82,9 @@ jobs:
       - name: Build native extension
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          CC: gcc-11
+          CXX: g++-11
+          VCPKG_MAX_CONCURRENCY: '2'
         run: |
           cmake -S . -B build-wheel -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -151,6 +154,17 @@ jobs:
             --expected "$(python scripts/check_release_version.py | sed -n 's/^CMake: //p')"
           wheel-test/bin/python scripts/verify_installed_iam.py \
             --expected "$(python scripts/check_release_version.py | sed -n 's/^CMake: //p')"
+
+      - name: Preserve failed native dependency diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-native-build-diagnostics
+          path: |
+            build-wheel/vcpkg-manifest-install.log
+            vcpkg/buildtrees/*/*.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4

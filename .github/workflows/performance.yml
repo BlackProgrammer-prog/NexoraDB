@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - name: Verify native host prerequisites
+        run: bash scripts/native_prerequisites.sh --check
       - name: Build on dedicated idle host
         run: |
           bash scripts/bootstrap_vcpkg.sh

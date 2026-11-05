@@ -22,7 +22,7 @@ jobs:
       - name: Python API dependencies
         run: python -m pip install 'anyio>=4.14.2,<5' fastapi 'httpx[http2]>=0.28,<1' pytest 'textual>=0.86,<9' 'aiohttp>=3.14.5,<4' python-socketio argon2-cffi 'cryptography>=50' 'certifi>=2026.10.18' lark 'pymongo>=4.18.3,<5'
       - name: API admission, monitoring, streaming and authorization
-        run: python -m pytest -q tests/test_cursor_pool_acl.py tests/test_transport_safety.py tests/test_api_capacity_streaming.py tests/test_admin_auth_api.py tests/test_query_contracts.py tests/test_performance_controls.py tests/test_binary_protocol.py tests/test_exclusive_ingestion.py tests/test_tui_query_workspace.py tests/test_tui_security.py tests/test_vcpkg_registry.py
+        run: python -m pytest -q tests/test_cursor_pool_acl.py tests/test_transport_safety.py tests/test_api_capacity_streaming.py tests/test_admin_auth_api.py tests/test_query_contracts.py tests/test_performance_controls.py tests/test_binary_protocol.py tests/test_exclusive_ingestion.py tests/test_tui_query_workspace.py tests/test_tui_security.py tests/test_vcpkg_registry.py tests/test_native_prerequisites.py
       - name: PyMongo security regressions
         env:
           PYTHONPATH: nexora-scale-lab
@@ -41,7 +41,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Native prerequisites
-        run: sudo apt-get update && sudo apt-get install -y cmake g++-11 ninja-build autoconf automake libtool pkg-config
+        run: bash scripts/native_prerequisites.sh --install
       - uses: actions/cache@v4
         with:
           path: ~/.cache/vcpkg/archives
@@ -53,7 +53,11 @@ jobs:
         env:
           CC: gcc-11
           CXX: g++-11
+          VCPKG_MAX_CONCURRENCY: '2'
         run: |
+          # Exercise a source dependency build on every debug CI run. Otherwise
+          # cached archives can hide missing runner packages indefinitely.
+          if [ '${{ matrix.preset }}' = debug ]; then export VCPKG_BINARY_SOURCES=clear; fi
           if [ '${{ matrix.preset }}' = tsan-full ]; then
             # Autoconf dependency probes and GoogleTest discovery also execute
             # TSan binaries, so the existing no-ASLR setting must cover builds.
@@ -99,6 +103,8 @@ jobs:
         with:
           name: native-${{ matrix.preset }}-${{ github.run_id }}
           path: |
+            build/${{ matrix.preset }}/vcpkg-manifest-install.log
+            vcpkg/buildtrees/*/*.log
             build/${{ matrix.preset }}/Testing/Temporary/
             build/${{ matrix.preset }}/tests/cpp/cor007-recovery/run-*/report.json
             build/${{ matrix.preset }}/tests/cpp/cor007-recovery/run-*/*.stdout
