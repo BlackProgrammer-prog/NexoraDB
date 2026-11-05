@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from fastapi import HTTPException, Request, status
 from fastapi.security import HTTPBearer
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AppTokenError(ValueError):
@@ -42,9 +42,11 @@ class AppTokenClaims:
     scopes: tuple[str, ...]
     managed: bool
     collections: dict[str, list[str]] | None = None
+    principal_id: str | None = None
 
 
 class CreateAppTokenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     appId: str = Field(min_length=3, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
     appName: str | None = Field(default=None, max_length=120)
     scopes: list[str] = Field(default_factory=lambda: ["query:execute"])
@@ -143,6 +145,15 @@ async def require_app_token(
         )
 
     try:
+        provider = getattr(request.app.state, "iam_engine_provider", None)
+        engine = provider() if provider else None
+        if getattr(engine, "is_native_iam", False):
+            current = engine.claims(credentials.credentials)
+            claims = AppTokenClaims(token_id=current["token_id"], app_id=current["app_id"],
+                app_name=current["app_name"], issued_at=0, expires_at=current["exp"],
+                scopes=tuple(current["scopes"]), managed=True, collections=current["collections"], principal_id=current["sub"])
+            request.state.nexoradb_app_id, request.state.nexoradb_app_name = claims.app_id, claims.app_name
+            return claims
         claims = decode_app_token(credentials.credentials, request.app.state.settings.api_token_secret)
     except AppTokenError as exc:
         raise HTTPException(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import Any
 import json
 import anyio
@@ -18,6 +19,7 @@ from .security import AppTokenClaims, require_app_token, require_scope
 from nexoradb_admin.admission import AdmissionMiddleware
 from nexoradb_admin.lifecycle import install_lifecycle
 from nexoradb_admin.idempotency import RequestJournal
+from nexoradb_admin.native_iam import NativeTokenContextMiddleware
 from nexoradb_admin.cursor import CursorBudget, stream_cursor, open_document_stream
 from nexoradb_admin.query_runner import _authorize_statements, authorize_collections
 import time
@@ -32,13 +34,19 @@ def create_api_router(
     cursor_budget = CursorBudget()
     program_lock = RLock()
 
+    def native_principal(app):
+        subject = getattr(app, 'principal_id', None)
+        return 'native:' + subject + ':app:' + app.app_id if subject else None
+
     @router.get('/query/requests/{request_key}')
     def query_request_status(request_key: str, request: Request, app: AppTokenClaims = Depends(require_app_token)):
         require_scope(app, 'query:execute')
         engine = engine_provider()
         if app.managed and not engine.is_internal_app_token_active(app.token_id):
             raise HTTPException(401, 'Application token revoked')
-        return RequestJournal(request.app.state.settings.db_path / 'query_requests.sqlite3').inspect('app:' + app.app_id, request_key)
+        principal = native_principal(app)
+        return RequestJournal(request.app.state.settings.db_path / 'query_requests.sqlite3').inspect(
+            principal or 'app:' + app.app_id, request_key, include_receipts=principal is None)
 
     def authorize_read(app: AppTokenClaims, collection: str) -> Any:
         require_scope(app, "documents:read")
@@ -93,8 +101,11 @@ def create_api_router(
                             lifecycle.resource_closers.append(results.shutdown)
                         else:
                             request.app.add_event_handler('shutdown', results.shutdown)
-                return results.prepare('app:' + app.app_id, request.headers.get('Idempotency-Key'),
-                                       {'query': payload.query, 'parameters': payload.parameters}, factory)
+                body = {'query': payload.query, 'parameters': payload.parameters}
+                if native_principal(app):
+                    body['_native_credential'] = app.token_id
+                return results.prepare(native_principal(app) or 'app:' + app.app_id, request.headers.get('Idempotency-Key'),
+                                       body, factory)
             return factory()
         owner = app.app_id
         return await stream_cursor(open_stream, authorize, owner, cursor_budget, batch_size=batch_size)
@@ -194,6 +205,10 @@ def create_api_router(
         if grants is not None:
             identity.append(grants)
         principal = json.dumps(identity, sort_keys=True)
+        journal_payload = payload.model_dump()
+        if native_principal(app):
+            principal = native_principal(app)
+            journal_payload['_native_credential'] = app.token_id
         journal = RequestJournal(request.app.state.settings.db_path / "api_requests.sqlite3")
         def execute_durably():
             result = execute()
@@ -209,7 +224,7 @@ def create_api_router(
                     if not manager.checkpoint_graph(name):
                         raise HTTPException(503, "Graph durability barrier failed; outcome unknown")
             return result.model_dump()
-        return journal.run(principal, idempotency_key, payload.model_dump(),
+        return journal.run(principal, idempotency_key, journal_payload,
                            execute_durably)
 
     @router.post("/query/bson", response_model=QueryExecuteResponse,
@@ -265,6 +280,7 @@ def create_api_app(
         redoc_url=None,
     )
     app.state.settings = api_settings
+    app.add_middleware(NativeTokenContextMiddleware)
     initialization_lock = RLock()
     def release_resources():
         state["graph_manager"] = None
@@ -277,7 +293,20 @@ def create_api_app(
         with initialization_lock:
             if state["engine"] is None:
                 state["engine"] = create_doc_engine(api_settings)
-            return state["engine"]
+            service = state["engine"]
+            return service.bind() if getattr(service, "is_native_iam", False) else service
+
+    app.state.iam_engine_provider = get_engine
+    existing_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def native_ready(application):
+        async with existing_lifespan(application):
+            if engine is None:
+                get_engine()
+            yield
+
+    app.router.lifespan_context = native_ready
 
     def get_native_module() -> Any:
         with initialization_lock:
@@ -287,6 +316,11 @@ def create_api_app(
 
     def get_graph_manager() -> Any | None:
         with initialization_lock:
+            engine = get_engine()
+            if getattr(engine, "is_native_iam", False):
+                claims = engine.claims()
+                if claims["role"] != "admin" or claims["service"]:
+                    return None
             native = get_native_module()
             if not getattr(native, "GRAPH_ENABLED", False):
                 return None
