@@ -21,7 +21,10 @@
 
 </div>
 
-Release 0.5.2: [changes and upgrade precautions](docs/releases/v0.5.2.md).
+Release 0.5.3: [changes and upgrade precautions](docs/releases/v0.5.3.md).
+Native IAM: [setup and security boundaries](docs/security/native-iam.md),
+[مدیریت کاربران، سینتکس نقش‌ها و بازیابی رمز](docs/security/users-and-recovery-fa.md).
+Architecture: [Graphy review and phased C++ runtime roadmap](docs/architecture/CPP_RUNTIME_ROADMAP_FA.md).
 Wheel target: **Linux x86_64, CPython 3.10**; see the release notes for platform details.
 
 > **Experimental / Alpha.** NexoraDB is an open-source research project focused on
@@ -62,7 +65,7 @@ pip install NexoraDataBase
 To select this source version explicitly once its wheel is published:
 
 ~~~bash
-pip install NexoraDataBase==0.5.2
+pip install NexoraDataBase==0.5.3
 ~~~
 
 The distribution is named **NexoraDataBase**; the import is **nexoradb**:
@@ -260,8 +263,14 @@ provide atomic document-to-graph updates, replication, or cluster consensus.
 For local exploration, start the backend on loopback:
 
 ~~~bash
+# New empty database only. Existing stores require offline backup and adopt.
+nexoradb-iam init /absolute/path/to/nexoradb-data
+export NEXORADB_DB_PATH=/absolute/path/to/nexoradb-data
 nexoradb server --host 127.0.0.1 --port 8000
 ~~~
+
+Save owner recovery factors offline and sign in with the selected username.
+See the [0.5.3 upgrade instructions](docs/releases/v0.5.3.md) before adopting data.
 
 In another terminal, start the CLI:
 

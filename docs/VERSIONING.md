@@ -4,7 +4,7 @@
 برای تغییر نسخه تنها یک فرمان از root مخزن کافی است:
 
 ```powershell
-wsl -d Ubuntu -- python3 /home/parham/NexoraDB/scripts/release_version.py --set 0.4.0
+wsl -d Ubuntu -- python3 /home/parham/NexoraDB/scripts/release_version.py --set 0.5.3
 ```
 
 یا مقدار `__version__` را در فایل مرجع تغییر دهید و اجرا کنید:
@@ -19,6 +19,13 @@ python3 scripts/check_release_version.py
 ```bash
 python3 scripts/release_version.py --check
 ```
+
+برای آماده‌سازی ۰.۵.۳ از همان اسکریپت موجود استفاده شده است؛ اسکریپت دوم یا جایگزینی
+سراسری شماره‌ها لازم نیست. این فرمان metadata را عوض می‌کند، نه فایل‌های باینری.
+پس از آن باید `nexoradb_py`، ابزار آفلاین `nexora_iam` و dashboard را بازسازی و wheel
+را با هر دو باینری بسته‌بندی کنید. `nexoradb-iam --version` نیز شمارهٔ CMake را گزارش
+می‌کند. [گزارش نامزد ۰.۵.۳](releases/validation-v0.5.3.md) و [یادداشت انتشار](releases/v0.5.3.md)
+محل ثبت تست‌ها و الزامات upgrade هستند. اسکریپت، commit/tag/push یا انتشار انجام نمی‌دهد.
 
 | محل | رفتار |
 |---|---|
