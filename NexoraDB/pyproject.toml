@@ -8,11 +8,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "NexoraDataBase"
-version = "0.5.2"
+version = "0.5.3"
 description = "Open-source document and graph database with NexoraQL, a C++20/RocksDB engine, and Python API"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE", "licenses/*.txt"]
 
 authors = [
     { name = "NexoraDB Team" }
@@ -104,6 +105,7 @@ nexoradb = "nexoradb.commands:main"
 nexoradb-server = "nexoradb.commands.server:main"
 nexoradb-dashboard = "nexoradb.commands.dashboard:main"
 nexoradb-cli = "nexoradb.cli:main"
+nexoradb-iam = "nexoradb.commands.iam:main"
 
 
 [project.urls]
@@ -127,7 +129,8 @@ nexoradb = [
     "dashboard/static/**/*",
     "dashboard/templates/**/*",
     "parser/grammar/*.lark",
-    "native/*.so"
+    "native/*.so",
+    "native/nexora_iam"
 ]
 
 

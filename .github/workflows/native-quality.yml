@@ -22,7 +22,7 @@ jobs:
       - name: Python API dependencies
         run: python -m pip install 'anyio>=4.14.2,<5' fastapi 'httpx[http2]>=0.28,<1' pytest 'textual>=0.86,<9' 'aiohttp>=3.14.5,<4' python-socketio argon2-cffi 'cryptography>=50' 'certifi>=2026.10.18' lark 'pymongo>=4.18.3,<5'
       - name: API admission, monitoring, streaming and authorization
-        run: python -m pytest -q tests/test_cursor_pool_acl.py tests/test_transport_safety.py tests/test_api_capacity_streaming.py tests/test_admin_auth_api.py tests/test_query_contracts.py tests/test_performance_controls.py tests/test_binary_protocol.py tests/test_exclusive_ingestion.py tests/test_tui_query_workspace.py tests/test_tui_security.py
+        run: python -m pytest -q tests/test_cursor_pool_acl.py tests/test_transport_safety.py tests/test_api_capacity_streaming.py tests/test_admin_auth_api.py tests/test_query_contracts.py tests/test_performance_controls.py tests/test_binary_protocol.py tests/test_exclusive_ingestion.py tests/test_tui_query_workspace.py tests/test_tui_security.py tests/test_vcpkg_registry.py tests/test_native_prerequisites.py
       - name: PyMongo security regressions
         env:
           PYTHONPATH: nexora-scale-lab
@@ -41,23 +41,33 @@ jobs:
         with:
           python-version: '3.10'
       - name: Native prerequisites
-        run: sudo apt-get update && sudo apt-get install -y cmake g++-11 ninja-build autoconf automake libtool pkg-config
+        run: bash scripts/native_prerequisites.sh --install
       - uses: actions/cache@v4
         with:
           path: ~/.cache/vcpkg/archives
-          key: native-vcpkg-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'cmake/triplets/**', 'cmake/TsanCompat.h') }}
+          key: native-vcpkg-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'cmake/vcpkg-revision.txt', 'cmake/triplets/**', 'cmake/TsanCompat.h') }}
       - name: Bootstrap pinned vcpkg
         run: |
-          git clone https://github.com/microsoft/vcpkg.git vcpkg
-          git -C vcpkg checkout 7476f0d4e77d3333fbb249657df8251c28c4faae
-          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          bash scripts/bootstrap_vcpkg.sh
       - name: Configure and build
         env:
           CC: gcc-11
           CXX: g++-11
+          VCPKG_MAX_CONCURRENCY: '2'
         run: |
-          cmake --preset ${{ matrix.preset }} -DNEXORA_BUILD_PYTHON=${{ matrix.preset == 'debug' && 'ON' || 'OFF' }}
-          cmake --build build/${{ matrix.preset }} --target nexora_doc_tests nexora_graph_tests --parallel 2
+          # Exercise a source dependency build on every debug CI run. Otherwise
+          # cached archives can hide missing runner packages indefinitely.
+          if [ '${{ matrix.preset }}' = debug ]; then export VCPKG_BINARY_SOURCES=clear; fi
+          if [ '${{ matrix.preset }}' = tsan-full ]; then
+            # Autoconf dependency probes and GoogleTest discovery also execute
+            # TSan binaries, so the existing no-ASLR setting must cover builds.
+            setarch "$(uname -m)" -R cmake --preset tsan-full -DNEXORA_BUILD_PYTHON=OFF
+            setarch "$(uname -m)" -R cmake --build build/tsan-full --target nexora_doc_tests nexora_graph_tests nexora_iam nexora_iam_tests --parallel 2
+          else
+            cmake --preset ${{ matrix.preset }} -DNEXORA_BUILD_PYTHON=${{ matrix.preset == 'debug' && 'ON' || 'OFF' }}
+            cmake --build build/${{ matrix.preset }} --target nexora_doc_tests nexora_graph_tests nexora_iam nexora_iam_tests --parallel 2
+          fi
+          if [ '${{ matrix.preset }}' != tsan-full ]; then cmake --build build/${{ matrix.preset }} --target nexora_iam_crash_probe --parallel 2; fi
           if [ '${{ matrix.preset }}' = debug ]; then cmake --build build/debug --target nexoradb_py --parallel 2; fi
       - name: Native tests
         run: |
@@ -70,6 +80,9 @@ jobs:
         if: matrix.preset == 'debug'
         env:
           PYTHONPATH: build/debug
+          NEXORADB_TEST_NATIVE_PATH: ${{ github.workspace }}/build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
+          NEXORADB_NATIVE_MODULE_PATH: ${{ github.workspace }}/build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
+          NEXORADB_TEST_IAM_CLI: ${{ github.workspace }}/build/debug/nexora_iam
         run: |
           python3 -m pip install -r tests/performance-requirements.txt
           python3 -m pytest -q tests/test_command_imports.py
@@ -78,6 +91,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_benchmark_history.py'
           python3 tests/test_operations_metrics.py
           python3 -m pytest -q tests/test_memory_ownership.py tests/test_memory_reporting.py
+          python3 -m pytest -q tests/test_native_iam_http.py tests/test_iam_tui.py tests/test_iam_query_syntax.py
           python3 -m pytest -q tests/test_resource_budget.py tests/test_bounded_execution.py --junitxml=build/debug/mem003004-tests.xml
           python3 -m pytest -q tests/test_execution_lifecycle.py tests/test_api_capacity_streaming.py tests/test_query_contracts.py --junitxml=build/debug/mem005006-tests.xml
           python3 scripts/verify_execution_lifecycle.py --directory build/debug/mem005006-signal --native build/debug/nexoradb.cpython-310-x86_64-linux-gnu.so
@@ -89,6 +103,8 @@ jobs:
         with:
           name: native-${{ matrix.preset }}-${{ github.run_id }}
           path: |
+            build/${{ matrix.preset }}/vcpkg-manifest-install.log
+            vcpkg/buildtrees/*/*.log
             build/${{ matrix.preset }}/Testing/Temporary/
             build/${{ matrix.preset }}/tests/cpp/cor007-recovery/run-*/report.json
             build/${{ matrix.preset }}/tests/cpp/cor007-recovery/run-*/*.stdout

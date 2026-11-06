@@ -92,6 +92,24 @@ class NexoraQLTransformer(Transformer):
     def start(self, stmts):
         return list(stmts)
 
+    def role_parents(self, children):
+        return children[0]
+
+    def define_role(self, children):
+        return N.DefineRole(str(children[0]), children[1], children[2] if len(children) > 2 else [])
+
+    def set_user_roles(self, children):
+        return N.SetUserRoles(children[0], children[1])
+
+    def set_user_grants(self, children):
+        return N.SetUserGrants(children[0], children[1])
+
+    def show_security_users(self, _children):
+        return N.ShowSecurityUsers()
+
+    def show_security_roles(self, _children):
+        return N.ShowSecurityRoles()
+
     # ══════════════════════════════════════════════════════════
     # Values
     # ══════════════════════════════════════════════════════════

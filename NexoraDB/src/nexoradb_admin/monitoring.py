@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from .config import AdminApiSettings
 from .security import TokenError, decode_access_token
+from .native_iam import authenticate_token
 from .service import require_active_admin
 
 ACTIVE_CONNECTION_WINDOW_SECONDS = 10.0
@@ -209,7 +210,17 @@ class MonitoringSocketServer:
         collection_count = 0
         try:
             engine = self.engine_provider()
-            database_metrics_available = True
+            if getattr(engine, "is_native_iam", False):
+                selected = None
+                for payload in list(self._admin_sessions.values()):
+                    try:
+                        authenticate_token(engine, payload.get("_native_token", ""), self.settings, admin=True)
+                        selected = engine.bind(payload["_native_token"])
+                        break
+                    except HTTPException:
+                        continue
+                engine = selected
+            database_metrics_available = engine is not None
         except Exception:
             engine = None
 
@@ -273,10 +284,13 @@ class MonitoringSocketServer:
         @self.sio.event
         async def connect(sid: str, environ: dict[str, Any], auth: dict[str, Any] | None) -> bool:
             if self._stopping: return False
+            source = str(environ.get("REMOTE_ADDR") or "")
+            if source not in {"", "127.0.0.1", "::1"} and environ.get("wsgi.url_scheme") != "https":
+                raise socketio.exceptions.ConnectionRefusedError("TLS is required for credential transport")
             token = str((auth or {}).get("token") or "")
             try:
-                payload = decode_access_token(token, self.settings)
-                await anyio.to_thread.run_sync(lambda: require_active_admin(self.engine_provider(), payload))
+                payload = await anyio.to_thread.run_sync(lambda: authenticate_token(
+                    self.engine_provider(), token, self.settings, admin=True))
             except (TokenError, HTTPException):
                 raise socketio.exceptions.ConnectionRefusedError("invalid monitoring token") from None
 

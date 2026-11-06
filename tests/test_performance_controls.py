@@ -1,7 +1,9 @@
 """Syntax cache isolation, real native controls and administrator-only API tests."""
 from concurrent.futures import ThreadPoolExecutor
 import importlib
+import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
@@ -83,7 +85,7 @@ def test_cache_never_skips_authorization(parser):
 def native_engine(tmp_path):
     from nexoradb_admin.native import load_native_module
     from nexoradb_admin.config import AdminApiSettings
-    path = ROOT / 'nexoradb.cpython-310-x86_64-linux-gnu.so'
+    path = Path(os.environ.get('NEXORADB_TEST_NATIVE_PATH', ROOT / 'nexoradb.cpython-310-x86_64-linux-gnu.so'))
     if not path.exists():
         pytest.skip('Linux Release extension not built')
     native = load_native_module(AdminApiSettings(native_module_path=path))
@@ -212,11 +214,15 @@ assert engine.prepare_shutdown().success
 def test_startup_storage_budget_is_explicit_and_validated(native_engine,tmp_path):
     from nexoradb_admin.config import AdminApiSettings
     from nexoradb_admin.native import create_doc_engine
-    settings=AdminApiSettings(db_path=tmp_path/'sized',rocks_memory_mb=16,rocks_cache_mb=8)
+    settings=AdminApiSettings(db_path=tmp_path/'sized',graph_dir=tmp_path/'graphs',rocks_memory_mb=16,rocks_cache_mb=8)
     settings.validate_for_startup()
-    engine=create_doc_engine(settings)
-    assert engine.rocks_metrics().cache_capacity==8*1024**2
-    assert engine.prepare_shutdown().success
+    spec=importlib.util.spec_from_file_location('iam_budget_enrollment',ROOT/'scripts/verify_iam_cli.py')
+    helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+    helper.terminal_enroll(Path(os.environ.get('NEXORADB_TEST_IAM_CLI', ROOT/'build/debug/nexora_iam')),settings.db_path)
+    service=create_doc_engine(settings)
+    token=service.login('selected.owner','Terminal-secret-test-8931!','test')['accessToken']
+    assert service.bind(token).rocks_metrics().cache_capacity==8*1024**2
+    assert service.prepare_shutdown().success
     for values in ({'rocks_memory_mb':3},{'rocks_memory_mb':16,'rocks_cache_mb':16},
                    {'rocks_memory_mb':True},{'rocks_cache_mb':-1}):
         with pytest.raises(RuntimeError):

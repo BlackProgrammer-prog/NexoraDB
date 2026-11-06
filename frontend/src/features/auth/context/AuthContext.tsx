@@ -21,6 +21,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [isInitializing, setIsInitializing] = useState(Boolean(accessToken))
 
   const logout = useCallback(() => {
+    const token = readStoredToken()
+    if (token) void authApi.logout(token).catch(() => undefined)
     clearStoredToken()
     setUser(null)
     setIsInitializing(false)
@@ -63,8 +65,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   const login = useCallback(async (input: LoginInput) => {
     const response = await authApi.login(input)
-    if (response.user.role !== 'admin' || response.user.status !== 'active') {
-      throw new Error('An active administrator account is required')
+    if (response.user.status !== 'active') {
+      throw new Error('An active account is required')
     }
     persistToken(response.accessToken, response.expiresIn)
     setIsInitializing(false)
@@ -73,10 +75,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   const registerRootAdmin = useCallback(
     async (input: RegisterInput) => {
-      await authApi.register(input)
-      await login({ username: 'root', password: input.password })
+      void input
+      throw new Error('Owner enrollment is local only. Ask the database operator to initialize IAM.')
     },
-    [login],
+    [],
   )
 
   const value = useMemo<AuthContextValue>(

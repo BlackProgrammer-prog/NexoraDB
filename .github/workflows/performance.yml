@@ -23,9 +23,11 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - name: Verify native host prerequisites
+        run: bash scripts/native_prerequisites.sh --check
       - name: Build on dedicated idle host
         run: |
-          test -x vcpkg/vcpkg || { git clone https://github.com/microsoft/vcpkg.git vcpkg; git -C vcpkg checkout 7476f0d4e77d3333fbb249657df8251c28c4faae; ./vcpkg/bootstrap-vcpkg.sh -disableMetrics; }
+          bash scripts/bootstrap_vcpkg.sh
           cmake --preset release
           cmake --build build/release --target nexora_rocks_workload_probe nexoradb_py --parallel 2
       - name: Daily short benchmark and explicit regression gate

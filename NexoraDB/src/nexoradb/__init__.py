@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -10,7 +11,10 @@ from ._version import __version__
 def _load_bundled_native() -> None:
     package = sys.modules[__name__]
     native_dir = Path(__file__).resolve().parent / "native"
-    native_path = next(native_dir.glob("nexoradb*.so"), None)
+    configured = os.getenv("NEXORADB_NATIVE_MODULE_PATH")
+    native_path = Path(configured).expanduser().resolve() if configured else next(native_dir.glob("nexoradb*.so"), None)
+    if configured and not native_path.is_file():
+        raise ImportError("Configured native engine does not exist")
     if native_path is None:
         return
 

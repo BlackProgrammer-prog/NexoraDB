@@ -22,6 +22,8 @@ class NexoraAdminClientError(Exception):
 class AuthSession:
     access_token: str
     username: str
+    is_superuser: bool = False
+    protected_root: bool = False
 
 
 class AdminApiClient:
@@ -33,6 +35,8 @@ class AdminApiClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
         url = httpx.URL(self.base_url)
+        if url.scheme == "http" and url.host not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Remote credential transport requires HTTPS")
         if (
             url.scheme not in {"http", "https"}
             or not url.host
@@ -117,7 +121,8 @@ class AdminApiClient:
         token = resp.get("accessToken") or resp.get("access_token") or resp.get("token")
         if not token:
             raise NexoraAdminClientError("No access token in login response.")
-        return AuthSession(access_token=token, username=username)
+        user = resp.get("user") or {}
+        return AuthSession(token, username, user.get("role") == "admin", user.get("protectedRoot") is True)
 
     def register(
         self,

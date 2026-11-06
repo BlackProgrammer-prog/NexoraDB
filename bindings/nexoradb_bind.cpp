@@ -39,6 +39,10 @@
 // ── DocEngine ──
 #include "core/DocEngine.h"
 #include "core/DocumentCodec.h"
+#include "core/security/SecureDatabase.h"
+
+void bind_secure_database(pybind11::module_&);
+void bind_secure_graph(pybind11::module_&);
 #include "query/Condition.h"
 #include "query/UpdateSpec.h"
 
@@ -777,6 +781,7 @@ PYBIND11_MODULE(nexoradb, m) {
     py::register_exception<ResourceExhausted>(m,"ResourceExhausted",PyExc_MemoryError);
     py::register_exception<OperationCancelled>(m,"OperationCancelled",PyExc_InterruptedError);
     py::class_<ExecutionScope>(m,"ExecutionScope")
+            .def(py::init<uint64_t>(),py::arg("timeout_ms")=30000)
         .def("cancel",&ExecutionScope::cancel)
         .def("check",&ExecutionScope::check)
         .def("__enter__",[](ExecutionScope& scope)->ExecutionScope& {scope.enter();return scope;},py::return_value_policy::reference_internal)
@@ -860,6 +865,7 @@ PYBIND11_MODULE(nexoradb, m) {
         .def_readonly("multiget_keys",&RocksMetrics::multiget_keys)
         .def_readonly("sst_write_amplification",&RocksMetrics::sst_write_amplification)
         ;
+    bind_secure_database(m);
     py::class_<DocEngine>(m, "DocEngine",
                           R"doc(
         موتور اصلی پایگاه داده اسناد NexoraDB.
@@ -2143,4 +2149,5 @@ PYBIND11_MODULE(nexoradb, m) {
     false;
 #endif
 
+    bind_secure_graph(m);
 } // PYBIND11_MODULE

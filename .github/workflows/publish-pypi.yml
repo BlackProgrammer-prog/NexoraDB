@@ -46,7 +46,7 @@ jobs:
         run: test "$GITHUB_REF" = refs/heads/main
 
       - name: Install native build tools
-        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+        run: bash scripts/native_prerequisites.sh --install
 
       - name: Restore vcpkg cache
         uses: actions/cache@v4
@@ -54,16 +54,11 @@ jobs:
           path: |
             vcpkg
             ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'cmake/vcpkg-revision.txt') }}
 
       - name: Bootstrap vcpkg
         run: |
-          if [ ! -x vcpkg/vcpkg ]; then
-            git clone https://github.com/microsoft/vcpkg.git vcpkg
-            ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
-          fi
-          git -C vcpkg checkout 7476f0d4e77d3333fbb249657df8251c28c4faae
-          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          bash scripts/bootstrap_vcpkg.sh
 
       - name: Set up dashboard toolchain
         uses: actions/setup-node@v4
@@ -87,15 +82,19 @@ jobs:
       - name: Build native extension
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          CC: gcc-11
+          CXX: g++-11
+          VCPKG_MAX_CONCURRENCY: '2'
         run: |
           cmake -S . -B build-wheel -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
             -DPython_EXECUTABLE="$(command -v python)" \
             -DBUILD_TESTING=ON -DNEXORA_BUILD_GRAPH=ON
-          cmake --build build-wheel --target nexoradb_py nexora_doc_tests nexora_graph_tests --parallel 2
+          cmake --build build-wheel --target nexoradb_py nexora_iam nexora_iam_tests nexora_iam_crash_probe nexora_doc_tests nexora_graph_tests --parallel 2
           install -Dm755 nexoradb.cpython-310-*.so \
             NexoraDB/src/nexoradb/native/nexoradb.cpython-310-x86_64-linux-gnu.so
+          install -Dm755 build-wheel/nexora_iam NexoraDB/src/nexoradb/native/nexora_iam
 
       - name: Native and recovery release gate
         env:
@@ -112,8 +111,10 @@ jobs:
         env:
           PYTHONPATH: build-wheel
           NEXORADB_TEST_NATIVE_PATH: ${{ github.workspace }}/build-wheel/nexoradb.cpython-310-x86_64-linux-gnu.so
+          NEXORADB_NATIVE_MODULE_PATH: ${{ github.workspace }}/build-wheel/nexoradb.cpython-310-x86_64-linux-gnu.so
+          NEXORADB_TEST_IAM_CLI: ${{ github.workspace }}/build-wheel/nexora_iam
         run: |
-          python3 -m pytest -q tests/test_command_imports.py tests/test_resource_budget.py tests/test_bounded_execution.py tests/test_execution_lifecycle.py tests/test_memory_acceptance.py tests/test_release_version.py tests/test_admin_auth_api.py tests/test_browser_security.py tests/test_query_workspace.py tests/test_tui_query_workspace.py tests/test_tui_security.py
+          python3 -m pytest -q tests/test_command_imports.py tests/test_resource_budget.py tests/test_bounded_execution.py tests/test_execution_lifecycle.py tests/test_memory_acceptance.py tests/test_release_version.py tests/test_admin_auth_api.py tests/test_browser_security.py tests/test_query_workspace.py tests/test_tui_query_workspace.py tests/test_tui_security.py tests/test_native_iam_http.py tests/test_iam_tui.py tests/test_iam_query_syntax.py
           python3 scripts/verify_execution_lifecycle.py --directory build-wheel/release-signal --native build-wheel/nexoradb.cpython-310-x86_64-linux-gnu.so
 
       - name: Build wheel
@@ -151,6 +152,19 @@ jobs:
             --expected "$(python scripts/check_release_version.py | sed -n 's/^CMake: //p')"
           wheel-test/bin/python scripts/verify_query_workspaces.py \
             --expected "$(python scripts/check_release_version.py | sed -n 's/^CMake: //p')"
+          wheel-test/bin/python scripts/verify_installed_iam.py \
+            --expected "$(python scripts/check_release_version.py | sed -n 's/^CMake: //p')"
+
+      - name: Preserve failed native dependency diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-native-build-diagnostics
+          path: |
+            build-wheel/vcpkg-manifest-install.log
+            vcpkg/buildtrees/*/*.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4

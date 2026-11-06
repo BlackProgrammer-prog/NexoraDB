@@ -7,7 +7,7 @@ import { authApi } from '../src/features/auth/services/authApi'
 import { clearStoredToken, persistToken, readStoredToken } from '../src/features/auth/services/authTokenStorage'
 import { admin, deferred } from './helpers'
 
-vi.mock('../src/features/auth/services/authApi', () => ({ authApi: { login: vi.fn(), me: vi.fn(), register: vi.fn() } }))
+vi.mock('../src/features/auth/services/authApi', () => ({ authApi: { login: vi.fn(), me: vi.fn(), register: vi.fn(), logout: vi.fn() } }))
 const input = { username: 'root', password: 'test-only-password' }
 function Wrapper({ children }: PropsWithChildren) {
   return <AuthProvider>{children}</AuthProvider>
@@ -17,6 +17,7 @@ beforeEach(() => {
   clearStoredToken()
   vi.mocked(authApi.login).mockResolvedValue({ accessToken: 'test-token', tokenType: 'bearer', expiresIn: 60, user: admin })
   vi.mocked(authApi.me).mockResolvedValue(admin)
+  vi.mocked(authApi.logout).mockResolvedValue(undefined)
 })
 afterEach(() => { clearStoredToken() })
 
@@ -43,11 +44,11 @@ describe('admin session integration under StrictMode', () => {
     expect(localStorage.length).toBe(0)
   })
 
-  it.each(['application', 'disabled'] as const)('rejects an unsuitable account: %s', async (kind) => {
+  it.each(['disabled', 'deleted'] as const)('rejects an unsuitable account: %s', async (kind) => {
     vi.mocked(authApi.login).mockResolvedValue({ accessToken: 'rejected', tokenType: 'bearer', expiresIn: 60,
-      user: { ...admin, ...(kind === 'application' ? { role: 'application' as const } : { status: 'disabled' as const }) } })
+      user: { ...admin, status: kind } })
     const { result } = renderHook(useAuth, { wrapper: Wrapper, reactStrictMode: true })
-    await act(async () => { await expect(result.current.login(input)).rejects.toThrow('active administrator') })
+    await act(async () => { await expect(result.current.login(input)).rejects.toThrow('active account') })
     expect(result.current.isAuthenticated).toBe(false)
     expect(readStoredToken()).toBeNull()
   })
@@ -60,12 +61,23 @@ describe('admin session integration under StrictMode', () => {
     expect(readStoredToken()).toBeNull()
   })
 
+  it('accepts an active ordinary user without inventing administrator privileges', async () => {
+    const user = { ...admin, username: 'reader', role: 'application' as const }
+    vi.mocked(authApi.login).mockResolvedValue({ accessToken: 'ordinary', tokenType: 'bearer', expiresIn: 60, user })
+    vi.mocked(authApi.me).mockResolvedValue(user)
+    const { result } = renderHook(useAuth, { wrapper: Wrapper, reactStrictMode: true })
+    await act(async () => { await result.current.login(input) })
+    expect(result.current.isAuthenticated).toBe(true)
+    expect(result.current.user?.role).toBe('application')
+  })
+
   it('cannot restore a logged-out user from a delayed /me response', async () => {
     const delayed = deferred<typeof admin>()
     vi.mocked(authApi.me).mockReturnValue(delayed.promise)
     const { result } = renderHook(useAuth, { wrapper: Wrapper, reactStrictMode: true })
     await act(async () => { await result.current.login(input) })
     act(() => result.current.logout())
+    expect(authApi.logout).toHaveBeenCalledWith('test-token')
     await act(async () => { delayed.resolve(admin) })
     expect(result.current).toMatchObject({ isAuthenticated: false, accessToken: null, user: null })
   })

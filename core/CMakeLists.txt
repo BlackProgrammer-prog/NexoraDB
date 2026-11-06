@@ -39,7 +39,13 @@ add_library(nexora_core STATIC
         IndexCodec.h
         RocksTuning.cpp
         RocksTuning.h
+        security/NativeIam.cpp
+        security/NativeIam.h
+        security/SessionAuthority.cpp
+        security/SecureDatabase.cpp
 )
+
+target_link_libraries(nexora_core PUBLIC unofficial-sodium::sodium)
 
 # ─────────────────────────────────────────────────────────────
 # Include Directories

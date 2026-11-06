@@ -14,6 +14,7 @@ from .query_tools import prepare_program, validate_query, READ_ONLY
 from .query_program import ProgramStream, ProgramResults, needs_graph_manager, validate_graph_program
 from .security import TokenError, decode_access_token
 from .service import require_active_admin
+from .native_iam import authenticate_token
 
 
 class OpenRequest(QueryExecuteRequest):
@@ -62,12 +63,14 @@ def install_query_routes(app, require_admin, get_engine, get_graph_manager=lambd
         statements, semantic = prepare_program(payload)
         engine = authorize()
         graph = get_graph_manager() if needs_graph_manager(statements) else None
-        validate_graph_program(statements, graph)
+        validate_graph_program(statements, graph, engine)
         def factory():
             return ProgramStream(engine, statements, semantic, graph, authorize)
         if any(type(s).__name__ not in READ_ONLY for s in statements):
-            return results.prepare(owner, request.headers.get('Idempotency-Key'),
-                                   {'query': payload.query, 'parameters': payload.parameters}, factory)
+            replay_payload = {'query': payload.query, 'parameters': payload.parameters}
+            if getattr(engine, 'is_native_iam', False):
+                replay_payload['_native_credential'] = hashlib.sha256(engine.token.encode()).hexdigest()
+            return results.prepare(owner, request.headers.get('Idempotency-Key'), replay_payload, factory)
         return factory()
 
     def identity(request, access):
@@ -76,11 +79,13 @@ def install_query_routes(app, require_admin, get_engine, get_graph_manager=lambd
         session = hashlib.sha256(header.encode()).hexdigest()
         def authorize():
             try:
-                payload = decode_access_token(header.removeprefix('Bearer ').strip(), app.state.settings)
+                payload = authenticate_token(get_engine(), header.removeprefix('Bearer ').strip(), app.state.settings)
             except TokenError as exc:
                 raise HTTPException(401, 'Session expired') from exc
-            require_active_admin(get_engine(), payload)
-            return get_engine()
+            engine = get_engine()
+            if not getattr(engine, 'is_native_iam', False):
+                require_active_admin(engine, payload)
+            return engine
         return owner, session, authorize
 
     def guarded(operation, owner, cost=1):
@@ -102,7 +107,8 @@ def install_query_routes(app, require_admin, get_engine, get_graph_manager=lambd
 
     @router.get('/requests/{request_key}')
     def request_status(request_key: str, access=Depends(require_admin)):
-        return results.journal.inspect('admin:' + str(access['sub']), request_key)
+        owner = 'admin:' + str(access['sub'])
+        return results.journal.inspect(owner, request_key, include_receipts=not bool(access.get('_native_token')))
 
     @router.post('/cursors')
     def open_cursor(payload: OpenRequest, request: Request, access=Depends(require_admin)):

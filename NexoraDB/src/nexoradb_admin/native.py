@@ -143,22 +143,16 @@ def create_doc_engine(settings: AdminApiSettings) -> Any:
             requested = requested or plan['execution_bytes']
             logging.getLogger(__name__).info('Resource admission sizing=%s', plan)
         rocks.execution_budget = _execution_pool(native, requested)
-    engine = native.DocEngine(str(settings.db_path), native.TransactionSettings(), rocks)
-    if not hasattr(engine, 'durability_report'):
-        raise RuntimeError('Native durability reporting missing; rebuild current extension')
-    report = json.loads(engine.durability_report())
-    if (report.get('profile') != settings.rocks_durability or report.get('wal_enabled') is not True
-            or report.get('sync_on_ack') != (settings.rocks_durability == 'durable')
-            or report.get('manual_wal_flush') is not False):
-        raise RuntimeError('Effective native durability does not match requested profile')
-    logging.getLogger(__name__).info('Effective document durability=%s', report)
-    if hasattr(engine, "is_healthy") and not engine.is_healthy():
-        raise RuntimeError(f"DocEngine failed to open: {settings.db_path}")
-    return engine
-
+    if not hasattr(native, "SecureDatabase"):
+        raise RuntimeError("Native IAM gateway missing; rebuild the extension before starting the server")
+    from .native_iam import NativeIamService
+    return NativeIamService(native, native.SecureDatabase(str(settings.db_path), rocks), str(settings.graph_dir))
 
 def create_graph_manager(settings: AdminApiSettings, engine: Any) -> Any:
     native = load_native_module(settings)
+    if getattr(engine, "is_native_iam", False) is True:
+        from .native_iam import SecureGraphAdapter
+        return engine.service.graph or SecureGraphAdapter(engine.service, str(settings.graph_dir), engine.token)
     if not getattr(native, "GRAPH_ENABLED", False):
         raise RuntimeError("NexoraDB graph engine is not enabled in the loaded native module")
     graph_manager = native.GraphManager(engine, str(settings.graph_dir))

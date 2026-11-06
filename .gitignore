@@ -116,3 +116,4 @@ rules.ninja
 
 # Local Graphy index and search cache
 /.graphy/
+/NexoraDB/src/nexoradb/native/nexora_iam

@@ -34,7 +34,7 @@ def validate_query(payload):
 READ_ONLY = frozenset({'Select', 'Count', 'ExistsStmt', 'ShowCollections', 'CollectionExists',
     'DescribeCollection', 'ShowIndexes', 'ShowForeignKeys', 'ShowGraphs', 'DescribeGraph',
     'GraphStatus', 'GraphStats', 'Traverse', 'GetNode', 'EdgeExists', 'SystemStatus', 'SystemInfo',
-    'ShowPerformance', 'ShowIndexAdvice'})
+    'ShowPerformance', 'ShowIndexAdvice', 'ShowSecurityUsers', 'ShowSecurityRoles'})
 
 
 def validate_joins(statement):

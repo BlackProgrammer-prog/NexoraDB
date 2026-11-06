@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(NexoraDB VERSION 0.5.2 LANGUAGES CXX)
+project(NexoraDB VERSION 0.5.3 LANGUAGES CXX)
 
 # Generate compile_commands.json where the selected generator supports it.
 if (CMAKE_GENERATOR MATCHES "Ninja")
@@ -146,6 +146,7 @@ find_package(fmt     CONFIG REQUIRED)
 find_package(bson-1.0 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+find_package(unofficial-sodium CONFIG REQUIRED)
 find_package(Snappy  CONFIG QUIET)
 find_package(zstd    CONFIG QUIET)
 
@@ -197,6 +198,7 @@ if(NEXORA_BUILD_PYTHON)
     message(STATUS "pybind11 : ${pybind11_VERSION}")
 
     pybind11_add_module(nexoradb_py
+            bindings/secure_bindings.cpp
             bindings/nexoradb_bind.cpp
     )
 
@@ -264,6 +266,10 @@ endif()
 # §8  Test executable  (NexoraDB)
 # ─────────────────────────────────────────────────────────────
 add_executable(NexoraDB main.cpp)
+add_executable(nexora_iam scripts/iam.cpp)
+target_link_libraries(nexora_iam PRIVATE nexora_core)
+target_compile_definitions(nexora_iam PRIVATE NEXORA_PROJECT_VERSION="${PROJECT_VERSION}")
+install(TARGETS nexora_iam RUNTIME DESTINATION bin)
 
 target_include_directories(NexoraDB PRIVATE ${CMAKE_SOURCE_DIR})
 

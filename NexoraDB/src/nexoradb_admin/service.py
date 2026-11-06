@@ -88,6 +88,8 @@ def _public_user(user: dict[str, Any]) -> PublicUser:
 
 
 def root_exists(engine: InternalUserEngine) -> bool:
+    if getattr(engine, "is_native_iam", False):
+        return True
     result = engine.get_internal_user("root")
     if result.success:
         return True
@@ -190,6 +192,11 @@ def get_current_public_user(engine: InternalUserEngine, username: str) -> Public
 
 def require_active_admin(engine: InternalUserEngine, payload: dict[str, Any]) -> PublicUser:
     """Check current privileges, not just the role captured when a JWT was issued."""
+    if getattr(engine, "is_native_iam", False):
+        current = engine.claims(payload.get("_native_token", ""))
+        if current["role"] != "admin" or current["service"]:
+            raise HTTPException(403, "Superuser session required")
+        return PublicUser.model_validate(current["user"])
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail={"message": "administrator access required"})
     try:
@@ -244,6 +251,8 @@ def list_app_tokens(
     username: str,
     secret: str,
 ) -> list[dict[str, Any]]:
+    if getattr(engine, "is_native_iam", False):
+        return engine.administer("list_tokens")
     result = engine.list_internal_app_tokens()
     if not result.success:
         raise _db_error_to_http(result.error_msg)
@@ -269,6 +278,9 @@ def list_app_tokens(
 
 
 def delete_app_token(engine: InternalUserEngine, username: str, token_id: str) -> None:
+    if getattr(engine, "is_native_iam", False):
+        engine.administer("revoke_token", {"id": token_id})
+        return
     listed = engine.list_internal_app_tokens()
     if not listed.success:
         raise _db_error_to_http(listed.error_msg)

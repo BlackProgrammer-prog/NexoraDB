@@ -39,6 +39,12 @@ class BuildPyWithStrippedNativeLibrary(build_py):
         for library in native_libraries:
             subprocess.run([strip, "--strip-unneeded", str(library)], check=True)
 
+        iam = native_dir / "nexora_iam"
+        if not iam.is_file():
+            raise RuntimeError("Build nexora_iam and stage it in src/nexoradb/native before packaging")
+        subprocess.run([strip, "--strip-unneeded", str(iam)], check=True)
+        iam.chmod(0o755)
+
 
 setup(
     distclass=BinaryDistribution,

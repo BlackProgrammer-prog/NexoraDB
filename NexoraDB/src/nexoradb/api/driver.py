@@ -41,6 +41,44 @@ class QueryResult:
 class NexoraDBClient:
     """Small Python driver for connecting external apps to the NexoraDB API."""
 
+    @classmethod
+    def connect(cls, *, url: str, username: str, password: str, **options):
+        """Native login over verified TLS (HTTP is restricted to loopback)."""
+        client = cls(url=url, token="authentication-pending", **options)
+        try:
+            response = client._request("POST", "/auth/login", {"username": username, "password": password})
+            token = response.get("accessToken")
+            if not isinstance(token, str) or not token.startswith("nxsession_"):
+                raise NexoraDBAuthError("Invalid native authentication response")
+            client.token = token
+            client._owns_session = True
+            return client
+        except BaseException:
+            client.close()
+            raise
+
+    @classmethod
+    def complete_password_reset(cls, *, url: str, reset_token: str, new_password: str, **options):
+        with cls(url=url, token="authentication-pending", **options) as client:
+            return client._request("POST", "/auth/reset-password",
+                                   {"resetToken": reset_token, "newPassword": new_password})
+
+    def change_password(self, current_password: str, new_password: str):
+        result = self._request("POST", "/auth/change-password",
+                               {"currentPassword": current_password, "newPassword": new_password})
+        self.token = ""
+        self._owns_session = False
+        self.close()
+        return result
+
+    def logout(self):
+        self._owns_session = False
+        try:
+            self._request("POST", "/auth/logout", {})
+        finally:
+            self.token = ""
+            self.close()
+
     def __init__(self, *, url: str, token: str, timeout: float = 10.0,
                  max_connections: int = 16, pool_timeout: float = 2.0, http2: bool = False,
                  ssl_context: ssl.SSLContext | None = None) -> None:
@@ -60,6 +98,7 @@ class NexoraDBClient:
             raise ValueError("TLS hostname and certificate verification must remain enabled")
         self.url = url.rstrip("/")
         self.token = token
+        self._owns_session = False
         self.timeout = timeout
         self._slots = BoundedSemaphore(max_connections)
         self._pool_timeout = pool_timeout
@@ -77,6 +116,14 @@ class NexoraDBClient:
         )
 
     def close(self):
+        if self._owns_session:
+            self._owns_session = False
+            try:
+                self._request("POST", "/auth/logout", {})
+            except NexoraDBError:
+                pass  # An unreachable server expires its native session normally.
+            finally:
+                self.token = ""
         self._client.close()
 
     def pool_stats(self):
@@ -222,6 +269,8 @@ class NexoraDBClient:
                         if method == "POST":
                             raise NexoraDBOutcomeUnknown("Response too large; request may have committed")
                         raise NexoraDBError("Response exceeds 32MiB")
+                if response.status_code in {204, 205} and not encoded:
+                    return {}
                 return json.loads(encoded)
         except httpx.PoolTimeout as exc:
             raise NexoraDBPoolBusy("Pool acquisition timeout; request was not sent") from exc

@@ -1,5 +1,10 @@
 # NexoraDB Internal Database Users
 
+> Historical design for the legacy identity collection. Enrolled databases now
+> use native IAM authority and credential hashing. For the implemented behavior,
+> see [native IAM](security/native-iam.md) and
+> [مدیریت کاربران و بازیابی رمز](security/users-and-recovery-fa.md).
+
 این سند قرارداد نهایی بین بک‌اند Python/FastAPI و هسته C++ NexoraDB برای نگهداری کاربران داخلی دیتابیس است. هدف این است که اطلاعات کاربران دیتابیس مثل root/admin/application user در یک فضای داخلی ذخیره شود، اما برای کاربران عادی دیتابیس، queryهای عمومی و پنل ادمین قابل مشاهده یا دسترسی نباشد.
 
 ## هدف

@@ -59,6 +59,19 @@ start: (statement ";")+
           | show_performance
           | set_performance
           | show_index_advice
+          | define_role
+          | set_user_roles
+          | set_user_grants
+          | show_security_users
+          | show_security_roles
+
+// IAM administration contains no password/reset-token syntax.
+define_role: "CREATE"i "OR"i "REPLACE"i "ROLE"i NAME "GRANTS"i object_value role_parents?
+role_parents: "INHERITS"i array_value
+set_user_roles: "ALTER"i "USER"i string_arg "SET"i "ROLES"i array_value
+set_user_grants: "ALTER"i "USER"i string_arg "SET"i "GRANTS"i object_value
+show_security_users: "SHOW"i "SECURITY"i "USERS"i
+show_security_roles: "SHOW"i "SECURITY"i "ROLES"i
 
 show_performance: "SHOW"i "PERFORMANCE"i
 set_performance: "SET"i "PERFORMANCE"i NAME "=" value

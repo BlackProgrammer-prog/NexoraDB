@@ -274,3 +274,34 @@ cmake --preset debug
 ```
 
 Never remove the repository root or the entire home directory.
+
+## Pinned dependency registry
+
+Before configuring a source checkout, run from the repository root:
+
+```sh
+bash scripts/native_prerequisites.sh --install  # Ubuntu 22.04
+bash scripts/bootstrap_vcpkg.sh
+python3 scripts/check_vcpkg_registry.py
+```
+
+Use `bash scripts/native_prerequisites.sh --check` for a read-only check on an
+already prepared host. The archive macros from `autoconf-archive` are required
+in addition to the `autoconf` executable. Cached vcpkg binaries can conceal a
+missing macro package; the debug CI job therefore sets
+`VCPKG_BINARY_SOURCES=clear` and builds dependencies from source. Source archive
+downloads can still be cached. On a failed dependency build, native-quality and
+publication workflows retain the manifest install log and port build logs.
+
+`cmake/vcpkg-revision.txt` pins the registry/tool checkout used by native,
+publication and performance workflows. It is separate from the manifest's
+`builtin-baseline`: that older baseline preserves existing dependency versions,
+while the pinned registry contains newer explicit overrides such as libsodium
+1.0.22. Do not reset the registry checkout to the baseline commit. Cache keys
+include both the manifest and registry revision. The bootstrap fails before
+CMake if a requested override is missing from the pinned version database.
+
+The `tsan-full` workflow runs configure/build as well as CTest under
+`setarch "$(uname -m)" -R`: Autoconf probes and GoogleTest discovery execute
+instrumented binaries during configuration/build too. This does not disable
+ThreadSanitizer instrumentation.

@@ -4,13 +4,25 @@
 
 ## اجرای دیتابیس و داشبورد React
 
+از نسخهٔ ۰.۵.۳، قبل از اجرای سرور باید مالک را آفلاین بسازید. برای دیتابیس خالی:
+
+```bash
+nexoradb-iam --version
+nexoradb-iam init /absolute/path/to/nexoradb-data
+export NEXORADB_DB_PATH=/absolute/path/to/nexoradb-data
+```
+
+برای دیتابیس موجود ابتدا سرویس را متوقف و پشتیبان تهیه کنید و به جای `init`،
+`nexoradb-iam adopt /absolute/path/to/nexoradb-data` بزنید. نام مالک دلخواه است؛
+هشت کد بازیابی را آفلاین نگه دارید. مسیر graph را نیز با `NEXORADB_GRAPH_DIR` مشخص کنید.
+
 ```bash
 nexoradb run
 ```
 
 داشبورد: http://127.0.0.1:8000/admin/
 
-اولین بار حساب root بسازید؛ دفعات بعد وارد شوید. برای نسخهٔ نصب‌شده به npm یا سورس پروژه نیاز ندارید.
+با نام و رمز مالک انتخاب‌شده وارد شوید؛ Register عمومی غیرفعال است. برای نسخهٔ نصب‌شده به npm یا سورس پروژه نیاز ندارید. مدیریت کاربران بدون Query در React مسیر `/security` و TUI بخش **Account and access** است. [نقش‌ها و بازیابی رمز در شرایط مختلف](security/users-and-recovery-fa.md) را ببینید.
 
 ## اجرای اپ ترمینالی
 

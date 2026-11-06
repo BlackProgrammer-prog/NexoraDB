@@ -1,6 +1,6 @@
 # NexoraDB
 
-Current version: **0.5.2**. [Release notes](https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/releases/v0.5.2.md).
+Current version: **0.5.3**. [Release notes](https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/releases/v0.5.3.md).
 
 NexoraDB is a hybrid document and graph database engine with a Python API,
 FastAPI administration service, NexoraQL parser, CLI, and bundled web dashboard.
@@ -9,6 +9,22 @@ For installation, usage, architecture, and development documentation, see the
 [project repository](https://github.com/BlackProgrammer-prog/NexoraDB).
 
 NexoraDB is licensed under the Apache License 2.0.
+
+## Native IAM in 0.5.3
+
+Before starting the server, enroll a fresh empty store with
+`nexoradb-iam init /absolute/path/to/db`, or stop the old service, back up and
+explicitly migrate an existing store with `nexoradb-iam adopt /absolute/path/to/db`.
+Set `NEXORADB_DB_PATH` to that absolute path. Save the one-time owner recovery
+factors offline. Owner registration is local; the React Register page cannot
+create the initial account. Only the initial protected owner can grant SuperUser.
+
+React `/security` and TUI **Account and access** provide user/password/permission
+forms. Non-owner password resets use an administrator-issued one-time token;
+owner recovery uses `nexoradb-iam recover /absolute/path/to/db` with the service
+stopped. Read the [IAM guide](https://github.com/BlackProgrammer-prog/NexoraDB/blob/main/docs/security/native-iam.md)
+before migration. Enrolled stores cannot be downgraded in place, and the legacy
+embedded API example below applies only to trusted, unenrolled local stores.
 
 ## Platform support
 
